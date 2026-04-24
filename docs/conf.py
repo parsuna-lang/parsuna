@@ -10,7 +10,7 @@ extensions = [
 
 autosectionlabel_prefix_document = True
 
-exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
+exclude_patterns = ["_build", "Thumbs.db", ".DS_Store", ".venv"]
 
 master_doc = "index"
 
