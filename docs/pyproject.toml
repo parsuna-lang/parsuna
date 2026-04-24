@@ -2,8 +2,8 @@
 name = "parsuna-docs"
 version = "0.0.0"
 description = "Build dependencies for the parsuna Sphinx documentation."
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 dependencies = [
     "sphinx>=9",
-    "furo>=2024.1",
+    "furo>=2025.12",
 ]
