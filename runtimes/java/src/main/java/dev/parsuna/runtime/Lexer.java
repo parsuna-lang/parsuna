@@ -18,14 +18,15 @@ public final class Lexer {
     private boolean eof;
     private int offset;
     private int line = 1, col = 1;
-    private final DfaConfig dfa;
+    private final DfaMatcher matcher;
     private final short eofKind;
     private final short errorKind;
+    private final int[] matchOut = new int[3];
 
-    public Lexer(InputStream in, DfaConfig dfa, short eofKind, short errorKind) {
+    public Lexer(InputStream in, DfaMatcher matcher, short eofKind, short errorKind) {
         this.in = in;
         this.buf = new byte[CHUNK * 2];
-        this.dfa = dfa;
+        this.matcher = matcher;
         this.eofKind = eofKind;
         this.errorKind = errorKind;
     }
@@ -79,26 +80,13 @@ public final class Lexer {
 
     private int[] longestMatch() {
         while (true) {
-            long state = dfa.start;
-            int pos = bufPos;
-            int bestLen = 0;
-            int bestKind = errorKind;
-            while (pos < bufLen) {
-                int b = buf[pos] & 0xFF;
-                long next = dfa.trans[(int)(state * 256) + b] & 0xFFFFFFFFL;
-                if (next == 0) break;
-                pos++;
-                state = next;
-                int acc = dfa.accept[(int) state] & 0xFFFF;
-                if (acc != 0) {
-                    bestLen = pos - bufPos;
-                    bestKind = acc;
-                }
-            }
-            if (!eof && pos == bufLen && bestLen > 0) {
+            matcher.longestMatch(buf, bufPos, bufLen, matchOut);
+            int scanned = matchOut[2];
+            int viewLen = bufLen - bufPos;
+            if (!eof && scanned == viewLen) {
                 if (readMore()) continue;
             }
-            return new int[] { bestLen, bestKind };
+            return matchOut;
         }
     }
 

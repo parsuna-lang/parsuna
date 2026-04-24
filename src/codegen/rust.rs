@@ -1,8 +1,10 @@
+use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::path::PathBuf;
 
 use crate::codegen::common::pascal;
 use crate::codegen::EmittedFile;
+use crate::lowering::lexer_dfa::{DfaTable, DEAD};
 use crate::lowering::{DispatchLeaf, DispatchTree, Op, StateTable};
 
 pub fn emit(st: &StateTable) -> Vec<EmittedFile> {
@@ -12,7 +14,7 @@ pub fn emit(st: &StateTable) -> Vec<EmittedFile> {
     emit_token_kinds(&mut s, st);
     emit_rule_kinds(&mut s, st);
     emit_reexports(&mut s);
-    emit_lexer_config(&mut s, st);
+    emit_compiled_dfa(&mut s, st);
     emit_tables(&mut s, st);
     emit_parser(&mut s);
     emit_step(&mut s, st);
@@ -52,7 +54,7 @@ fn emit_prelude(s: &mut String, _st: &StateTable) {
     writeln!(s, "use std::io::Read;").unwrap();
     writeln!(
         s,
-        "use parsuna_rt::{{DfaConfig, LexerBackend, Scanner, StreamingLexer, TERMINATED}};"
+        "use parsuna_rt::{{DfaMatch, DfaMatcher, LexerBackend, Scanner, StreamingLexer, TERMINATED}};"
     )
     .unwrap();
     writeln!(s).unwrap();
@@ -105,6 +107,7 @@ fn emit_token_kinds(s: &mut String, st: &StateTable) {
     writeln!(s, "        }}").unwrap();
     writeln!(s, "    }}").unwrap();
     writeln!(s, "    const EOF: Self = Self::Eof;").unwrap();
+    writeln!(s, "    const ERROR: Self = Self::Error;").unwrap();
     writeln!(s, "}}").unwrap();
     writeln!(s).unwrap();
 }
@@ -155,76 +158,163 @@ fn emit_reexports(s: &mut String) {
     s.push_str("pub type Token<'a> = parsuna_rt::Token<'a, TokenKind>;\n\n");
 }
 
-fn emit_lexer_config(s: &mut String, st: &StateTable) {
+fn emit_compiled_dfa(s: &mut String, st: &StateTable) {
     let dfa = &st.lexer_dfa;
-    let n_states = dfa.states.len();
 
     writeln!(s).unwrap();
+    writeln!(s, "/// Compiled lexer DFA for this grammar.").unwrap();
+    writeln!(s, "///").unwrap();
+    writeln!(
+        s,
+        "/// Zero-sized type whose [`DfaMatcher`] impl drives the lexer via a"
+    )
+    .unwrap();
+    writeln!(
+        s,
+        "/// per-state `match` rather than a transition table. Generated code"
+    )
+    .unwrap();
+    writeln!(s, "/// supplies this to [`Scanner`]/[`StreamingLexer`].").unwrap();
+    writeln!(s, "pub struct LexerDfa;").unwrap();
+    writeln!(s).unwrap();
 
-    writeln!(s, "static DFA_TRANS: &[u32] = &[").unwrap();
-    for (i, st_) in dfa.states.iter().enumerate() {
-        write!(s, "    ").unwrap();
-        for (j, t) in st_.trans.iter().enumerate() {
-            write!(s, "{}", t).unwrap();
-            if !(i == n_states - 1 && j == 255) {
-                write!(s, ", ").unwrap();
+    writeln!(s, "impl DfaMatcher<TokenKind> for LexerDfa {{").unwrap();
+    writeln!(s, "    #[inline]").unwrap();
+    writeln!(
+        s,
+        "    fn longest_match(buf: &[u8], start: usize) -> DfaMatch<TokenKind> {{"
+    )
+    .unwrap();
+    writeln!(s, "        let mut pos = start;").unwrap();
+    writeln!(s, "        let mut best_len: usize = 0;").unwrap();
+    writeln!(s, "        let mut best_kind: TokenKind = TokenKind::Error;").unwrap();
+    writeln!(s, "        let mut state: u32 = {};", dfa.start).unwrap();
+    writeln!(s, "        loop {{").unwrap();
+    writeln!(s, "            match state {{").unwrap();
+
+    for (id, ds) in dfa.states.iter().enumerate() {
+        if id as u32 == DEAD {
+            continue;
+        }
+        emit_dfa_state_arm(s, st, dfa, id as u32, ds, "                ");
+    }
+
+    writeln!(s, "                _ => break,").unwrap();
+    writeln!(s, "            }}").unwrap();
+    writeln!(s, "        }}").unwrap();
+    writeln!(
+        s,
+        "        DfaMatch {{ best_len, best_kind, scanned: pos - start }}"
+    )
+    .unwrap();
+    writeln!(s, "    }}").unwrap();
+    writeln!(s, "}}").unwrap();
+    writeln!(s).unwrap();
+}
+
+fn emit_dfa_state_arm(
+    s: &mut String,
+    st: &StateTable,
+    dfa: &DfaTable,
+    id: u32,
+    ds: &crate::lowering::lexer_dfa::DfaState,
+    ind: &str,
+) {
+    let arms = build_byte_arms(&ds.trans);
+    if arms.is_empty() {
+        writeln!(s, "{}{} => break,", ind, id).unwrap();
+        return;
+    }
+    writeln!(s, "{}{} => match buf.get(pos) {{", ind, id).unwrap();
+    for arm in &arms {
+        let pat = format_byte_pattern(&arm.ranges);
+        let is_single_byte = arm.ranges.len() == 1 && arm.ranges[0].0 == arm.ranges[0].1;
+        let wrapped = if is_single_byte {
+            pat
+        } else {
+            format!("({})", pat)
+        };
+        let target_accept = dfa.states[arm.target as usize].accept;
+        write!(
+            s,
+            "{}    Some(&{}) => {{ pos += 1; state = {};",
+            ind, wrapped, arm.target
+        )
+        .unwrap();
+        if let Some(kind) = target_accept {
+            write!(
+                s,
+                " best_len = pos - start; best_kind = {};",
+                token_variant(st, kind)
+            )
+            .unwrap();
+        }
+        writeln!(s, " }}").unwrap();
+    }
+    writeln!(s, "{}    _ => break,", ind).unwrap();
+    writeln!(s, "{}}},", ind).unwrap();
+}
+
+struct ByteArm {
+    target: u32,
+    ranges: Vec<(u8, u8)>,
+}
+
+fn build_byte_arms(trans: &[u32]) -> Vec<ByteArm> {
+    let mut by_target: BTreeMap<u32, Vec<u8>> = BTreeMap::new();
+    for (b, &t) in trans.iter().enumerate() {
+        if t != DEAD {
+            by_target.entry(t).or_default().push(b as u8);
+        }
+    }
+    by_target
+        .into_iter()
+        .map(|(target, bytes)| {
+            let mut ranges: Vec<(u8, u8)> = Vec::new();
+            let mut iter = bytes.into_iter();
+            if let Some(first) = iter.next() {
+                let mut lo = first;
+                let mut hi = first;
+                for b in iter {
+                    if b == hi + 1 {
+                        hi = b;
+                    } else {
+                        ranges.push((lo, hi));
+                        lo = b;
+                        hi = b;
+                    }
+                }
+                ranges.push((lo, hi));
             }
-        }
-        writeln!(s).unwrap();
-    }
-    writeln!(s, "];").unwrap();
-    writeln!(s).unwrap();
+            ByteArm { target, ranges }
+        })
+        .collect()
+}
 
-    writeln!(s, "static DFA_ACCEPT: &[i16] = &[").unwrap();
-    write!(s, "    ").unwrap();
-    for (i, st_) in dfa.states.iter().enumerate() {
-        let v = st_.accept.unwrap_or(0);
-        write!(s, "{}", v).unwrap();
-        if i != n_states - 1 {
-            write!(s, ", ").unwrap();
-        }
-    }
-    writeln!(s).unwrap();
-    writeln!(s, "];").unwrap();
-    writeln!(s).unwrap();
-
-    writeln!(s, "/// Packed lexer DFA for this grammar.").unwrap();
-    writeln!(
-        s,
-        "///"
-    )
-    .unwrap();
-    writeln!(
-        s,
-        "/// Exposed so callers can plug it into a custom [`LexerBackend`] if the"
-    )
-    .unwrap();
-    writeln!(
-        s,
-        "/// default `Scanner`/`StreamingLexer` don't fit their use case."
-    )
-    .unwrap();
-    writeln!(s, "pub const LEXER_CONFIG: DfaConfig = DfaConfig {{").unwrap();
-    writeln!(s, "    states: {},", n_states).unwrap();
-    writeln!(s, "    start: {},", dfa.start).unwrap();
-    writeln!(s, "    trans: DFA_TRANS,").unwrap();
-    writeln!(s, "    accept: DFA_ACCEPT,").unwrap();
-    writeln!(s, "}};").unwrap();
-    writeln!(s).unwrap();
-
-    write!(s, "static SKIP_KINDS: &[i16] = &[").unwrap();
-    let mut first = true;
-    for t in &st.tokens {
-        if t.skip {
-            if !first {
-                s.push_str(", ");
+fn format_byte_pattern(ranges: &[(u8, u8)]) -> String {
+    ranges
+        .iter()
+        .map(|(lo, hi)| {
+            if lo == hi {
+                byte_literal(*lo)
+            } else {
+                format!("{}..={}", byte_literal(*lo), byte_literal(*hi))
             }
-            first = false;
-            write!(s, "{}", t.kind).unwrap();
-        }
+        })
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+fn byte_literal(b: u8) -> String {
+    match b {
+        b'\\' => "b'\\\\'".to_string(),
+        b'\'' => "b'\\''".to_string(),
+        b'\n' => "b'\\n'".to_string(),
+        b'\r' => "b'\\r'".to_string(),
+        b'\t' => "b'\\t'".to_string(),
+        0x20..=0x7E => format!("b'{}'", b as char),
+        _ => format!("0x{:02x}", b),
     }
-    writeln!(s, "];").unwrap();
-    writeln!(s).unwrap();
 }
 
 fn emit_tables(s: &mut String, st: &StateTable) {
@@ -560,13 +650,13 @@ fn emit_public_api(s: &mut String, st: &StateTable) {
             .unwrap();
             writeln!(
                 s,
-                "pub fn parse_{name}_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind>> {{",
+                "pub fn parse_{name}_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>> {{",
                 name = name
             )
             .unwrap();
             writeln!(
                 s,
-                "    Parser::new(Scanner::new(src, &LEXER_CONFIG), ENTRY_{upper})",
+                "    Parser::new(Scanner::new(src), ENTRY_{upper})",
                 upper = name.to_uppercase()
             )
             .unwrap();
@@ -595,13 +685,13 @@ fn emit_public_api(s: &mut String, st: &StateTable) {
             .unwrap();
             writeln!(
                 s,
-                "pub fn parse_{name}_from_reader<R: Read>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind>> {{",
+                "pub fn parse_{name}_from_reader<R: Read>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>> {{",
                 name = name
             )
             .unwrap();
             writeln!(
                 s,
-                "    Parser::new(StreamingLexer::new(reader, &LEXER_CONFIG), ENTRY_{upper})",
+                "    Parser::new(StreamingLexer::new(reader), ENTRY_{upper})",
                 upper = name.to_uppercase()
             )
             .unwrap();

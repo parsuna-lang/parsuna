@@ -1,8 +1,10 @@
+use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::path::PathBuf;
 
 use crate::codegen::common::screaming_snake;
 use crate::codegen::EmittedFile;
+use crate::lowering::lexer_dfa::DEAD;
 use crate::lowering::{DispatchLeaf, DispatchTree, Op, StateTable};
 
 pub fn emit(st: &StateTable) -> Vec<EmittedFile> {
@@ -391,7 +393,7 @@ fn emit_impl(c: &mut String, st: &StateTable, stem: &str, upper: &str) {
     writeln!(c).unwrap();
 
     emit_name_tables(c, st, stem, upper);
-    emit_dfa(c, st);
+    emit_dfa(c, st, upper);
     emit_tables(c, st, upper);
     emit_skip(c, st, upper);
     emit_step(c, st, stem, upper);
@@ -427,41 +429,150 @@ fn emit_name_tables(c: &mut String, st: &StateTable, stem: &str, upper: &str) {
     writeln!(c).unwrap();
 }
 
-fn emit_dfa(c: &mut String, st: &StateTable) {
+fn emit_dfa(c: &mut String, st: &StateTable, upper: &str) {
     let dfa = &st.lexer_dfa;
 
-    writeln!(c, "static const uint32_t dfa_trans[] = {{").unwrap();
-    for state in &dfa.states {
-        write!(c, "  ").unwrap();
-        for (j, t) in state.trans.iter().enumerate() {
-            if j == 255 {
-                write!(c, "{},", t).unwrap();
-            } else {
-                write!(c, "{}, ", t).unwrap();
-            }
-        }
-        writeln!(c).unwrap();
-    }
-    writeln!(c, "}};").unwrap();
-    writeln!(c, "static const uint16_t dfa_accept[] = {{").unwrap();
-    write!(c, "  ").unwrap();
-    for (i, state) in dfa.states.iter().enumerate() {
-        let v = state.accept.unwrap_or(0);
-        if i == dfa.states.len() - 1 {
-            write!(c, "{},", v).unwrap();
-        } else {
-            write!(c, "{}, ", v).unwrap();
-        }
-    }
-    writeln!(c).unwrap();
-    writeln!(c, "}};").unwrap();
+    writeln!(c, "/* Compiled lexer DFA: one switch arm per DFA state. */").unwrap();
     writeln!(
         c,
-        "static const DfaConfig dfa_config = {{ {}u, dfa_trans, dfa_accept }};",
-        dfa.start
+        "static void longest_match_impl(const char *buf, size_t buf_len, size_t start,"
     )
     .unwrap();
+    writeln!(
+        c,
+        "                               int *best_kind, size_t *best_len, size_t *scanned) {{"
+    )
+    .unwrap();
+    writeln!(c, "  size_t pos = start;").unwrap();
+    writeln!(c, "  size_t bl = 0;").unwrap();
+    writeln!(c, "  int bk = {}_TK_ERROR;", upper).unwrap();
+    writeln!(c, "  uint32_t state = {}u;", dfa.start).unwrap();
+    writeln!(c, "  for (;;) {{").unwrap();
+    writeln!(c, "    switch (state) {{").unwrap();
+    for (id, ds) in dfa.states.iter().enumerate() {
+        if id as u32 == DEAD {
+            continue;
+        }
+        emit_dfa_state_arm(c, st, dfa, id as u32, ds, upper);
+    }
+    writeln!(c, "      default: goto done;").unwrap();
+    writeln!(c, "    }}").unwrap();
+    writeln!(c, "  }}").unwrap();
+    writeln!(c, "done:").unwrap();
+    writeln!(c, "  *best_kind = bk;").unwrap();
+    writeln!(c, "  *best_len = bl;").unwrap();
+    writeln!(c, "  *scanned = pos - start;").unwrap();
+    writeln!(c, "}}").unwrap();
     writeln!(c).unwrap();
+}
+
+fn emit_dfa_state_arm(
+    c: &mut String,
+    st: &StateTable,
+    dfa: &crate::lowering::lexer_dfa::DfaTable,
+    id: u32,
+    ds: &crate::lowering::lexer_dfa::DfaState,
+    upper: &str,
+) {
+    let arms = build_byte_arms(&ds.trans);
+    if arms.is_empty() {
+        writeln!(c, "      case {}: goto done;", id).unwrap();
+        return;
+    }
+    writeln!(c, "      case {}: {{", id).unwrap();
+    writeln!(c, "        if (pos >= buf_len) goto done;").unwrap();
+    writeln!(c, "        unsigned char b = (unsigned char)buf[pos];").unwrap();
+    let mut first = true;
+    for arm in &arms {
+        let cond = byte_cond(&arm.ranges);
+        let kw = if first { "if" } else { "else if" };
+        first = false;
+        let target_accept = dfa.states[arm.target as usize].accept;
+        write!(
+            c,
+            "        {} ({}) {{ pos++; state = {}u;",
+            kw, cond, arm.target
+        )
+        .unwrap();
+        if let Some(kind) = target_accept {
+            write!(
+                c,
+                " bl = pos - start; bk = {};",
+                c_token_name(st, upper, kind)
+            )
+            .unwrap();
+        }
+        writeln!(c, " }}").unwrap();
+    }
+    writeln!(c, "        else goto done;").unwrap();
+    writeln!(c, "        break;").unwrap();
+    writeln!(c, "      }}").unwrap();
+}
+
+struct ByteArm {
+    target: u32,
+    ranges: Vec<(u8, u8)>,
+}
+
+fn build_byte_arms(trans: &[u32]) -> Vec<ByteArm> {
+    let mut by_target: BTreeMap<u32, Vec<u8>> = BTreeMap::new();
+    for (b, &t) in trans.iter().enumerate() {
+        if t != DEAD {
+            by_target.entry(t).or_default().push(b as u8);
+        }
+    }
+    by_target
+        .into_iter()
+        .map(|(target, bytes)| {
+            let mut ranges: Vec<(u8, u8)> = Vec::new();
+            let mut iter = bytes.into_iter();
+            if let Some(first) = iter.next() {
+                let mut lo = first;
+                let mut hi = first;
+                for b in iter {
+                    if b == hi + 1 {
+                        hi = b;
+                    } else {
+                        ranges.push((lo, hi));
+                        lo = b;
+                        hi = b;
+                    }
+                }
+                ranges.push((lo, hi));
+            }
+            ByteArm { target, ranges }
+        })
+        .collect()
+}
+
+fn byte_cond(ranges: &[(u8, u8)]) -> String {
+    ranges
+        .iter()
+        .map(|(lo, hi)| {
+            if lo == hi {
+                format!("b == {}", byte_literal(*lo))
+            } else {
+                format!(
+                    "(b >= {} && b <= {})",
+                    byte_literal(*lo),
+                    byte_literal(*hi)
+                )
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" || ")
+}
+
+fn byte_literal(b: u8) -> String {
+    match b {
+        b'\\' => "'\\\\'".to_string(),
+        b'\'' => "'\\''".to_string(),
+        b'\n' => "'\\n'".to_string(),
+        b'\r' => "'\\r'".to_string(),
+        b'\t' => "'\\t'".to_string(),
+        0x20..=0x7E => format!("'{}'", b as char),
+        _ => format!("0x{:02x}", b),
+    }
 }
 
 fn emit_tables(c: &mut String, st: &StateTable, upper: &str) {

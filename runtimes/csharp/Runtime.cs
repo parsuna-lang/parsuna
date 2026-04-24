@@ -61,23 +61,21 @@ public sealed record TokenEvent(Token Token) : Event;
 /// <summary>A recoverable parse or lex error.</summary>
 public sealed record ErrorEvent(ParseError Error) : Event;
 
-/// <summary>Packed lexer DFA. State 0 is the dead sink; real states start at 1.</summary>
-public sealed class DfaConfig
-{
-    public uint Start { get; }
-    /// <summary>Flat table: <c>Trans[state * 256 + byte]</c> is the next state (0 = dead).</summary>
-    public uint[] Trans { get; }
-    /// <summary>Acceptance table: <c>Accept[state]</c> is the token-kind id (0 = non-accepting).</summary>
-    public ushort[] Accept { get; }
-    public DfaConfig(uint start, uint[] trans, ushort[] accept)
-    {
-        Start = start;
-        Trans = trans;
-        Accept = accept;
-    }
-}
+/// <summary>
+/// Grammar-specific compiled lexer DFA. Generated code supplies this as a
+/// method: a per-state switch that avoids the data-dependent table load a
+/// table-driven DFA pays on every byte.
+/// </summary>
+/// <remarks>
+/// Writes three ints to <paramref name="output"/>:
+/// [0] bestLen (0 = no accept), [1] bestKind (error sentinel when no
+/// accept reached), [2] scanned (== bufLen - start when the scan ran out
+/// of buffer rather than hitting a dead transition; used to detect
+/// buffer exhaustion mid-token).
+/// </remarks>
+public delegate void DfaMatcher(byte[] buf, int start, int bufLen, int[] output);
 
-/// <summary>DFA-driven byte-level lexer. Reads from a <see cref="Stream"/> in 16 KiB chunks.</summary>
+/// <summary>Byte-level lexer. Reads from a <see cref="Stream"/> in 16 KiB chunks. The grammar-specific DFA is supplied as a <see cref="DfaMatcher"/>.</summary>
 public sealed class Lexer
 {
     private const int Chunk = 16384;
@@ -90,15 +88,16 @@ public sealed class Lexer
     private int _offset;
     private int _line = 1;
     private int _col = 1;
-    private readonly DfaConfig _dfa;
+    private readonly DfaMatcher _matcher;
     private readonly short _eofKind;
     private readonly short _errorKind;
+    private readonly int[] _matchOut = new int[3];
 
-    public Lexer(Stream stream, DfaConfig dfa, short eofKind, short errorKind)
+    public Lexer(Stream stream, DfaMatcher matcher, short eofKind, short errorKind)
     {
         _stream = stream;
         _buf = new byte[Chunk * 2];
-        _dfa = dfa;
+        _matcher = matcher;
         _eofKind = eofKind;
         _errorKind = errorKind;
     }
@@ -165,28 +164,14 @@ public sealed class Lexer
     {
         while (true)
         {
-            uint state = _dfa.Start;
-            int pos = _bufPos;
-            int bestLen = 0;
-            short bestKind = _errorKind;
-            while (pos < _bufLen)
-            {
-                uint next = _dfa.Trans[(int)(state * 256) + _buf[pos]];
-                if (next == 0) break;
-                pos++;
-                state = next;
-                ushort acc = _dfa.Accept[state];
-                if (acc != 0)
-                {
-                    bestLen = pos - _bufPos;
-                    bestKind = (short)acc;
-                }
-            }
-            if (!_eof && pos == _bufLen && bestLen > 0)
+            _matcher(_buf, _bufPos, _bufLen, _matchOut);
+            int scanned = _matchOut[2];
+            int viewLen = _bufLen - _bufPos;
+            if (!_eof && scanned == viewLen)
             {
                 if (ReadMore()) continue;
             }
-            return (bestLen, bestKind);
+            return (_matchOut[0], (short)_matchOut[1]);
         }
     }
 

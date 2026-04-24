@@ -145,7 +145,7 @@ fn build_lib_rs(
         .unwrap();
         writeln!(&mut out, "#[pyo3::pyfunction(name = \"parse_{}\")]", r).unwrap();
         writeln!(&mut out, "fn parse_{}_py(src: &str) -> PyParser {{", r).unwrap();
-        writeln!(&mut out, "    let lex = parsuna_rt::StreamingLexer::new(std::io::Cursor::new(src.as_bytes().to_vec()), &LEXER_CONFIG);").unwrap();
+        writeln!(&mut out, "    let lex = parsuna_rt::StreamingLexer::<_, TokenKind, LexerDfa>::new(std::io::Cursor::new(src.as_bytes().to_vec()));").unwrap();
         writeln!(
             &mut out,
             "    PyParser {{ inner: Parser::new(lex, ENTRY_{}) }}",
@@ -198,7 +198,7 @@ crate-type = ["cdylib"]
 [dependencies]
 # Point this `path` at your local parsuna-rt checkout, or replace with a
 # crates.io dependency once parsuna-rt is published.
-parsuna-rt = {{ path = "../../runtimes/rust" }}
+parsuna-rt = {{ path = "../../../runtimes/rust" }}
 pyo3 = {{ version = "0.20", features = ["extension-module"] }}
 "#
     )
@@ -328,7 +328,7 @@ fn to_py_event(ev: Event) -> PyEvent {
 /// Pull-based parser. Iterate to walk the parse as a sequence of
 /// [`PyEvent`] values, or call `next_event` manually.
 #[pyclass(unsendable, name = "Parser")]
-struct PyParser { inner: Parser<'static, parsuna_rt::StreamingLexer<std::io::Cursor<Vec<u8>>, TokenKind>> }
+struct PyParser { inner: Parser<'static, parsuna_rt::StreamingLexer<std::io::Cursor<Vec<u8>>, TokenKind, LexerDfa>> }
 
 #[pymethods]
 impl PyParser {

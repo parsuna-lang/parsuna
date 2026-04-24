@@ -76,17 +76,21 @@ type Event struct {
 // Terminated is the sentinel state that means "parser finished".
 const Terminated = -1
 
-// DfaConfig is the packed lexer DFA the runtime walks. State 0 is the
-// dead sink; real states start at 1.
-type DfaConfig struct {
-	Start  uint32
-	Trans  []uint32 // states*256 entries
-	Accept []uint16
-}
+// MatcherFunc is the grammar-specific compiled DFA the runtime drives.
+// It scans buf[start:] for the longest matching token. Returns
+// (bestLen, bestKind, scanned):
+//   - bestLen: bytes consumed by the longest match (0 means no accept).
+//   - bestKind: token kind of the longest match, or the error-kind sentinel
+//     when no accept state was reached.
+//   - scanned: total bytes walked past start; equals len(buf)-start when
+//     the scan stopped at end of input rather than a dead transition. The
+//     streaming lexer uses this to detect buffer exhaustion mid-token.
+type MatcherFunc func(buf []byte, start int) (int, int16, int)
 
 const lexChunk = 16384
 
-// Lexer is a streaming DFA-driven lexer over an io.Reader.
+// Lexer is a streaming DFA-driven lexer over an io.Reader. The grammar-
+// specific DFA is supplied as a MatcherFunc.
 type Lexer struct {
 	reader    io.Reader
 	buf       []byte
@@ -94,15 +98,15 @@ type Lexer struct {
 	eof       bool
 	offset    uint32
 	line, col uint32
-	dfa       *DfaConfig
+	matcher   MatcherFunc
 	eofKind   int16
 	errorKind int16
 }
 
 // NewLexer builds a lexer over r. eofKind / errorKind are returned when
 // input ends or a byte matches no pattern.
-func NewLexer(r io.Reader, dfa *DfaConfig, eofKind, errorKind int16) *Lexer {
-	return &Lexer{reader: r, line: 1, col: 1, dfa: dfa, eofKind: eofKind, errorKind: errorKind}
+func NewLexer(r io.Reader, matcher MatcherFunc, eofKind, errorKind int16) *Lexer {
+	return &Lexer{reader: r, line: 1, col: 1, matcher: matcher, eofKind: eofKind, errorKind: errorKind}
 }
 
 func (l *Lexer) pos() Pos { return Pos{Offset: l.offset, Line: l.line, Column: l.col} }
@@ -178,24 +182,9 @@ func (l *Lexer) advance(n int) {
 
 func (l *Lexer) longestMatch() (int, int16) {
 	for {
-		state := l.dfa.Start
-		pos := l.bufPos
-		bestLen := 0
-		bestKind := l.errorKind
-		for pos < len(l.buf) {
-			next := l.dfa.Trans[int(state)*256+int(l.buf[pos])]
-			if next == 0 {
-				break
-			}
-			pos++
-			state = next
-			acc := l.dfa.Accept[state]
-			if acc != 0 {
-				bestLen = pos - l.bufPos
-				bestKind = int16(acc)
-			}
-		}
-		if !l.eof && pos == len(l.buf) && bestLen > 0 {
+		bestLen, bestKind, scanned := l.matcher(l.buf, l.bufPos)
+		viewLen := len(l.buf) - l.bufPos
+		if !l.eof && scanned == viewLen {
 			if l.readMore() {
 				continue
 			}

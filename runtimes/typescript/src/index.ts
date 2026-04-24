@@ -61,14 +61,26 @@ export type Event<TK = number, RK = number> =
   | { tag: "token"; token: Token<TK> }
   | { tag: "error"; error: ParseError };
 
-/** Packed lexer DFA. State 0 is the dead sink; real states start at 1. */
-export interface DfaConfig {
-  start: number;
-  /** Flat table: `trans[state * 256 + byte]` is the next state, or 0 (dead). */
-  trans: Uint32Array;
-  /** Acceptance table: `accept[state]` is the token-kind id, or 0 if not accepting. */
-  accept: Uint16Array;
+/**
+ * Result of running the grammar-specific compiled DFA over a byte slice.
+ *
+ * `bestLen`/`bestKind` are the longest match found. `scanned` is how many
+ * bytes the scan actually walked past `start` before it died — equals
+ * `buf.length - start` when the scan stopped at end of input rather than
+ * at a dead transition.
+ */
+export interface DfaMatch<TK> {
+  bestLen: number;
+  bestKind: TK;
+  scanned: number;
 }
+
+/**
+ * Grammar-specific compiled DFA. Generated code supplies one of these:
+ * a per-state `switch` that avoids the data-dependent table load a
+ * table-driven DFA pays on every byte.
+ */
+export type MatcherFunc<TK> = (buf: Uint8Array, start: number) => DfaMatch<TK>;
 
 const _TEXT_DECODER = new TextDecoder();
 function decodeBytes(buf: Uint8Array, start: number, end: number): string {
@@ -76,7 +88,8 @@ function decodeBytes(buf: Uint8Array, start: number, end: number): string {
 }
 
 /**
- * DFA-driven byte-level lexer over a UTF-8 encoded string.
+ * Byte-level lexer over a UTF-8 encoded string, driven by a compiled DFA
+ * supplied via [`MatcherFunc`].
  *
  * `eofKind` / `errorKind` are the sentinel kinds the runtime emits at
  * end-of-input and on no-match respectively.
@@ -89,7 +102,7 @@ export class Lexer<TK extends number> {
 
   constructor(
     src: string,
-    private readonly dfa: DfaConfig,
+    private readonly matcher: MatcherFunc<TK>,
     private readonly eofKind: TK,
     private readonly errorKind: TK,
   ) {
@@ -135,21 +148,7 @@ export class Lexer<TK extends number> {
       return { kind: this.eofKind, span: pointSpan(p), text: "" };
     }
 
-    let state = this.dfa.start;
-    let pos = this.i;
-    let bestLen = 0;
-    let bestKind: TK = this.errorKind;
-    while (pos < this.bytes.length) {
-      const next = this.dfa.trans[state * 256 + this.bytes[pos]];
-      if (next === 0) break;
-      pos++;
-      state = next;
-      const acc = this.dfa.accept[state];
-      if (acc !== 0) {
-        bestLen = pos - this.i;
-        bestKind = acc as TK;
-      }
-    }
+    const { bestLen, bestKind } = this.matcher(this.bytes, this.i);
 
     const start = this.pos();
     if (bestLen === 0) {

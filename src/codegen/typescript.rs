@@ -1,8 +1,10 @@
+use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::path::PathBuf;
 
 use crate::codegen::common::pascal;
 use crate::codegen::EmittedFile;
+use crate::lowering::lexer_dfa::DEAD;
 use crate::lowering::{DispatchLeaf, DispatchTree, Op, StateTable};
 
 pub fn emit(st: &StateTable) -> Vec<EmittedFile> {
@@ -51,7 +53,7 @@ fn emit_header(s: &mut String, _st: &StateTable) {
 fn emit_imports(s: &mut String) {
     writeln!(
         s,
-        "import {{ DfaConfig, Lexer, Parser, TERMINATED }} from \"parsuna-rt\";"
+        "import {{ DfaMatch, Lexer, Parser, TERMINATED }} from \"parsuna-rt\";"
     )
     .unwrap();
     writeln!(
@@ -170,38 +172,45 @@ fn rule_variant(st: &StateTable, kind: u16) -> String {
 fn emit_dfa(s: &mut String, st: &StateTable) {
     let dfa = &st.lexer_dfa;
 
-    writeln!(s, "const DFA_TRANS = new Uint32Array([").unwrap();
-    for (i, state) in dfa.states.iter().enumerate() {
-        write!(s, "  ").unwrap();
-        for (j, t) in state.trans.iter().enumerate() {
-            let is_last = i == dfa.states.len() - 1 && j == 255;
-            if is_last {
-                write!(s, "{}", t).unwrap();
-            } else {
-                write!(s, "{}, ", t).unwrap();
-            }
-        }
-        writeln!(s).unwrap();
-    }
-    writeln!(s, "]);").unwrap();
-    writeln!(s, "const DFA_ACCEPT = new Uint16Array([").unwrap();
-    write!(s, "  ").unwrap();
-    for (i, state) in dfa.states.iter().enumerate() {
-        let v = state.accept.unwrap_or(0);
-        if i == dfa.states.len() - 1 {
-            write!(s, "{}", v).unwrap();
-        } else {
-            write!(s, "{}, ", v).unwrap();
-        }
-    }
-    writeln!(s).unwrap();
-    writeln!(s, "]);").unwrap();
+    writeln!(s, "/**").unwrap();
     writeln!(
         s,
-        "const LEXER_CONFIG: DfaConfig = {{ start: {}, trans: DFA_TRANS, accept: DFA_ACCEPT }};",
-        dfa.start
+        " * Scan `buf[start:]` for the longest accepted token. Returns the"
     )
     .unwrap();
+    writeln!(
+        s,
+        " * best match and how many bytes were scanned (so the lexer can"
+    )
+    .unwrap();
+    writeln!(s, " * detect buffer exhaustion mid-token).").unwrap();
+    writeln!(s, " */").unwrap();
+    writeln!(
+        s,
+        "function longestMatch(buf: Uint8Array, start: number): DfaMatch<TokenKind> {{"
+    )
+    .unwrap();
+    writeln!(s, "  let pos = start;").unwrap();
+    writeln!(s, "  let bestLen = 0;").unwrap();
+    writeln!(s, "  let bestKind: TokenKind = TokenKind.Error;").unwrap();
+    writeln!(s, "  let state = {};", dfa.start).unwrap();
+    writeln!(s, "  for (;;) {{").unwrap();
+    writeln!(s, "    switch (state) {{").unwrap();
+    for (id, ds) in dfa.states.iter().enumerate() {
+        if id as u32 == DEAD {
+            continue;
+        }
+        emit_dfa_state_arm(s, st, dfa, id as u32, ds);
+    }
+    writeln!(
+        s,
+        "      default: return {{ bestLen, bestKind, scanned: pos - start }};"
+    )
+    .unwrap();
+    writeln!(s, "    }}").unwrap();
+    writeln!(s, "  }}").unwrap();
+    writeln!(s, "}}").unwrap();
+    writeln!(s).unwrap();
 
     write!(
         s,
@@ -220,6 +229,111 @@ fn emit_dfa(s: &mut String, st: &StateTable) {
     }
     writeln!(s, "]);").unwrap();
     writeln!(s).unwrap();
+}
+
+fn emit_dfa_state_arm(
+    s: &mut String,
+    st: &StateTable,
+    dfa: &crate::lowering::lexer_dfa::DfaTable,
+    id: u32,
+    ds: &crate::lowering::lexer_dfa::DfaState,
+) {
+    let arms = build_byte_arms(&ds.trans);
+    if arms.is_empty() {
+        writeln!(
+            s,
+            "      case {}: return {{ bestLen, bestKind, scanned: pos - start }};",
+            id
+        )
+        .unwrap();
+        return;
+    }
+    writeln!(s, "      case {}: {{", id).unwrap();
+    writeln!(
+        s,
+        "        if (pos >= buf.length) return {{ bestLen, bestKind, scanned: pos - start }};"
+    )
+    .unwrap();
+    writeln!(s, "        const b = buf[pos];").unwrap();
+    let mut first = true;
+    for arm in &arms {
+        let cond = byte_cond(&arm.ranges);
+        let kw = if first { "if" } else { "else if" };
+        first = false;
+        let target_accept = dfa.states[arm.target as usize].accept;
+        write!(
+            s,
+            "        {} ({}) {{ pos++; state = {};",
+            kw, cond, arm.target
+        )
+        .unwrap();
+        if let Some(kind) = target_accept {
+            write!(
+                s,
+                " bestLen = pos - start; bestKind = {};",
+                token_variant(st, kind)
+            )
+            .unwrap();
+        }
+        writeln!(s, " }}").unwrap();
+    }
+    writeln!(
+        s,
+        "        else return {{ bestLen, bestKind, scanned: pos - start }};"
+    )
+    .unwrap();
+    writeln!(s, "        break;").unwrap();
+    writeln!(s, "      }}").unwrap();
+}
+
+struct ByteArm {
+    target: u32,
+    ranges: Vec<(u8, u8)>,
+}
+
+fn build_byte_arms(trans: &[u32]) -> Vec<ByteArm> {
+    let mut by_target: BTreeMap<u32, Vec<u8>> = BTreeMap::new();
+    for (b, &t) in trans.iter().enumerate() {
+        if t != DEAD {
+            by_target.entry(t).or_default().push(b as u8);
+        }
+    }
+    by_target
+        .into_iter()
+        .map(|(target, bytes)| {
+            let mut ranges: Vec<(u8, u8)> = Vec::new();
+            let mut iter = bytes.into_iter();
+            if let Some(first) = iter.next() {
+                let mut lo = first;
+                let mut hi = first;
+                for b in iter {
+                    if b == hi + 1 {
+                        hi = b;
+                    } else {
+                        ranges.push((lo, hi));
+                        lo = b;
+                        hi = b;
+                    }
+                }
+                ranges.push((lo, hi));
+            }
+            ByteArm { target, ranges }
+        })
+        .collect()
+}
+
+fn byte_cond(ranges: &[(u8, u8)]) -> String {
+    let terms: Vec<String> = ranges
+        .iter()
+        .map(|(lo, hi)| {
+            if lo == hi {
+                format!("b === 0x{:02x}", lo)
+            } else {
+                format!("(b >= 0x{:02x} && b <= 0x{:02x})", lo, hi)
+            }
+        })
+        .collect();
+    terms.join(" || ")
 }
 
 fn emit_tables(s: &mut String, st: &StateTable) {
@@ -427,7 +541,7 @@ fn emit_public_api(s: &mut String, st: &StateTable) {
         .unwrap();
         writeln!(
             s,
-            "  const lex = new Lexer<TokenKind>(src, LEXER_CONFIG, TokenKind.Eof, TokenKind.Error);"
+            "  const lex = new Lexer<TokenKind>(src, longestMatch, TokenKind.Eof, TokenKind.Error);"
         )
         .unwrap();
         writeln!(

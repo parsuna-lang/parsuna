@@ -1,5 +1,8 @@
+use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::path::PathBuf;
+
+use crate::lowering::lexer_dfa::DEAD;
 
 use crate::codegen::EmittedFile;
 use crate::lowering::{DispatchLeaf, DispatchTree, Op, StateTable};
@@ -172,44 +175,141 @@ fn rule_id(st: &StateTable, kind: u16) -> String {
 
 fn emit_dfa(s: &mut String, st: &StateTable) {
     let dfa = &st.lexer_dfa;
-    writeln!(s, "internal static class DfaTables {{").unwrap();
-    writeln!(s, "    public static readonly uint[] Trans = new uint[] {{").unwrap();
-    for state in &dfa.states {
-        write!(s, "        ").unwrap();
-        for (j, t) in state.trans.iter().enumerate() {
-            if j == 255 {
-                write!(s, "{}u,", t).unwrap();
-            } else {
-                write!(s, "{}u, ", t).unwrap();
-            }
-        }
-        writeln!(s).unwrap();
-    }
-    writeln!(s, "    }};").unwrap();
+
     writeln!(
         s,
-        "    public static readonly ushort[] Accept = new ushort[] {{"
+        "/// <summary>Compiled lexer DFA: one switch arm per DFA state.</summary>"
     )
     .unwrap();
-    write!(s, "        ").unwrap();
-    for (i, state) in dfa.states.iter().enumerate() {
-        let v = state.accept.unwrap_or(0);
-        if i == dfa.states.len() - 1 {
-            write!(s, "{},", v).unwrap();
-        } else {
-            write!(s, "{}, ", v).unwrap();
-        }
-    }
-    writeln!(s).unwrap();
-    writeln!(s, "    }};").unwrap();
+    writeln!(s, "internal static class DfaImpl {{").unwrap();
     writeln!(
         s,
-        "    public static readonly DfaConfig Lexer = new DfaConfig({}u, Trans, Accept);",
-        dfa.start
+        "    public static void LongestMatch(byte[] buf, int start, int bufLen, int[] output) {{"
+    )
+    .unwrap();
+    writeln!(s, "        int pos = start;").unwrap();
+    writeln!(s, "        int bestLen = 0;").unwrap();
+    writeln!(
+        s,
+        "        int bestKind = (int)(short)TokenKind.Error;"
+    )
+    .unwrap();
+    writeln!(s, "        int state = {};", dfa.start).unwrap();
+    writeln!(s, "        while (true) {{").unwrap();
+    writeln!(s, "            switch (state) {{").unwrap();
+    for (id, ds) in dfa.states.iter().enumerate() {
+        if id as u32 == DEAD {
+            continue;
+        }
+        emit_dfa_state_arm(s, st, dfa, id as u32, ds);
+    }
+    writeln!(s, "                default: goto done;").unwrap();
+    writeln!(s, "            }}").unwrap();
+    writeln!(s, "        }}").unwrap();
+    writeln!(s, "        done:").unwrap();
+    writeln!(s, "        output[0] = bestLen;").unwrap();
+    writeln!(s, "        output[1] = bestKind;").unwrap();
+    writeln!(s, "        output[2] = pos - start;").unwrap();
+    writeln!(s, "    }}").unwrap();
+    writeln!(
+        s,
+        "    public static readonly DfaMatcher Matcher = LongestMatch;"
     )
     .unwrap();
     writeln!(s, "}}").unwrap();
     writeln!(s).unwrap();
+}
+
+fn emit_dfa_state_arm(
+    s: &mut String,
+    st: &StateTable,
+    dfa: &crate::lowering::lexer_dfa::DfaTable,
+    id: u32,
+    ds: &crate::lowering::lexer_dfa::DfaState,
+) {
+    let arms = build_byte_arms(&ds.trans);
+    if arms.is_empty() {
+        writeln!(s, "                case {}: goto done;", id).unwrap();
+        return;
+    }
+    writeln!(s, "                case {}: {{", id).unwrap();
+    writeln!(s, "                    if (pos >= bufLen) goto done;").unwrap();
+    writeln!(s, "                    int b = buf[pos];").unwrap();
+    let mut first = true;
+    for arm in &arms {
+        let cond = byte_cond(&arm.ranges);
+        let kw = if first { "if" } else { "else if" };
+        first = false;
+        let target_accept = dfa.states[arm.target as usize].accept;
+        write!(
+            s,
+            "                    {} ({}) {{ pos++; state = {};",
+            kw, cond, arm.target
+        )
+        .unwrap();
+        if let Some(kind) = target_accept {
+            write!(
+                s,
+                " bestLen = pos - start; bestKind = {};",
+                token_short(st, kind)
+            )
+            .unwrap();
+        }
+        writeln!(s, " }}").unwrap();
+    }
+    writeln!(s, "                    else goto done;").unwrap();
+    writeln!(s, "                    break;").unwrap();
+    writeln!(s, "                }}").unwrap();
+}
+
+struct ByteArm {
+    target: u32,
+    ranges: Vec<(u8, u8)>,
+}
+
+fn build_byte_arms(trans: &[u32]) -> Vec<ByteArm> {
+    let mut by_target: BTreeMap<u32, Vec<u8>> = BTreeMap::new();
+    for (b, &t) in trans.iter().enumerate() {
+        if t != DEAD {
+            by_target.entry(t).or_default().push(b as u8);
+        }
+    }
+    by_target
+        .into_iter()
+        .map(|(target, bytes)| {
+            let mut ranges: Vec<(u8, u8)> = Vec::new();
+            let mut iter = bytes.into_iter();
+            if let Some(first) = iter.next() {
+                let mut lo = first;
+                let mut hi = first;
+                for b in iter {
+                    if b == hi + 1 {
+                        hi = b;
+                    } else {
+                        ranges.push((lo, hi));
+                        lo = b;
+                        hi = b;
+                    }
+                }
+                ranges.push((lo, hi));
+            }
+            ByteArm { target, ranges }
+        })
+        .collect()
+}
+
+fn byte_cond(ranges: &[(u8, u8)]) -> String {
+    ranges
+        .iter()
+        .map(|(lo, hi)| {
+            if lo == hi {
+                format!("b == 0x{:02x}", lo)
+            } else {
+                format!("(b >= 0x{:02x} && b <= 0x{:02x})", lo, hi)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" || ")
 }
 
 fn emit_tables(s: &mut String, st: &StateTable) {
@@ -299,7 +399,7 @@ fn emit_grammar(s: &mut String, st: &StateTable) {
     writeln!(s, "    private static Parser FromStream(Stream stream, int entry) =>").unwrap();
     writeln!(
         s,
-        "        new Parser(new Lexer(stream, DfaTables.Lexer, (short)TokenKind.Eof, (short)TokenKind.Error), entry, Config);"
+        "        new Parser(new Lexer(stream, DfaImpl.Matcher, (short)TokenKind.Eof, (short)TokenKind.Error), entry, Config);"
     )
     .unwrap();
     writeln!(s).unwrap();

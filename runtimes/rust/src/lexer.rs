@@ -1,31 +1,34 @@
 use std::borrow::Cow;
 use std::io::Read;
 
-use crate::events::{Token, TokenKindEnum, TOKEN_EOF, TOKEN_ERROR};
+use crate::events::{Token, TokenKindEnum};
 use crate::span::{Pos, Span};
 
-/// A dense DFA table, flat-packed so state transitions are one array index.
+/// Result of running the compiled DFA over a byte slice.
 ///
-/// Layout:
-/// * `trans` is `states * 256` entries; `trans[state * 256 + byte]` is the
-///   next state, or `0` (the dead state) if the input byte does not extend
-///   any live match.
-/// * `accept[state]` is the token-kind id accepted in `state`, or `0` when
-///   no token ends at that state.
-///
-/// Built at generator time by `lexer_dfa` and embedded into generated code
-/// as a `'static` table.
-pub struct DfaConfig {
-    /// Total number of DFA states, including the dead state at id 0.
-    pub states: u32,
-    /// Id of the initial state the lexer enters at each `next_token`.
-    pub start: u32,
-    /// Flat transition table: `trans[state * 256 + byte]` is the next
-    /// state id (or `0` for "no transition" — the dead state).
-    pub trans: &'static [u32],
-    /// Acceptance table: `accept[state]` is the token-kind id the state
-    /// accepts, or `0` when the state is non-accepting.
-    pub accept: &'static [i16],
+/// `best_len`/`best_kind` are the longest match found. `scanned` is how
+/// many bytes the scan actually walked past `start` before it died — it
+/// may exceed `best_len` when the DFA accepted something early and then
+/// kept advancing through non-accept states before running dead. The
+/// streaming lexer uses `scanned == (buf.len() - start)` to detect that
+/// the match ran out of buffer rather than hitting a real dead transition.
+pub struct DfaMatch<TK: TokenKindEnum> {
+    /// Bytes consumed by the longest match. `0` means no accept.
+    pub best_len: usize,
+    /// Token kind of the longest match, or [`TokenKindEnum::ERROR`] when the
+    /// scan never reached an accept state.
+    pub best_kind: TK,
+    /// Total bytes the scan walked. `>= best_len`; equals `buf.len() - start`
+    /// if the scan stopped at the end of input rather than at a dead state.
+    pub scanned: usize,
+}
+
+/// Grammar-specific lexer DFA. Generated code implements this with a
+/// compiled state machine — one branch per state — so the hot loop avoids
+/// the per-byte data-dependent table load that a table-driven DFA pays.
+pub trait DfaMatcher<TK: TokenKindEnum> {
+    /// Scan `buf[start..]` for the longest matching token.
+    fn longest_match(buf: &[u8], start: usize) -> DfaMatch<TK>;
 }
 
 /// Abstraction over anything that can hand tokens to the parser one at a
@@ -38,47 +41,50 @@ pub trait LexerBackend<'a, TK: TokenKindEnum> {
     fn next_token(&mut self) -> Token<'a, TK>;
 }
 
-impl<'a, TK: TokenKindEnum> LexerBackend<'a, TK> for Scanner<'a, TK> {
+impl<'a, TK: TokenKindEnum, D: DfaMatcher<TK>> LexerBackend<'a, TK> for Scanner<'a, TK, D> {
     #[inline(always)]
     fn next_token(&mut self) -> Token<'a, TK> {
         Scanner::next_token(self)
     }
 }
 
-impl<R: Read, TK: TokenKindEnum> LexerBackend<'static, TK> for StreamingLexer<R, TK> {
+impl<R: Read, TK: TokenKindEnum, D: DfaMatcher<TK>> LexerBackend<'static, TK>
+    for StreamingLexer<R, TK, D>
+{
     #[inline]
     fn next_token(&mut self) -> Token<'static, TK> {
         StreamingLexer::next_token(self)
     }
 }
 
-/// In-memory, zero-copy lexer that runs the DFA over a `&str`.
+/// In-memory, zero-copy lexer that runs the generated DFA over a `&str`.
 ///
 /// Tokens borrow their `text` straight from the source string, so no
 /// allocations happen per-token. Use this when you already have the whole
-/// input in memory.
-pub struct Scanner<'a, TK: TokenKindEnum> {
+/// input in memory. `D` is the grammar-specific compiled matcher that
+/// generated code supplies.
+pub struct Scanner<'a, TK: TokenKindEnum, D: DfaMatcher<TK>> {
     src: &'a str,
     buf: &'a [u8],
     pos: usize,
     line: u32,
     col: u32,
-    dfa: &'static DfaConfig,
     _tk: std::marker::PhantomData<fn() -> TK>,
+    _dfa: std::marker::PhantomData<fn() -> D>,
 }
 
-impl<'a, TK: TokenKindEnum> Scanner<'a, TK> {
-    /// Build a scanner that runs `dfa` over `src`. The scanner starts at the
-    /// beginning of the string at line 1, column 1.
-    pub fn new(src: &'a str, dfa: &'static DfaConfig) -> Self {
+impl<'a, TK: TokenKindEnum, D: DfaMatcher<TK>> Scanner<'a, TK, D> {
+    /// Build a scanner over `src`. The scanner starts at the beginning of
+    /// the string at line 1, column 1.
+    pub fn new(src: &'a str) -> Self {
         Self {
             src,
             buf: src.as_bytes(),
             pos: 0,
             line: 1,
             col: 1,
-            dfa,
             _tk: std::marker::PhantomData,
+            _dfa: std::marker::PhantomData,
         }
     }
 
@@ -93,57 +99,31 @@ impl<'a, TK: TokenKindEnum> Scanner<'a, TK> {
         if self.pos >= self.buf.len() {
             let pos = self.cur_pos();
             return Token {
-                kind: unsafe { dfa_id_to_kind::<TK>(TOKEN_EOF) },
+                kind: TK::EOF,
                 span: Span::point(pos),
                 text: Cow::Borrowed(""),
             };
         }
-        let (len, kind_id) = self.longest_match();
+        let m = D::longest_match(self.buf, self.pos);
         let start = self.cur_pos();
-        if len == 0 {
+        if m.best_len > 0 {
+            let text: Cow<'a, str> = Cow::Borrowed(&self.src[self.pos..self.pos + m.best_len]);
+            self.advance(m.best_len);
+            Token {
+                kind: m.best_kind,
+                span: Span::new(start, self.cur_pos()),
+                text,
+            }
+        } else {
             let ch_len = utf8_char_len(self.buf[self.pos]).min(self.buf.len() - self.pos);
             let text: Cow<'a, str> = Cow::Borrowed(&self.src[self.pos..self.pos + ch_len]);
             self.advance(ch_len);
-            return Token {
-                kind: unsafe { dfa_id_to_kind::<TK>(TOKEN_ERROR) },
+            Token {
+                kind: TK::ERROR,
                 span: Span::new(start, self.cur_pos()),
                 text,
-            };
-        }
-        let text: Cow<'a, str> = Cow::Borrowed(&self.src[self.pos..self.pos + len]);
-        self.advance(len);
-        Token {
-            kind: unsafe { dfa_id_to_kind::<TK>(kind_id) },
-            span: Span::new(start, self.cur_pos()),
-            text,
-        }
-    }
-
-    /// Run the DFA greedily from `self.pos`, returning the longest match
-    /// (length in bytes, accepted kind id). Follows the standard lexer rule:
-    /// the longest match wins, and ties are resolved by the smallest (= earliest-declared)
-    /// token id.
-    #[inline]
-    fn longest_match(&self) -> (usize, i16) {
-        let mut state = self.dfa.start;
-        let mut pos = self.pos;
-        let mut best_len = 0usize;
-        let mut best_kind = TOKEN_ERROR;
-        while pos < self.buf.len() {
-            let b = self.buf[pos];
-            let next = self.dfa.trans[state as usize * 256 + b as usize];
-            if next == 0 {
-                break;
-            }
-            pos += 1;
-            state = next;
-            let acc = self.dfa.accept[state as usize];
-            if acc != 0 {
-                best_len = pos - self.pos;
-                best_kind = acc;
             }
         }
-        (best_len, best_kind)
     }
 
     #[inline]
@@ -200,7 +180,7 @@ const STREAM_CHUNK: usize = 16 * 1024;
 ///
 /// Internally the buffer is compacted once consumed bytes exceed 64 KiB,
 /// which bounds memory use to roughly that plus one chunk.
-pub struct StreamingLexer<R: Read, TK: TokenKindEnum> {
+pub struct StreamingLexer<R: Read, TK: TokenKindEnum, D: DfaMatcher<TK>> {
     reader: R,
     buf: Vec<u8>,
     buf_pos: usize,
@@ -208,13 +188,13 @@ pub struct StreamingLexer<R: Read, TK: TokenKindEnum> {
     offset: u32,
     line: u32,
     col: u32,
-    dfa: &'static DfaConfig,
     _tk: std::marker::PhantomData<fn() -> TK>,
+    _dfa: std::marker::PhantomData<fn() -> D>,
 }
 
-impl<R: Read, TK: TokenKindEnum> StreamingLexer<R, TK> {
-    /// Build a streaming lexer that pulls from `reader` and runs `dfa`.
-    pub fn new(reader: R, dfa: &'static DfaConfig) -> Self {
+impl<R: Read, TK: TokenKindEnum, D: DfaMatcher<TK>> StreamingLexer<R, TK, D> {
+    /// Build a streaming lexer that pulls from `reader`.
+    pub fn new(reader: R) -> Self {
         Self {
             reader,
             buf: Vec::with_capacity(STREAM_CHUNK),
@@ -223,75 +203,62 @@ impl<R: Read, TK: TokenKindEnum> StreamingLexer<R, TK> {
             offset: 0,
             line: 1,
             col: 1,
-            dfa,
             _tk: std::marker::PhantomData,
+            _dfa: std::marker::PhantomData,
         }
     }
 
     /// Produce the next token from the stream. See [`Scanner::next_token`]
     /// for the overall contract; the only difference is that `text` is
     /// owned because the buffer is not stable across calls.
+    ///
+    /// Token-spanning-buffer-boundary handling: we pre-read a chunk before
+    /// matching, then re-drive the compiled matcher with more buffer if the
+    /// match saturated the view without hitting EOF. This can re-scan the
+    /// same token prefix but keeps the compiled DFA a pure slice function
+    /// rather than one entangled with the reader.
     pub fn next_token(&mut self) -> Token<'static, TK> {
         self.ensure_bytes(STREAM_CHUNK);
         if self.view().is_empty() {
             let p = self.pos();
             return Token {
-                kind: unsafe { dfa_id_to_kind::<TK>(TOKEN_EOF) },
+                kind: TK::EOF,
                 span: Span::point(p),
                 text: Cow::Borrowed(""),
             };
         }
-        let (len, kind_id) = self.longest_match();
+        let (len, kind) = self.longest_match();
         let start = self.pos();
-        if len == 0 {
+        if len > 0 {
+            let text = Cow::Owned(String::from_utf8_lossy(&self.view()[..len]).into_owned());
+            self.consume(len);
+            Token {
+                kind,
+                span: Span::new(start, self.pos()),
+                text,
+            }
+        } else {
             let ch_len = utf8_char_len(self.view()[0]).min(self.view().len());
             let text = Cow::Owned(String::from_utf8_lossy(&self.view()[..ch_len]).into_owned());
             self.consume(ch_len);
-            return Token {
-                kind: unsafe { dfa_id_to_kind::<TK>(TOKEN_ERROR) },
+            Token {
+                kind: TK::ERROR,
                 span: Span::new(start, self.pos()),
                 text,
-            };
-        }
-
-        let text = Cow::Owned(String::from_utf8_lossy(&self.view()[..len]).into_owned());
-        self.consume(len);
-        Token {
-            kind: unsafe { dfa_id_to_kind::<TK>(kind_id) },
-            span: Span::new(start, self.pos()),
-            text,
+            }
         }
     }
 
-    fn longest_match(&mut self) -> (usize, i16) {
-        let mut state = self.dfa.start;
-        let mut pos = 0usize;
-        let mut best_len = 0usize;
-        let mut best_kind = TOKEN_ERROR;
+    fn longest_match(&mut self) -> (usize, TK) {
         loop {
-            if pos == self.view().len() && !self.eof && state != self.dfa.start {
-                if !self.read_more() {
-                    break;
-                }
+            let view_slice = &self.buf[self.buf_pos..];
+            let view_len = view_slice.len();
+            let m = D::longest_match(view_slice, 0);
+            if m.scanned == view_len && !self.eof && self.read_more() {
+                continue;
             }
-            let view = self.view();
-            if pos >= view.len() {
-                break;
-            }
-            let b = view[pos];
-            let next = self.dfa.trans[state as usize * 256 + b as usize];
-            if next == 0 {
-                break;
-            }
-            pos += 1;
-            state = next;
-            let acc = self.dfa.accept[state as usize];
-            if acc != 0 {
-                best_len = pos;
-                best_kind = acc;
-            }
+            return (m.best_len, m.best_kind);
         }
-        (best_len, best_kind)
     }
 
     fn pos(&self) -> Pos {
@@ -352,27 +319,6 @@ impl<R: Read, TK: TokenKindEnum> StreamingLexer<R, TK> {
             }
         }
     }
-}
-
-/// Reinterpret a DFA-produced `i16` kind id as the generated kind enum.
-///
-/// # Safety
-///
-/// Sound because every generated `TokenKindEnum` is `#[repr(i16)]` and has a
-/// variant for every id the DFA can produce. The [`AssertI16Sized`] check
-/// below fails to compile when that invariant is violated.
-#[inline(always)]
-unsafe fn dfa_id_to_kind<TK: TokenKindEnum>(id: i16) -> TK {
-    let _ = AssertI16Sized::<TK>::OK;
-    std::mem::transmute_copy::<i16, TK>(&id)
-}
-
-struct AssertI16Sized<TK: TokenKindEnum>(std::marker::PhantomData<TK>);
-impl<TK: TokenKindEnum> AssertI16Sized<TK> {
-    const OK: () = assert!(
-        std::mem::size_of::<TK>() == std::mem::size_of::<i16>(),
-        "TokenKindEnum impl must be `#[repr(i16)]` (same size as i16)",
-    );
 }
 
 /// Number of bytes in the UTF-8 sequence that starts with `b`.

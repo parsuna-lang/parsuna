@@ -17,6 +17,9 @@ pub trait TokenKindEnum: Copy + Eq + 'static {
     fn name(self) -> &'static str;
     /// The sentinel that marks end-of-input.
     const EOF: Self;
+    /// The sentinel produced by the lexer when no token pattern matches at
+    /// the current position.
+    const ERROR: Self;
 }
 
 /// The rule-kind enumeration produced by the code generator.

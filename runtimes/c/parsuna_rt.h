@@ -64,13 +64,6 @@ typedef struct {
  * bytes written (0 for EOF, negative to signal an error). */
 typedef int (*ReadFn)(void *ctx, char *out, int max);
 
-/* Packed lexer DFA. State 0 is the dead sink; real states start at 1. */
-typedef struct {
-    uint32_t start;
-    const uint32_t *trans;   /* states * 256 entries */
-    const uint16_t *accept;
-} DfaConfig;
-
 /* Sentinel value that marks end of `sync` / FIRST sequence arrays.
  * Using -2 avoids colliding with any real token-kind id (EOF = 0,
  * ERROR = -1, grammar tokens >= 1). */
@@ -91,14 +84,16 @@ typedef struct {
  *
  * plus file-scope definitions of:
  *
- *   static int            is_skip(int kind);
- *   static void           drive(Parser *p);
- *   static const DfaConfig dfa_config;
+ *   static int  is_skip(int kind);
+ *   static void drive(Parser *p);
+ *   static void longest_match_impl(const char *buf, size_t buf_len,
+ *                                  size_t start, int *best_kind,
+ *                                  size_t *best_len, size_t *scanned);
  *
  * The generated .c provides all of these. `is_skip`, `drive`, and
- * `dfa_config` are forward-declared below so the runtime's inline
- * functions can reference them; the compiler links every reference to
- * the later real definitions within the same translation unit. */
+ * `longest_match_impl` are forward-declared below so the runtime's
+ * inline functions can reference them; the compiler links every reference
+ * to the later real definitions within the same translation unit. */
 #ifndef PARSUNA_K
 #  error "define PARSUNA_K before including parsuna_rt.h"
 #endif
@@ -112,7 +107,13 @@ typedef struct {
 struct Parser;  /* fwd decl */
 static int  is_skip(int kind);
 static void drive(struct Parser *p);
-static const DfaConfig dfa_config;   /* tentative def; generator supplies the real one */
+/* Compiled DFA: scans buf[start..buf_len] for the longest token. On return,
+ * *best_kind/*best_len hold the longest match (best_len == 0 means no
+ * accept), and *scanned is the total bytes walked past start. The runtime
+ * uses `scanned == buf_len - start` to detect that the scan ran out of
+ * buffer rather than hitting a real dead transition. */
+static void longest_match_impl(const char *buf, size_t buf_len, size_t start,
+                               int *best_kind, size_t *best_len, size_t *scanned);
 
 /* Internal queue element; matches Event layout. */
 typedef Event EvQueued;
@@ -232,27 +233,16 @@ static inline void lex_advance(Parser *p, size_t n) {
 }
 
 static inline void longest_match(Parser *p, int *best_kind, int *best_len) {
-    const DfaConfig *dfa = &dfa_config;
     for (;;) {
-        uint32_t state = dfa->start;
-        size_t pos = p->buf_pos;
-        int bl = 0;
-        int bk = PARSUNA_ERROR_KIND;
-        while (pos < p->buf_len) {
-            uint32_t next = dfa->trans[state * 256 + (unsigned char)p->buf[pos]];
-            if (next == 0) break;
-            pos++;
-            state = next;
-            uint16_t acc = dfa->accept[state];
-            if (acc != 0) {
-                bl = (int)(pos - p->buf_pos);
-                bk = (int)acc;
-            }
-        }
-        if (!p->eof && pos == p->buf_len && bl > 0) {
+        int bk;
+        size_t bl, scanned;
+        longest_match_impl(p->buf, p->buf_len, p->buf_pos, &bk, &bl, &scanned);
+        size_t view_len = p->buf_len - p->buf_pos;
+        if (!p->eof && scanned == view_len) {
             if (lex_read_more(p)) continue;
         }
-        *best_kind = bk; *best_len = bl;
+        *best_kind = bk;
+        *best_len = (int)bl;
         return;
     }
 }
