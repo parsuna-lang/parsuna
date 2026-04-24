@@ -1,0 +1,38 @@
+
+LPAREN   = "(";
+RPAREN   = ")";
+EQ       = "=";
+SEMI     = ";";
+PIPE     = "|";
+QUESTION = "?";
+STAR     = "*";
+PLUS     = "+";
+DOTDOT   = "..";
+DOT      = ".";
+BANG     = "!";
+
+_HEX_DIGIT = '0'..'9' | 'a'..'f' | 'A'..'F';
+_ESCAPE    = "\\" ("u{" _HEX_DIGIT+ "}" | 'n' | 'r' | 't' | '0' | '\\' | '\'' | '"');
+
+STRING = "\"" ( !('"' | '\\' | '\n') | _ESCAPE )* "\"";
+CHAR   = "'"  ( !('\'' | '\\' | '\n') | _ESCAPE ) "'";
+IDENT  = ('A'..'Z' | 'a'..'z' | '_') ('A'..'Z' | 'a'..'z' | '_' | '0'..'9')*;
+
+?WS      = (' ' | '\t' | '\r' | '\n')+;
+?COMMENT = "//" (!'\n')*;
+
+file = decl*;
+
+decl = QUESTION? IDENT EQ alt_expr SEMI;
+
+alt_expr = seq_expr (PIPE seq_expr)*;
+seq_expr = _postfix_expr*;
+_postfix_expr = _primary_expr _quant_op*;
+_quant_op     = QUESTION | STAR | PLUS;
+_primary_expr = group | atom;
+group = LPAREN alt_expr RPAREN;
+atom = IDENT | STRING | char_primary | neg_class;
+
+char_primary = CHAR (DOTDOT CHAR)? | DOT;
+
+neg_class = BANG (char_primary | LPAREN char_primary (PIPE char_primary)* RPAREN);

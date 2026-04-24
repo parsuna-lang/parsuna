@@ -1,0 +1,6 @@
+# Cargo build output
+/target/
+**/*.rs.bk
+
+# Cargo.lock — keep for binaries, ignore for libraries (this is a runtime lib)
+Cargo.lock

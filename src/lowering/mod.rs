@@ -1,0 +1,357 @@
+//! Lower an [`AnalyzedGrammar`] to a flat [`StateTable`] — the backend-agnostic
+//! shape every target language gets compiled from.
+//!
+//! Lowering runs in three phases:
+//! 1. [`build`]: translate rule bodies into a `Block`/`Op` IR with
+//!    symbolic block ids and interned FIRST/SYNC sets.
+//! 2. [`layout`]: flatten the blocks into numeric state ids, build the
+//!    dispatch trees, and compile the lexer DFA.
+//! 3. [`fuse`]: splice deterministic jump chains and drop unreachable
+//!    states so the emitted tables stay small.
+
+mod build;
+pub mod fuse;
+mod layout;
+pub mod lexer_dfa;
+
+use std::collections::BTreeMap;
+
+use crate::analysis::AnalyzedGrammar;
+use crate::grammar::ir::TokenPattern;
+
+pub use lexer_dfa::DfaTable;
+
+/// Numeric id of a parser state in the final [`StateTable`]. Small dense
+/// integers so targets can use them as switch labels.
+pub type StateId = u32;
+/// Id into [`StateTable::first_sets`] — FIRST sets are interned so two
+/// sites using the same set share a single entry in the generated tables.
+pub type FirstSetId = u32;
+/// Id into [`StateTable::sync_sets`] — SYNC sets are interned the same way.
+pub type SyncSetId = u32;
+
+/// A single lookahead sequence: `k` or fewer token-kind ids.
+///
+/// Sequences are the unit of LL(k) prediction — a FIRST set is a set of
+/// these, and dispatch-tree paths consume them one token at a time.
+pub type LookaheadSeq = Vec<i16>;
+
+/// An interned FIRST set: every lookahead sequence that can open the
+/// dispatch site that owns this id. Stored as a sorted, deduplicated list
+/// (rather than a `Set`) so backends iterate it in a stable order.
+pub type FirstSet = Vec<LookaheadSeq>;
+
+/// Pool of interned FIRST sets, indexed by [`FirstSetId`].
+pub type FirstSetPool = Vec<FirstSet>;
+
+/// An interned SYNC set: token-kind ids that an `Expect` can recover to.
+/// Each entry is a single token, not a sequence.
+pub type SyncSet = Vec<i16>;
+
+/// Pool of interned SYNC sets, indexed by [`SyncSetId`].
+pub type SyncSetPool = Vec<SyncSet>;
+
+/// State id that means "the parser has terminated". Distinct from any real
+/// state; the generator chooses the largest u32 so a plain switch over the
+/// real state ids never collides.
+pub const TERMINATED: StateId = u32::MAX;
+
+/// Everything a backend needs to emit a parser.
+#[derive(Clone, Debug)]
+pub struct StateTable {
+    /// Grammar name, used by backends to pick file/package names.
+    pub grammar_name: String,
+    /// Non-fragment token metadata, indexed by `kind - 1`.
+    pub tokens: Vec<TokenInfo>,
+    /// Names of the non-fragment rules in declaration order. A rule's
+    /// `RuleKind` id is its index here.
+    pub rule_kinds: Vec<String>,
+    /// Interned FIRST-set pool. Each entry is a `FirstSet` — a list of
+    /// `LookaheadSeq`s (i.e. `Vec<Vec<i16>>`). Index by [`FirstSetId`].
+    pub first_sets: FirstSetPool,
+    /// Interned SYNC-set pool. Each entry is a `SyncSet` — a flat list of
+    /// token ids (`Vec<i16>`). Index by [`SyncSetId`].
+    pub sync_sets: SyncSetPool,
+    /// Every parser state, keyed by id. A `BTreeMap` so backends walk the
+    /// table in deterministic id order.
+    pub states: BTreeMap<StateId, State>,
+    /// Public entry points: one `(rule_name, start_state)` per non-fragment
+    /// rule. Backends emit a `parse_<name>` for each.
+    pub entry_states: Vec<(String, StateId)>,
+    /// Token-kind id reserved for end-of-input. Copied out of the runtime
+    /// so backends don't import `parsuna_rt` just for this sentinel.
+    pub eof_id: i16,
+    /// Token-kind id reserved for "lexer could not match anything here".
+    pub error_id: i16,
+    /// Lookahead required to disambiguate every alternative (LL(k)).
+    pub k: usize,
+    /// The compiled lexer DFA.
+    pub lexer_dfa: DfaTable,
+}
+
+/// A single token as seen by the code generator: the name, the resolved
+/// pattern (fragments inlined), the skip flag, and a stable numeric kind.
+#[derive(Clone, Debug)]
+pub struct TokenInfo {
+    /// Grammar-declared token name.
+    pub name: String,
+    /// Token body with every `Ref` inlined, ready for the DFA builder.
+    pub pattern: TokenPattern,
+    /// True if the token is `?`-prefixed (skip): matched but dropped from
+    /// the structural stream.
+    pub skip: bool,
+    /// Dense, 1-based numeric id. `0` and `-1` are reserved for EOF and
+    /// lexer ERROR respectively.
+    pub kind: i16,
+}
+
+/// One instruction in a parser state.
+///
+/// States are small straight-line programs built from these ops; control
+/// flow within a state is explicit (`Jump`, `PushRet`/`Ret`) and inter-state
+/// flow is fall-through to the next numeric id.
+#[derive(Clone, Debug)]
+pub enum Op {
+    /// Emit an `Enter` event for this rule-kind id.
+    Enter(u16),
+    /// Emit an `Exit` event for this rule-kind id.
+    Exit(u16),
+    /// Consume a token of `kind`; on mismatch, raise an error and recover
+    /// to the given SYNC set.
+    Expect {
+        /// Required token-kind id.
+        kind: i16,
+        /// Token name, baked in purely for the diagnostic message.
+        token_name: String,
+        /// SYNC set to recover to on mismatch.
+        sync: SyncSetId,
+    },
+    /// Push a return state. Followed by a `Jump` into a callee; the
+    /// callee's trailing `Ret` pops this to resume.
+    PushRet(StateId),
+    /// Unconditional jump to another state id.
+    Jump(StateId),
+    /// Return to the state id on top of the return stack, or `TERMINATED`
+    /// if the stack is empty.
+    Ret,
+    /// `*` loop: if lookahead matches `first`, call `body` and re-enter
+    /// this state; otherwise fall through to `next`.
+    Star {
+        /// FIRST-set id the body opens with.
+        first: FirstSetId,
+        /// Body of one iteration.
+        body: StateId,
+        /// State to fall through to when the body no longer matches.
+        next: StateId,
+    },
+    /// `?` branch: if lookahead matches `first`, call `body` once and
+    /// continue at `next`; otherwise skip straight to `next`.
+    Opt {
+        /// FIRST-set id the body opens with.
+        first: FirstSetId,
+        /// Body to call when taken.
+        body: StateId,
+        /// Fall-through state (joined whether or not the body ran).
+        next: StateId,
+    },
+    /// `Alt` dispatch: pick one arm based on up to `k` tokens of
+    /// lookahead, or recover via `sync` on a miss.
+    Dispatch {
+        /// Decision tree over the lookahead.
+        tree: DispatchTree,
+        /// SYNC set to recover to on "unexpected token".
+        sync: SyncSetId,
+        /// State to continue at once the chosen arm returns.
+        next: StateId,
+    },
+}
+
+/// Terminal action at a leaf of a [`DispatchTree`].
+#[derive(Clone, Copy, Debug)]
+pub enum DispatchLeaf {
+    /// Take the arm whose body starts at this state id (push the
+    /// dispatch's `next` as the return target first).
+    Arm(StateId),
+    /// No arm matched, but the dispatch is nullable — continue at the
+    /// dispatch's `next` without emitting an error.
+    Fallthrough,
+    /// No arm matched and the dispatch is not nullable — report an
+    /// "unexpected token" error and recover via the dispatch's `sync`
+    /// set, then continue at `next`.
+    Error,
+}
+
+/// An alternative-dispatch decision tree over up to `k` lookahead tokens.
+///
+/// Each `Switch` inspects `look(depth).kind` and branches into sub-trees.
+/// The flat shape maps cleanly onto nested `switch`/`match` statements in
+/// every target language. Built by [`build_dispatch_tree`] from a set of
+/// `(FIRST-set-id, target-state)` pairs.
+#[derive(Clone, Debug)]
+pub enum DispatchTree {
+    /// A terminal action: commit to an arm, fall through, or error.
+    Leaf(DispatchLeaf),
+    /// Inspect the lookahead at `depth` and branch.
+    Switch {
+        /// Which lookahead slot to inspect (`0` = current token, `1` =
+        /// the one after that, up to `k-1`).
+        depth: u8,
+        /// `(token kind, sub-tree)` pairs for each matched lookahead.
+        /// Kept sorted by kind so a backend can compile to a jump table.
+        arms: Vec<(i16, DispatchTree)>,
+        /// Action when no arm matches at this depth.
+        default: DispatchLeaf,
+    },
+}
+
+/// Build a dispatch tree from the `(first_set_id, target)` pairs of an
+/// `Alt` and whether any arm is nullable.
+///
+/// `has_eps = true` changes the outer default from `Error` to
+/// `Fallthrough`: a nullable alt means "none of the arms matched, but
+/// that's OK — drop through".
+pub fn build_dispatch_tree(
+    arms: &[(FirstSetId, StateId)],
+    first_sets: &[FirstSet],
+    has_eps: bool,
+) -> DispatchTree {
+    let outer_default = if has_eps {
+        DispatchLeaf::Fallthrough
+    } else {
+        DispatchLeaf::Error
+    };
+    let mut entries: Vec<(Vec<i16>, StateId)> = Vec::new();
+    for (fid, target) in arms {
+        for seq in &first_sets[*fid as usize] {
+            entries.push((seq.clone(), *target));
+        }
+    }
+    build_trie(&entries, 0, outer_default)
+}
+
+fn build_trie(
+    entries: &[(Vec<i16>, StateId)],
+    depth: usize,
+    outer_default: DispatchLeaf,
+) -> DispatchTree {
+    // An entry whose sequence length equals the current depth terminates
+    // here: the first `depth` tokens fully identified the arm, so anything
+    // that doesn't match a deeper prefix should still take this branch.
+    // That's why we capture it as `node_default` for the sub-tree rather
+    // than inheriting the outer one.
+    let mut surviving: Vec<(Vec<i16>, StateId)> = Vec::new();
+    let mut terminal: Option<DispatchLeaf> = None;
+    for entry in entries {
+        if entry.0.len() == depth {
+            terminal = Some(DispatchLeaf::Arm(entry.1));
+            break;
+        }
+        surviving.push(entry.clone());
+    }
+
+    let node_default = terminal.unwrap_or(outer_default);
+
+    if surviving.is_empty() {
+        return DispatchTree::Leaf(node_default);
+    }
+
+    use std::collections::BTreeMap;
+    let mut by_kind: BTreeMap<i16, Vec<(Vec<i16>, StateId)>> = BTreeMap::new();
+    for entry in &surviving {
+        by_kind
+            .entry(entry.0[depth])
+            .or_default()
+            .push(entry.clone());
+    }
+
+    let arms: Vec<(i16, DispatchTree)> = by_kind
+        .into_iter()
+        .map(|(k, subentries)| (k, build_trie(&subentries, depth + 1, node_default)))
+        .collect();
+
+    DispatchTree::Switch {
+        depth: depth as u8,
+        arms,
+        default: node_default,
+    }
+}
+
+/// A numbered state holding one straight-line program of `Op`s.
+///
+/// `label` is a human-readable tag (rule name plus what the state is doing,
+/// e.g. `expr:call:atom`) used in the debug dumps and as a comment in
+/// generated code.
+#[derive(Clone, Debug, Default)]
+pub struct State {
+    /// The state's id — matches its key in [`StateTable::states`].
+    pub id: StateId,
+    /// Human-readable tag (e.g. `expr:alt0:call:atom`). Used for debug
+    /// dumps and emitted as a comment next to the `case` in generated code.
+    pub label: String,
+    /// Straight-line ops executed when the parser enters this state.
+    pub ops: Vec<Op>,
+}
+
+/// Lower an analyzed grammar into a [`StateTable`]: build → layout → fuse.
+pub fn lower(ag: &AnalyzedGrammar) -> StateTable {
+    let program = build::build(ag);
+    let mut table = layout::layout(program, ag);
+    fuse::fuse(&mut table);
+    table
+}
+
+impl State {
+    /// Render the state as a single comment line: label plus the ops
+    /// joined with `;`. Used by the debug dumper and by some backends when
+    /// they want to annotate generated `case` arms.
+    pub fn comment(&self) -> String {
+        let body = if self.ops.is_empty() {
+            "<empty>".to_string()
+        } else {
+            self.ops
+                .iter()
+                .map(format_op)
+                .collect::<Vec<_>>()
+                .join(" ; ")
+        };
+        format!("{}  {}", self.label, body)
+    }
+}
+
+fn format_op(op: &Op) -> String {
+    match op {
+        Op::Enter(k) => format!("Enter({})", k),
+        Op::Exit(k) => format!("Exit({})", k),
+        Op::Expect {
+            kind, token_name, ..
+        } => format!("Expect({} /*{}*/)", kind, token_name),
+        Op::PushRet(r) => format!("PushRet({})", r),
+        Op::Jump(n) => format!("Jump({})", n),
+        Op::Ret => "Ret".to_string(),
+        Op::Star { body, .. } => format!("Star -> {}", body),
+        Op::Opt { body, .. } => format!("Opt -> {}", body),
+        Op::Dispatch { tree, .. } => format!("Dispatch[{}]", dispatch_tree_shape(tree)),
+    }
+}
+
+fn dispatch_tree_shape(tree: &DispatchTree) -> String {
+    let (leaves, depth) = tree_metrics(tree);
+    format!("{} leaves, depth {}", leaves, depth)
+}
+
+fn tree_metrics(tree: &DispatchTree) -> (usize, usize) {
+    match tree {
+        DispatchTree::Leaf(_) => (1, 0),
+        DispatchTree::Switch { arms, .. } => {
+            let (mut leaf_count, mut max_depth) = (1, 1);
+            for (_, sub) in arms {
+                let (l, d) = tree_metrics(sub);
+                leaf_count += l;
+                if d + 1 > max_depth {
+                    max_depth = d + 1;
+                }
+            }
+            (leaf_count, max_depth)
+        }
+    }
+}

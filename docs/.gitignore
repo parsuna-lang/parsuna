@@ -1,0 +1,19 @@
+# Sphinx build output
+_build/
+_autosummary/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# uv / pip lockfiles (uncomment to commit)
+# uv.lock

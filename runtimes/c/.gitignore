@@ -1,0 +1,31 @@
+# Object files / libraries
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exp
+*.pdb
+
+# Executables
+*.exe
+*.out
+a.out
+
+# Build dirs
+build/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+cmake_install.cmake
+Makefile.generated
+
+# Compile db / coverage
+compile_commands.json
+*.gcda
+*.gcno
+*.gcov

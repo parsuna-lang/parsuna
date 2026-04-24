@@ -1,0 +1,15 @@
+[package]
+name = "parsuna"
+version = "0.1.0"
+edition = "2021"
+description = "Parsuna: recoverable, pull-based parsers with precise errors, emitting Rust/Python/TypeScript/Go/Java/C#/C."
+
+[dependencies]
+parsuna-rt = { path = "runtimes/rust" }
+clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+
+[workspace]
+members = ["runtimes/rust"]
+exclude = ["examples/json"]

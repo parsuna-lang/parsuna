@@ -1,0 +1,20 @@
+# Rust build output (root crate)
+/target/
+**/*.rs.bk
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editors / IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Environment / secrets
+.env
+.env.*
+!.env.example

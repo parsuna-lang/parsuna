@@ -1,0 +1,20 @@
+# Compiled binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Coverage
+*.prof
+coverage.txt
+coverage.out
+
+# Vendored deps (uncomment if not committing vendor/)
+# vendor/
+
+# Workspace files
+go.work
+go.work.sum
