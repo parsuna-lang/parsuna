@@ -6,7 +6,6 @@ release = "0.1.0"
 
 extensions = [
     "sphinx.ext.autosectionlabel",
-    "sphinx.ext.autosummary",
 ]
 
 autosectionlabel_prefix_document = True
