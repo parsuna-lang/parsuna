@@ -32,7 +32,7 @@ The artifact handed to code generation holds:
   entry is a flat list of token ids.
 * ``states: BTreeMap<StateId, State>`` — every parser state, keyed
   by id. Each ``State`` holds a label and a short straight-line
-  program of ``Op``s.
+  program of ``Op``\ s.
 * ``entry_states: Vec<(String, StateId)>`` — public entry points,
   one per non-fragment rule.
 * ``eof_id``, ``error_id`` — the reserved sentinel kinds.
