@@ -7,14 +7,36 @@
 //! it reports the remaining conflicts as errors.
 
 pub mod first_follow;
+mod lints;
+mod shadow;
 mod validate;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::error::Error;
+use crate::diagnostic::Diagnostic;
 use crate::grammar::ir::*;
+use crate::Span;
 
 pub use first_follow::{FirstSet, FollowSet, Seq};
+
+/// Result of [`analyze`]: the analyzed grammar (when analysis succeeded) and
+/// every diagnostic produced along the way. `grammar` is `Some` iff no
+/// diagnostic in `diagnostics` has [`crate::diagnostic::Severity::Error`].
+#[derive(Debug)]
+pub struct AnalysisOutcome {
+    /// The analyzed grammar; present iff [`AnalysisOutcome::has_errors`]
+    /// returns `false`.
+    pub grammar: Option<AnalyzedGrammar>,
+    /// Every diagnostic produced, in source order.
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+impl AnalysisOutcome {
+    /// True iff any diagnostic has error severity.
+    pub fn has_errors(&self) -> bool {
+        self.diagnostics.iter().any(Diagnostic::is_error)
+    }
+}
 
 /// Placeholder name used inside FOLLOW sets to mean "end of input". Picked
 /// so no real grammar token can collide with it.
@@ -65,13 +87,25 @@ pub struct AnalyzedGrammar {
 /// count is dropping. After [`STUCK_LIMIT`] rounds with no improvement we
 /// give up — the grammar is ambiguous in a way that more lookahead cannot
 /// fix, and we report the last round's conflicts as errors.
-pub fn analyze(g: Grammar) -> Result<AnalyzedGrammar, Vec<Error>> {
-    let mut issues = Vec::new();
-
-    validate::run(&g, &mut issues);
-    if !issues.is_empty() {
-        return Err(issues);
+pub fn analyze(g: Grammar) -> AnalysisOutcome {
+    let mut diags: Vec<Diagnostic> = Vec::new();
+    let grammar = analyze_inner(g, &mut diags).ok();
+    AnalysisOutcome {
+        grammar,
+        diagnostics: diags,
     }
+}
+
+/// Inner implementation: pushes diagnostics into `diags` and returns the
+/// analyzed grammar on success, or `Err(())` if any error-severity
+/// diagnostic was emitted (the actual messages live in `diags`).
+fn analyze_inner(g: Grammar, diags: &mut Vec<Diagnostic>) -> Result<AnalyzedGrammar, ()> {
+    validate::run(&g, diags);
+    bail_on_errors(diags)?;
+
+    lints::run(&g, diags);
+    shadow::run(&g, diags);
+    bail_on_errors(diags)?;
 
     let mut chosen: Option<(usize, BTreeMap<String, bool>, BTreeMap<String, FirstSet>)> = None;
     let mut last_conflicts: Vec<RawConflict> = Vec::new();
@@ -105,20 +139,14 @@ pub fn analyze(g: Grammar) -> Result<AnalyzedGrammar, Vec<Error>> {
         }
     }
 
-    let (k, nullable, first) = match chosen {
-        Some(c) => c,
-        None => {
-            issues.push(Error::new(format!(
-                "grammar is not LL(k) for any finite k: conflicts are stable \
-                 at k = {} (stopped iterating after no progress over {} rounds)",
-                last_k, STUCK_LIMIT
-            )));
-            for c in render_conflicts(&last_conflicts) {
-                issues.push(c);
-            }
-            return Err(issues);
-        }
-    };
+    let (k, nullable, first) = chosen.ok_or_else(|| {
+        diags.push(Diagnostic::error(format!(
+            "grammar is not LL(k) for any finite k: conflicts are stable \
+             at k = {} (stopped iterating after no progress over {} rounds)",
+            last_k, STUCK_LIMIT
+        )));
+        diags.extend(render_conflicts(&last_conflicts));
+    })?;
 
     let follow = first_follow::compute_follow(&g, &first, &nullable);
     let follow_k = first_follow::compute_follow_k(&g, &first, &nullable, k);
@@ -132,20 +160,29 @@ pub fn analyze(g: Grammar) -> Result<AnalyzedGrammar, Vec<Error>> {
     })
 }
 
+/// `?` helper: short-circuit if any error-severity diagnostic is in the bag.
+fn bail_on_errors(diags: &[Diagnostic]) -> Result<(), ()> {
+    if diags.iter().any(Diagnostic::is_error) {
+        Err(())
+    } else {
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug)]
 struct RawConflict {
     rule_name: String,
-    rule_span: crate::span::Span,
+    rule_span: Span,
     arm_i: usize,
     arm_j: usize,
     ambiguous: BTreeSet<Seq>,
 }
 
-fn render_conflicts(raws: &[RawConflict]) -> Vec<Error> {
+fn render_conflicts(raws: &[RawConflict]) -> Vec<Diagnostic> {
     raws.iter()
         .map(|c| {
             let sample: Vec<String> = c.ambiguous.iter().take(3).map(|s| format_seq(s)).collect();
-            Error::new(format!(
+            Diagnostic::error(format!(
                 "rule `{}`: alternatives {} and {} both predict on {}{}",
                 c.rule_name,
                 c.arm_i + 1,
@@ -179,7 +216,7 @@ fn walk_check_conflicts(
     e: &Expr,
     tail: &FirstSet,
     rule_name: &str,
-    rule_span: crate::span::Span,
+    rule_span: Span,
     nullable: &BTreeMap<String, bool>,
     first: &BTreeMap<String, FirstSet>,
     k: usize,
@@ -275,5 +312,197 @@ fn format_seq(seq: &Seq) -> String {
         "ε".to_string()
     } else {
         format!("[{}]", seq.join(" "))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::diagnostic::Severity;
+
+    fn tok(name: &str, pat: TokenPattern) -> TokenDef {
+        TokenDef {
+            name: name.into(),
+            pattern: pat,
+            skip: false,
+            is_fragment: false,
+            span: Span::default(),
+        }
+    }
+
+    fn rule(name: &str, body: Expr) -> RuleDef {
+        RuleDef {
+            name: name.into(),
+            body,
+            is_fragment: false,
+            span: Span::default(),
+        }
+    }
+
+    fn lit(s: &str) -> TokenPattern {
+        TokenPattern::Literal(s.into())
+    }
+
+    fn alpha_plus() -> TokenPattern {
+        TokenPattern::Plus(Box::new(TokenPattern::Class(CharClass {
+            negated: false,
+            items: vec![ClassItem::Range(b'a' as u32, b'z' as u32)],
+        })))
+    }
+
+    fn minimal() -> Grammar {
+        let mut g = Grammar::default();
+        g.tokens.push(tok("T", lit("t")));
+        g.rules.push(rule("main", Expr::Token("T".into())));
+        g
+    }
+
+    #[test]
+    fn clean_grammar_yields_grammar_no_diagnostics() {
+        let outcome = analyze(minimal());
+        assert!(!outcome.has_errors());
+        assert!(outcome.diagnostics.is_empty(), "{:?}", outcome.diagnostics);
+        assert!(outcome.grammar.is_some());
+        let ag = outcome.grammar.unwrap();
+        assert_eq!(ag.k, 1);
+        assert_eq!(ag.grammar.tokens.len(), 1);
+    }
+
+    #[test]
+    fn warning_only_grammar_keeps_grammar() {
+        // Unused fragment — warning only; grammar still compiles.
+        let mut g = minimal();
+        let mut frag = tok("_DEAD", lit("d"));
+        frag.is_fragment = true;
+        g.tokens.insert(0, frag);
+        let outcome = analyze(g);
+        assert!(!outcome.has_errors());
+        assert_eq!(outcome.diagnostics.len(), 1);
+        assert_eq!(outcome.diagnostics[0].severity, Severity::Warning);
+        assert!(outcome.grammar.is_some());
+    }
+
+    #[test]
+    fn validate_error_short_circuits_before_lints() {
+        // Undefined token reference — validate fails. Lints/shadow should
+        // not run, so we expect exactly the one validate error and no
+        // grammar.
+        let mut g = Grammar::default();
+        g.rules
+            .push(rule("main", Expr::Token("UNDECLARED".into())));
+        let outcome = analyze(g);
+        assert!(outcome.has_errors());
+        assert!(outcome.grammar.is_none());
+        assert_eq!(outcome.diagnostics.len(), 1);
+        assert!(outcome.diagnostics[0]
+            .message
+            .contains("undefined token `UNDECLARED`"));
+    }
+
+    #[test]
+    fn empty_match_lint_blocks_compilation() {
+        let mut g = minimal();
+        g.tokens
+            .push(tok("BAD", TokenPattern::Star(Box::new(lit("a")))));
+        let outcome = analyze(g);
+        assert!(outcome.has_errors());
+        assert!(outcome.grammar.is_none());
+        assert!(outcome
+            .diagnostics
+            .iter()
+            .any(|d| d.severity == Severity::Error && d.message.contains("`BAD`")));
+    }
+
+    #[test]
+    fn non_productive_lint_blocks_compilation() {
+        let mut g = Grammar::default();
+        g.tokens.push(tok("T", lit("t")));
+        // `loops = T loops+;` — Plus needs body productive; recursion never bottoms out.
+        g.rules.push(rule(
+            "loops",
+            Expr::Seq(vec![
+                Expr::Token("T".into()),
+                Expr::Plus(Box::new(Expr::Rule("loops".into()))),
+            ]),
+        ));
+        let outcome = analyze(g);
+        assert!(outcome.has_errors());
+        assert!(outcome.grammar.is_none());
+        assert!(outcome
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("non-productive")));
+    }
+
+    #[test]
+    fn shadow_lint_blocks_compilation() {
+        let mut g = Grammar::default();
+        g.tokens.push(tok("IDENT", alpha_plus()));
+        g.tokens.push(tok("IF", lit("if")));
+        g.rules.push(rule(
+            "main",
+            Expr::Alt(vec![Expr::Token("IF".into()), Expr::Token("IDENT".into())]),
+        ));
+        let outcome = analyze(g);
+        assert!(outcome.has_errors());
+        assert!(outcome.grammar.is_none());
+        assert!(outcome
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("shadowed by earlier-declared")));
+    }
+
+    #[test]
+    fn warnings_accompany_grammar_on_full_success() {
+        // Two unused fragments — both warnings, grammar still produced.
+        let mut g = minimal();
+        for name in &["_F1", "_F2"] {
+            let mut frag = tok(name, lit("x"));
+            frag.is_fragment = true;
+            g.tokens.insert(0, frag);
+        }
+        let outcome = analyze(g);
+        assert!(!outcome.has_errors());
+        assert_eq!(outcome.diagnostics.len(), 2);
+        assert!(outcome
+            .diagnostics
+            .iter()
+            .all(|d| d.severity == Severity::Warning));
+        assert!(outcome.grammar.is_some());
+    }
+
+    #[test]
+    fn ll_conflict_reports_with_grammar_dropped() {
+        // Two arms with the same FIRST set: classic LL(1) conflict.
+        let mut g = Grammar::default();
+        g.tokens.push(tok("A", lit("a")));
+        g.rules.push(rule(
+            "main",
+            Expr::Alt(vec![
+                Expr::Token("A".into()),
+                Expr::Token("A".into()),
+            ]),
+        ));
+        let outcome = analyze(g);
+        assert!(outcome.has_errors());
+        assert!(outcome.grammar.is_none());
+    }
+
+    #[test]
+    fn has_errors_true_only_for_errors() {
+        let outcome = AnalysisOutcome {
+            grammar: None,
+            diagnostics: vec![Diagnostic::warning("just a tip")],
+        };
+        assert!(!outcome.has_errors());
+
+        let outcome = AnalysisOutcome {
+            grammar: None,
+            diagnostics: vec![
+                Diagnostic::warning("tip"),
+                Diagnostic::error("bad"),
+            ],
+        };
+        assert!(outcome.has_errors());
     }
 }

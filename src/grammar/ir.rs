@@ -6,6 +6,8 @@
 //! other rules. Names starting with `_` are fragments — reusable building
 //! blocks that never appear in the emitted output.
 
+use crate::Span;
+
 /// A parsed grammar: its name (used to pick file names in code generation)
 /// plus every declared token and rule in source order.
 #[derive(Clone, Debug, Default)]
@@ -68,7 +70,7 @@ pub struct TokenDef {
     /// a real token kind at run time.
     pub is_fragment: bool,
     /// Source span of the whole declaration, for diagnostics.
-    pub span: crate::span::Span,
+    pub span: Span,
 }
 
 /// A regular expression over characters that defines how a token is lexed.
@@ -173,7 +175,7 @@ pub struct RuleDef {
     /// `Enter`/`Exit` events, and is not part of the public API.
     pub is_fragment: bool,
     /// Source span of the whole declaration, for diagnostics.
-    pub span: crate::span::Span,
+    pub span: Span,
 }
 
 /// An LL expression — the body of a rule.
@@ -216,5 +218,125 @@ impl Expr {
             1 => items.into_iter().next().unwrap(),
             _ => Expr::Alt(items),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tok(name: &str) -> TokenDef {
+        TokenDef {
+            name: name.into(),
+            pattern: TokenPattern::Empty,
+            skip: false,
+            is_fragment: false,
+            span: Span::default(),
+        }
+    }
+
+    fn rule(name: &str) -> RuleDef {
+        RuleDef {
+            name: name.into(),
+            body: Expr::Empty,
+            is_fragment: false,
+            span: Span::default(),
+        }
+    }
+
+    #[test]
+    fn token_pattern_seq_collapses_trivial_arities() {
+        assert!(matches!(TokenPattern::seq(vec![]), TokenPattern::Empty));
+        let lit = TokenPattern::Literal("x".into());
+        let one = TokenPattern::seq(vec![lit.clone()]);
+        assert!(matches!(one, TokenPattern::Literal(ref s) if s == "x"));
+        let many = TokenPattern::seq(vec![lit.clone(), lit]);
+        assert!(matches!(many, TokenPattern::Seq(xs) if xs.len() == 2));
+    }
+
+    #[test]
+    fn token_pattern_alt_collapses_trivial_arities() {
+        assert!(matches!(TokenPattern::alt(vec![]), TokenPattern::Empty));
+        let lit = TokenPattern::Literal("a".into());
+        let one = TokenPattern::alt(vec![lit.clone()]);
+        assert!(matches!(one, TokenPattern::Literal(ref s) if s == "a"));
+        let many = TokenPattern::alt(vec![lit.clone(), lit]);
+        assert!(matches!(many, TokenPattern::Alt(xs) if xs.len() == 2));
+    }
+
+    #[test]
+    fn token_pattern_is_literal() {
+        assert!(TokenPattern::Literal("x".into()).is_literal());
+        assert!(!TokenPattern::Empty.is_literal());
+        assert!(!TokenPattern::Star(Box::new(TokenPattern::Literal("x".into()))).is_literal());
+    }
+
+    #[test]
+    fn expr_seq_collapses_trivial_arities() {
+        assert!(matches!(Expr::seq(vec![]), Expr::Empty));
+        let t = Expr::Token("T".into());
+        let one = Expr::seq(vec![t.clone()]);
+        assert!(matches!(one, Expr::Token(ref n) if n == "T"));
+        let many = Expr::seq(vec![t.clone(), t]);
+        assert!(matches!(many, Expr::Seq(xs) if xs.len() == 2));
+    }
+
+    #[test]
+    fn expr_alt_collapses_trivial_arities() {
+        assert!(matches!(Expr::alt(vec![]), Expr::Empty));
+        let t = Expr::Token("T".into());
+        let one = Expr::alt(vec![t.clone()]);
+        assert!(matches!(one, Expr::Token(ref n) if n == "T"));
+    }
+
+    #[test]
+    fn char_class_contains_chars_and_ranges() {
+        let cc = CharClass {
+            negated: false,
+            items: vec![ClassItem::Char(b'a' as u32), ClassItem::Range(b'0' as u32, b'9' as u32)],
+        };
+        assert!(cc.contains(b'a' as u32));
+        assert!(cc.contains(b'5' as u32));
+        assert!(cc.contains(b'9' as u32));
+        assert!(!cc.contains(b'b' as u32));
+        assert!(!cc.contains(b'/' as u32)); // just below '0'
+    }
+
+    #[test]
+    fn char_class_negated_inverts() {
+        let cc = CharClass {
+            negated: true,
+            items: vec![ClassItem::Char(b'a' as u32)],
+        };
+        assert!(!cc.contains(b'a' as u32));
+        assert!(cc.contains(b'b' as u32));
+        assert!(cc.contains(0));
+    }
+
+    #[test]
+    fn grammar_lookups_by_name_and_index() {
+        let mut g = Grammar::default();
+        g.tokens.push(tok("A"));
+        g.tokens.push(tok("B"));
+        g.rules.push(rule("first"));
+        g.rules.push(rule("second"));
+
+        assert_eq!(g.token("A").map(|t| t.name.as_str()), Some("A"));
+        assert!(g.token("Z").is_none());
+        assert_eq!(g.token_index("B"), Some(1));
+        assert_eq!(g.token_index("Z"), None);
+
+        assert_eq!(g.rule("second").map(|r| r.name.as_str()), Some("second"));
+        assert_eq!(g.rule_index("first"), Some(0));
+        assert_eq!(g.rule_index("missing"), None);
+    }
+
+    #[test]
+    fn grammar_default_start_is_first_rule_or_none() {
+        let mut g = Grammar::default();
+        assert!(g.default_start().is_none());
+        g.rules.push(rule("only"));
+        g.rules.push(rule("ignored"));
+        assert_eq!(g.default_start().map(|r| r.name.as_str()), Some("only"));
     }
 }

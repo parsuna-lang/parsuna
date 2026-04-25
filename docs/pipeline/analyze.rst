@@ -2,12 +2,27 @@ Pass 2 — Analysis
 =================
 
 Entry point: ``analysis::analyze`` (``src/analysis/mod.rs``).
-Output: ``AnalyzedGrammar``, containing the original ``Grammar``
-plus the sets and metadata the lowering and code-generation passes
-need.
+Output: ``AnalysisOutcome``, containing an optional ``AnalyzedGrammar``
+and a flat bag of diagnostics produced along the way.
 
-Analysis is split into two sub-passes: structural validation, and
-iterative FIRST/FOLLOW computation.
+Analysis runs in three sub-passes: structural validation, post-validation
+lints, and iterative FIRST/FOLLOW computation. The first two only emit
+diagnostics; the third additionally produces the FIRST/FOLLOW tables that
+later passes consume.
+
+Diagnostics
+-----------
+
+Every check pushes into a single ``Vec<Diagnostic>``. A
+``Diagnostic`` carries a severity (``Error`` or ``Warning``), a
+message, and a source span. Errors stop the build; warnings are
+surfaced but the build still succeeds unless the caller passes
+``--warnings=errors``, which promotes every warning at print time.
+
+Parser-level errors (``parsuna_rt::Error`` values produced by the
+generated grammar parser) are converted into error-severity diagnostics
+at the boundary; analysis itself only ever pushes ``Diagnostic`` values
+directly.
 
 Sub-pass 2a — Structural validation
 -----------------------------------
@@ -38,14 +53,53 @@ Checks, in order:
   guaranteed nullable — ``Empty``, ``Opt``, ``Star``). If the rule
   can reach itself, it is left-recursive. The check is purely
   structural; an accurate FIRST-based check comes essentially for
-  free in sub-pass 2b but reporting here gives a better error.
+  free in sub-pass 2c but reporting here gives a better error.
 * **Non-empty public surface.** A grammar with no non-fragment rules
   produces an empty public API; it is rejected.
 
-Failures are collected into a ``Vec<Error>``; if any are present,
-analysis returns them without proceeding.
+If any error-severity diagnostics land in the bag here, analysis
+returns immediately without proceeding to lints or FIRST/FOLLOW —
+the later passes assume references resolve and there are no cycles,
+so running them on a structurally broken grammar would be unsafe.
 
-Sub-pass 2b — Iterative FIRST/FOLLOW at the smallest viable k
+Sub-pass 2b — Post-validation lints
+-----------------------------------
+
+Files: ``src/analysis/lints.rs`` and ``src/analysis/shadow.rs``.
+
+Once validation has cleared, four additional checks look for
+grammars that *would* compile but shouldn't. Each picks its own
+severity.
+
+* **Empty-match tokens.** A token whose pattern can match the empty
+  string (``T = 'a'?;``, ``T = 'x'*;``, ``T = "";``) would let the
+  lexer accept at length zero — either an infinite loop or a stream
+  of zero-length tokens. Detected by a recursive nullability walk
+  over the resolved pattern; reported as **error**.
+* **Unused fragments.** Fragment tokens (``_HEX``) and fragment
+  rules (``_postfix``) that no other declaration references are dead
+  code. Reachability is computed by BFS from the live seeds —
+  non-fragment tokens, non-fragment rules, and skip tokens — over the
+  reference graph. Reported as **warning**, since the grammar still
+  produces a working parser.
+* **Non-productive rules.** A rule with no derivation that
+  terminates in tokens (``r = R r+;``, mutually-recursive cycles
+  with no terminal escape) would never let the parser accept any
+  input. Detected by a least-fixed-point over rules that reduce to
+  terminals or to other productive rules; reported as **error**.
+* **Literal-token shadowing.** A ``Literal``-pattern token (e.g.
+  ``IF = "if";``) declared *after* a more general token whose
+  pattern also accepts that literal (e.g. ``IDENT = ('a'..'z')+;``)
+  is unreachable: the lexer breaks ties by smallest token id (=
+  declaration order), so the earlier token always wins. Detected by
+  running a small NFA-style pattern matcher over each candidate
+  shadower; reported as **error**.
+
+The lint pass and the shadow pass each push into the same diagnostic
+bag. After both have run, if any error-severity diagnostics are
+present analysis returns; warnings alone do not stop the build.
+
+Sub-pass 2c — Iterative FIRST/FOLLOW at the smallest viable k
 -------------------------------------------------------------
 
 File: ``src/analysis/first_follow.rs`` plus the outer loop in
@@ -142,5 +196,12 @@ They serve different purposes:
 Output
 ------
 
-``Result<AnalyzedGrammar, Vec<Error>>``. On success, the analyzed
-grammar is handed to :doc:`lower`.
+``AnalysisOutcome { grammar: Option<AnalyzedGrammar>, diagnostics: Vec<Diagnostic> }``.
+The grammar is ``Some`` iff no diagnostic in ``diagnostics`` has
+``Severity::Error``; warnings can accompany a successful outcome.
+``AnalysisOutcome::has_errors`` is the standard discriminator.
+
+On success the grammar is handed to :doc:`lower`. Either way, the
+caller iterates ``diagnostics`` for printing — under
+``--warnings=errors`` warnings are re-rendered with the ``error``
+label and the build fails even if ``grammar`` was produced.

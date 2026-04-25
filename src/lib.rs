@@ -12,14 +12,13 @@
 
 pub mod analysis;
 pub mod codegen;
-pub mod error;
+pub mod diagnostic;
 pub mod grammar;
 pub mod lowering;
-pub mod span;
 pub mod tree_sitter;
 
-pub use analysis::AnalyzedGrammar;
+pub use analysis::{AnalysisOutcome, AnalyzedGrammar};
 pub use codegen::{emit, find, Backend, BACKENDS};
-pub use error::Error;
+pub use diagnostic::{Diagnostic, Severity};
 pub use grammar::ir::{Expr, Grammar, RuleDef, TokenDef, TokenPattern};
-pub use span::Span;
+pub use parsuna_rt::{Error, Span};

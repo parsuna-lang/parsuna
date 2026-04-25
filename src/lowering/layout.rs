@@ -228,3 +228,107 @@ fn resolve(
         Target::Rule(n) => entry[&rules[n]],
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::analysis::analyze;
+    use crate::grammar::parse_grammar;
+    use crate::lowering::build::build;
+    use crate::lowering::Op as StateOp;
+
+    fn analyze_src(src: &str) -> AnalyzedGrammar {
+        let g = parse_grammar(src).expect("parse");
+        let outcome = analyze(g);
+        assert!(!outcome.has_errors(), "{:?}", outcome.diagnostics);
+        outcome.grammar.expect("grammar")
+    }
+
+    fn lay(src: &str) -> (AnalyzedGrammar, StateTable) {
+        let ag = analyze_src(src);
+        let prog = build(&ag);
+        let st = layout(prog, &ag);
+        (ag, st)
+    }
+
+    #[test]
+    fn state_ids_are_dense_starting_from_one() {
+        let (_, st) = lay("T = \"t\"; main = T;");
+        let ids: Vec<StateId> = st.states.keys().copied().collect();
+        // BTreeMap iterates in sorted order; ids should start at 1 and be contiguous.
+        assert!(!ids.is_empty());
+        assert_eq!(ids[0], 1);
+        for w in ids.windows(2) {
+            assert_eq!(w[1], w[0] + 1, "non-dense: {:?}", ids);
+        }
+    }
+
+    #[test]
+    fn every_block_ends_in_a_ret_state() {
+        // For each entry state, walking the block linearly, the last state of
+        // that block must be a Ret.
+        let (ag, st) = lay("T = \"t\"; a = T; main = a T;");
+        let prog = build(&ag);
+        // Layout doesn't expose block boundaries directly, but we can check
+        // each entry: from entry id, count `prog.blocks[bid].ops.len() + 1`
+        // states forward; the last must be a single Ret.
+        for (rule_name, entry_id) in &st.entry_states {
+            let bid = prog.rule_entry[rule_name];
+            let block = &prog.blocks[bid.0 as usize];
+            let last_id = *entry_id + block.ops.len() as StateId; // entry + N ops → trailing ret slot
+            let last = st.states.get(&last_id).expect("trailing state");
+            assert_eq!(last.ops.len(), 1);
+            assert!(matches!(last.ops[0], StateOp::Ret), "{:?}", last.ops);
+        }
+    }
+
+    #[test]
+    fn entry_states_only_for_public_rules() {
+        let (_, st) = lay("T = \"t\"; _helper = T; main = T _helper;");
+        let names: Vec<&str> = st.entry_states.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"main"));
+        assert!(!names.contains(&"_helper"));
+    }
+
+    #[test]
+    fn straight_line_op_emits_action_followed_by_jump_to_fallthrough() {
+        // `main = T;` — the body is a single Expect then the block's Ret.
+        // The Expect state should have ops [Expect, Jump(next)].
+        let (_, st) = lay("T = \"t\"; main = T;");
+        let entry_id = st.entry_states[0].1;
+        let entry = st.states.get(&entry_id).expect("entry state");
+        // The Enter wrapper is first; find an Expect anywhere in the block.
+        let saw_expect_then_jump = st
+            .states
+            .values()
+            .any(|s| s.ops.len() == 2
+                && matches!(s.ops[0], StateOp::Expect { .. })
+                && matches!(s.ops[1], StateOp::Jump(_)));
+        assert!(saw_expect_then_jump, "no Expect followed by Jump anywhere; entry={:?}", entry.ops);
+    }
+
+    #[test]
+    fn lexer_dfa_compiled_alongside_state_table() {
+        let (_, st) = lay("T = \"t\"; main = T;");
+        // DFA always has at least the dead state plus a real start.
+        assert!(st.lexer_dfa.states.len() >= 2);
+        assert!(st.lexer_dfa.start >= 1);
+    }
+
+    #[test]
+    fn grammar_name_carried_into_state_table() {
+        let mut g = parse_grammar("T = \"t\"; main = T;").expect("parse");
+        g.name = "custom_name".into();
+        let outcome = analyze(g);
+        let ag = outcome.grammar.unwrap();
+        let prog = build(&ag);
+        let st = layout(prog, &ag);
+        assert_eq!(st.grammar_name, "custom_name");
+    }
+
+    #[test]
+    fn k_value_carried_from_analyzed_grammar() {
+        let (ag, st) = lay("T = \"t\"; main = T;");
+        assert_eq!(st.k, ag.k);
+    }
+}

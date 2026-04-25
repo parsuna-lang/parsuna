@@ -571,3 +571,175 @@ fn rule_kind_id(rules: &[String], name: &str) -> u16 {
         .map(|i| i as u16)
         .unwrap_or(0)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::analysis::analyze;
+    use crate::grammar::parse_grammar;
+
+    fn analyze_src(src: &str) -> AnalyzedGrammar {
+        let g = parse_grammar(src).expect("parse");
+        let outcome = analyze(g);
+        assert!(!outcome.has_errors(), "{:?}", outcome.diagnostics);
+        outcome.grammar.expect("grammar")
+    }
+
+    fn pattern_has_no_refs(p: &TokenPattern) -> bool {
+        match p {
+            TokenPattern::Empty | TokenPattern::Literal(_) | TokenPattern::Class(_) => true,
+            TokenPattern::Ref(_) => false,
+            TokenPattern::Seq(xs) | TokenPattern::Alt(xs) => {
+                xs.iter().all(pattern_has_no_refs)
+            }
+            TokenPattern::Opt(x) | TokenPattern::Star(x) | TokenPattern::Plus(x) => {
+                pattern_has_no_refs(x)
+            }
+        }
+    }
+
+    #[test]
+    fn build_assigns_token_kinds_starting_at_one_and_skipping_fragments() {
+        let ag = analyze_src(
+            "_DIGIT = '0'..'9'; NUM = _DIGIT+; T = \"t\"; main = NUM T;",
+        );
+        let prog = build(&ag);
+        // Fragment _DIGIT must be excluded from the kind table.
+        assert!(prog.tokens.iter().all(|t| !t.name.starts_with('_')));
+        let kinds: Vec<i16> = prog.tokens.iter().map(|t| t.kind).collect();
+        assert_eq!(kinds, vec![1, 2]);
+    }
+
+    #[test]
+    fn build_resolves_token_pattern_refs_inline() {
+        let ag = analyze_src(
+            "_DIGIT = '0'..'9'; NUM = _DIGIT+; main = NUM;",
+        );
+        let prog = build(&ag);
+        let num = prog.tokens.iter().find(|t| t.name == "NUM").unwrap();
+        // The Plus body should now be a Class — no more Ref.
+        assert!(
+            pattern_has_no_refs(&num.pattern),
+            "ref not inlined: {:?}",
+            num.pattern
+        );
+    }
+
+    #[test]
+    fn build_records_rule_order_in_grammar_order() {
+        let ag = analyze_src("T = \"t\"; first = T; second = T; third = T;");
+        let prog = build(&ag);
+        assert_eq!(prog.rule_order, vec!["first", "second", "third"]);
+    }
+
+    #[test]
+    fn build_public_rule_names_excludes_fragments() {
+        let ag = analyze_src(
+            "T = \"t\"; _helper = T; main = T _helper;",
+        );
+        let prog = build(&ag);
+        assert!(prog.public_rule_names.contains("main"));
+        assert!(!prog.public_rule_names.contains("_helper"));
+        // But fragment still needs an entry block (it's called from `main`).
+        assert!(prog.rule_entry.contains_key("_helper"));
+    }
+
+    #[test]
+    fn build_assigns_block_to_every_rule_entry() {
+        let ag = analyze_src("T = \"t\"; a = T; b = T; main = a b;");
+        let prog = build(&ag);
+        for name in &prog.rule_order {
+            let bid = prog.rule_entry.get(name).expect("rule has entry");
+            assert!(
+                (bid.0 as usize) < prog.blocks.len(),
+                "rule `{}` entry out of bounds",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn build_interns_first_sets_across_rules() {
+        // Two rules each have a `T?` — both Opts open with the same FIRST set
+        // ([T]), so the pool should intern them rather than store two copies.
+        let ag = analyze_src("T = \"t\"; a = T?; b = T?; main = a b;");
+        let prog = build(&ag);
+        // We have at least two Opt sites both with FIRST = {[T]}; if interning
+        // is doing its job, the pool size is strictly less than the number of
+        // sites times 2.
+        let opt_sites = prog
+            .blocks
+            .iter()
+            .flat_map(|b| b.ops.iter())
+            .filter(|op| matches!(op, Op::Opt { .. }))
+            .count();
+        assert!(opt_sites >= 2, "expected ≥2 Opt sites, got {}", opt_sites);
+        assert!(
+            prog.first_sets.len() < opt_sites * 2,
+            "FIRST pool not interned: {} entries for {} sites",
+            prog.first_sets.len(),
+            opt_sites
+        );
+    }
+
+    #[test]
+    fn build_eof_and_error_ids_match_runtime_sentinels() {
+        let ag = analyze_src("T = \"t\"; main = T;");
+        let prog = build(&ag);
+        assert_eq!(prog.eof_id, parsuna_rt::TOKEN_EOF);
+        assert_eq!(prog.error_id, parsuna_rt::TOKEN_ERROR);
+    }
+
+    #[test]
+    fn compute_sync_includes_eof_marker_at_end() {
+        let ag = analyze_src("T = \"t\"; main = T;");
+        let sync = compute_sync(&ag, "main", parsuna_rt::TOKEN_EOF);
+        assert!(!sync.is_empty());
+        assert_eq!(*sync.last().unwrap(), parsuna_rt::TOKEN_EOF);
+    }
+
+    #[test]
+    fn token_kind_helper_returns_one_based_position_excluding_fragments() {
+        let ag = analyze_src(
+            "_DIGIT = '0'..'9'; A = \"a\"; B = \"b\"; main = A B;",
+        );
+        assert_eq!(token_kind(&ag, "A"), 1);
+        assert_eq!(token_kind(&ag, "B"), 2);
+        // Fragments have no runtime kind.
+        assert_eq!(token_kind(&ag, "_DIGIT"), 0);
+        assert_eq!(token_kind(&ag, "MISSING"), 0);
+    }
+
+    #[test]
+    fn rule_kind_id_helper_returns_position() {
+        let rules = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        assert_eq!(rule_kind_id(&rules, "a"), 0);
+        assert_eq!(rule_kind_id(&rules, "c"), 2);
+        assert_eq!(rule_kind_id(&rules, "missing"), 0);
+    }
+
+    #[test]
+    fn resolve_pattern_inlines_chain_of_refs() {
+        let mut g = Grammar::default();
+        let mut leaf = TokenDef {
+            name: "_LEAF".into(),
+            pattern: TokenPattern::Literal("x".into()),
+            skip: false,
+            is_fragment: true,
+            span: Default::default(),
+        };
+        leaf.is_fragment = true;
+        g.tokens.push(leaf);
+        let mut mid = TokenDef {
+            name: "_MID".into(),
+            pattern: TokenPattern::Ref("_LEAF".into()),
+            skip: false,
+            is_fragment: true,
+            span: Default::default(),
+        };
+        mid.is_fragment = true;
+        g.tokens.push(mid);
+        let resolved = resolve_pattern(&TokenPattern::Ref("_MID".into()), &g);
+        assert!(matches!(resolved, TokenPattern::Literal(ref s) if s == "x"));
+    }
+}

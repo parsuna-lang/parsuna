@@ -89,3 +89,61 @@ pub fn emit(backend: &Backend, ag: &AnalyzedGrammar) -> Vec<EmittedFile> {
     let st = lowering::lower(ag);
     (backend.emit)(&st)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::analysis::analyze;
+    use crate::grammar::parse_grammar;
+
+    fn analyze_minimal() -> AnalyzedGrammar {
+        let g = parse_grammar("T = \"t\"; main = T;").expect("parse");
+        let outcome = analyze(g);
+        outcome.grammar.expect("grammar")
+    }
+
+    #[test]
+    fn find_is_case_insensitive() {
+        assert!(find("rust").is_some());
+        assert!(find("RUST").is_some());
+        assert!(find("RuSt").is_some());
+        assert!(find("nonexistent").is_none());
+    }
+
+    #[test]
+    fn backends_list_is_non_empty_and_distinct() {
+        assert!(!BACKENDS.is_empty());
+        let names: std::collections::BTreeSet<&str> =
+            BACKENDS.iter().map(|b| b.name).collect();
+        assert_eq!(names.len(), BACKENDS.len(), "duplicate backend name");
+        for b in BACKENDS {
+            assert!(b.name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()));
+        }
+    }
+
+    #[test]
+    fn every_backend_emits_at_least_one_file() {
+        let ag = analyze_minimal();
+        for b in BACKENDS {
+            let files = emit(b, &ag);
+            assert!(!files.is_empty(), "backend `{}` emitted no files", b.name);
+            for f in &files {
+                assert!(
+                    !f.contents.is_empty(),
+                    "backend `{}` emitted empty file {:?}",
+                    b.name,
+                    f.path
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rust_backend_mentions_grammar_name() {
+        let ag = analyze_minimal();
+        let rust = find("rust").expect("rust backend");
+        let files = emit(rust, &ag);
+        let combined: String = files.iter().map(|f| f.contents.as_str()).collect();
+        assert!(combined.contains(&ag.grammar.name) || combined.contains("parse_main"));
+    }
+}

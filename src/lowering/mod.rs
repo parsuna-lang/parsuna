@@ -355,3 +355,76 @@ fn tree_metrics(tree: &DispatchTree) -> (usize, usize) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::analysis::analyze;
+    use crate::grammar::parse_grammar;
+
+    fn analyze_src(src: &str) -> crate::AnalyzedGrammar {
+        let g = parse_grammar(src).expect("parse");
+        let outcome = analyze(g);
+        assert!(!outcome.has_errors(), "{:?}", outcome.diagnostics);
+        outcome.grammar.expect("grammar")
+    }
+
+    #[test]
+    fn lower_minimal_grammar_produces_states_and_entry() {
+        let ag = analyze_src("T = \"t\"; main = T;");
+        let st = lower(&ag);
+        assert_eq!(st.grammar_name, ag.grammar.name);
+        assert_eq!(st.tokens.len(), 1);
+        assert_eq!(st.tokens[0].name, "T");
+        assert_eq!(st.tokens[0].kind, 1);
+        assert!(!st.states.is_empty());
+        assert_eq!(st.entry_states.len(), 1);
+        assert_eq!(st.entry_states[0].0, "main");
+        assert_eq!(st.k, 1);
+    }
+
+    #[test]
+    fn lower_drops_fragment_tokens_from_kind_table() {
+        let ag = analyze_src("_D = '0'..'9'; NUM = _D+; main = NUM;");
+        let st = lower(&ag);
+        assert!(!st.tokens.iter().any(|t| t.name == "_D"));
+        assert!(st.tokens.iter().any(|t| t.name == "NUM"));
+    }
+
+    #[test]
+    fn lower_drops_fragment_rules_from_rule_kinds() {
+        let ag = analyze_src(
+            "T = \"t\"; _helper = T; main = T _helper;",
+        );
+        let st = lower(&ag);
+        assert!(!st.rule_kinds.iter().any(|n| n == "_helper"));
+        assert!(st.rule_kinds.iter().any(|n| n == "main"));
+    }
+
+    #[test]
+    fn lexer_dfa_is_built_for_each_token() {
+        let ag = analyze_src("A = \"a\"; B = \"b\"; main = A B;");
+        let st = lower(&ag);
+        // 1 dead + start + at least one accept per token = ≥ 4 states
+        assert!(st.lexer_dfa.states.len() >= 4);
+        assert!(st.lexer_dfa.start >= 1);
+    }
+
+    #[test]
+    fn skip_tokens_get_kind_but_arent_referenced_by_rules() {
+        let ag = analyze_src("?WS = \" \"+; T = \"t\"; main = T;");
+        let st = lower(&ag);
+        let ws = st.tokens.iter().find(|t| t.name == "WS").expect("WS");
+        assert!(ws.skip);
+    }
+
+    #[test]
+    fn entry_states_one_per_non_fragment_rule() {
+        let ag = analyze_src("T = \"t\"; main = T; other = T;");
+        let st = lower(&ag);
+        assert_eq!(st.entry_states.len(), 2);
+        let names: Vec<&str> = st.entry_states.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"main"));
+        assert!(names.contains(&"other"));
+    }
+}

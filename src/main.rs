@@ -10,7 +10,7 @@ use parsuna::{
     codegen::{self, Backend, BACKENDS},
     grammar::parse_grammar,
     lowering::{self, StateTable},
-    tree_sitter, Expr, TokenPattern,
+    tree_sitter, Diagnostic, Expr, TokenPattern,
 };
 
 #[derive(Parser)]
@@ -21,58 +21,102 @@ use parsuna::{
     disable_help_subcommand = true
 )]
 struct Cli {
+    /// Path to the .parsuna grammar file.
     grammar: PathBuf,
 
+    /// Override the grammar identifier used for emitted file and package
+    /// names. Defaults to the grammar file's stem.
     #[arg(long = "name", global = true)]
     name: Option<String>,
+
+    /// How to treat warnings. `warn` prints them and continues; `error`
+    /// promotes every warning to a hard error so the build fails.
+    #[arg(long = "warnings", default_value = "warn", global = true)]
+    warnings: WarningPolicy,
 
     #[command(subcommand)]
     op: Op,
 }
 
+/// What to do with warnings emitted by the analysis lints.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum WarningPolicy {
+    /// Print warnings to stderr but exit 0 if there are no errors.
+    Warn,
+    /// Promote every warning to an error.
+    Error,
+}
+
 #[derive(Subcommand)]
 enum Op {
+    /// Load, parse, and analyze the grammar; print a one-line summary.
+    /// Exits non-zero on diagnostics — suitable as a CI gate.
     Check,
+    /// Emit a parser for the given backend target.
     Generate {
+        /// Backend name (e.g. `rust`, `python`, `typescript`, `go`,
+        /// `java`, `csharp`, `c`), or `all` to emit every backend.
         target: String,
+        /// Output directory. With multiple backends, files are written
+        /// under one sub-directory per backend. Defaults to `.`.
         #[arg(short = 'o', long = "out")]
         out: Option<PathBuf>,
     },
+    /// Emit a tree-sitter `grammar.js` for editor tooling.
     TreeSitter {
+        /// Output directory for `grammar.js`. Defaults to `.`.
         #[arg(short = 'o', long = "out")]
         out: Option<PathBuf>,
     },
+    /// Dump internal compiler state. Intended as a debugging aid while
+    /// developing a grammar.
     #[command(subcommand)]
     Debug(DebugCmd),
 }
 
 #[derive(Subcommand)]
 enum DebugCmd {
+    /// Print counts of tokens, rules, and other top-level grammar stats.
     Stats,
+    /// Dump every declared token with its resolved pattern.
     Tokens,
+    /// Dump rule bodies, either as an indented tree or as a Graphviz
+    /// digraph of railroad diagrams.
     Rules {
         #[arg(long, default_value = "tree")]
         format: RulesFormat,
     },
+    /// Dump the LL(k) analysis — FIRST/FOLLOW sets and lookahead tables.
     Analysis,
+    /// Dump the lowered state table that drives the generated parser.
     Lowering,
+    /// Dump the lexer DFA. By default minimized; use --full for the raw
+    /// pre-minimization table.
     Dfa {
+        /// Show the un-minimized DFA.
         #[arg(long)]
         full: bool,
+        /// Output format: human-readable text or Graphviz dot.
         #[arg(long, default_value = "plain")]
         format: OutputFormat,
     },
 }
 
+/// Output format for tabular debug dumps.
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
 enum OutputFormat {
+    /// Human-readable plain text.
     Plain,
+    /// Graphviz `dot` source.
     Dot,
 }
 
+/// Output format for the `rules` debug dump.
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
 enum RulesFormat {
+    /// Indented expression tree.
     Tree,
+    /// Graphviz `dot` source rendering each rule as a railroad diagram.
     Dot,
 }
 
@@ -106,26 +150,34 @@ fn main() -> ExitCode {
 
     let grammar = cli.grammar.as_path();
     let name = cli.name.as_deref();
+    let warnings = cli.warnings;
     match cli.op {
-        Op::Check => cmd_check(grammar, name),
-        Op::Generate { target, out } => cmd_generate(grammar, name, &target, out),
-        Op::TreeSitter { out } => cmd_tree_sitter(grammar, name, out),
-        Op::Debug(sub) => cmd_debug(grammar, name, sub),
+        Op::Check => cmd_check(grammar, name, warnings),
+        Op::Generate { target, out } => cmd_generate(grammar, name, warnings, &target, out),
+        Op::TreeSitter { out } => cmd_tree_sitter(grammar, name, warnings, out),
+        Op::Debug(sub) => cmd_debug(grammar, name, warnings, sub),
     }
 }
 
-fn cmd_debug(grammar: &Path, name: Option<&str>, cmd: DebugCmd) -> ExitCode {
+fn cmd_debug(
+    grammar: &Path,
+    name: Option<&str>,
+    warnings: WarningPolicy,
+    cmd: DebugCmd,
+) -> ExitCode {
     match cmd {
-        DebugCmd::Stats => dbg_load_lowered(grammar, name, print_stats),
-        DebugCmd::Tokens => dbg_load_analyzed(grammar, name, print_tokens),
-        DebugCmd::Rules { format } => dbg_load_analyzed(grammar, name, |ag| match format {
-            RulesFormat::Tree => print_rules(ag),
-            RulesFormat::Dot => print_rules_dot(ag),
-        }),
-        DebugCmd::Analysis => dbg_load_analyzed(grammar, name, print_analysis),
-        DebugCmd::Lowering => dbg_load_lowered(grammar, name, print_lowering),
+        DebugCmd::Stats => dbg_load_lowered(grammar, name, warnings, print_stats),
+        DebugCmd::Tokens => dbg_load_analyzed(grammar, name, warnings, print_tokens),
+        DebugCmd::Rules { format } => {
+            dbg_load_analyzed(grammar, name, warnings, |ag| match format {
+                RulesFormat::Tree => print_rules(ag),
+                RulesFormat::Dot => print_rules_dot(ag),
+            })
+        }
+        DebugCmd::Analysis => dbg_load_analyzed(grammar, name, warnings, print_analysis),
+        DebugCmd::Lowering => dbg_load_lowered(grammar, name, warnings, print_lowering),
         DebugCmd::Dfa { full, format } => {
-            dbg_load_lowered(grammar, name, move |_, st| match format {
+            dbg_load_lowered(grammar, name, warnings, move |_, st| match format {
                 OutputFormat::Plain => print_dfa(st, full),
                 OutputFormat::Dot => print_dfa_dot(st),
             })
@@ -136,9 +188,10 @@ fn cmd_debug(grammar: &Path, name: Option<&str>, cmd: DebugCmd) -> ExitCode {
 fn dbg_load_analyzed(
     path: &Path,
     name: Option<&str>,
+    warnings: WarningPolicy,
     f: impl FnOnce(&parsuna::AnalyzedGrammar),
 ) -> ExitCode {
-    match load_and_analyze(path, name) {
+    match load_and_analyze(path, name, warnings) {
         Ok(ag) => {
             f(&ag);
             ExitCode::SUCCESS
@@ -150,9 +203,10 @@ fn dbg_load_analyzed(
 fn dbg_load_lowered(
     path: &Path,
     name: Option<&str>,
+    warnings: WarningPolicy,
     f: impl FnOnce(&parsuna::AnalyzedGrammar, &StateTable),
 ) -> ExitCode {
-    match load_and_analyze(path, name) {
+    match load_and_analyze(path, name, warnings) {
         Ok(ag) => {
             let st = lowering::lower(&ag);
             f(&ag, &st);
@@ -865,8 +919,13 @@ fn resolve_pattern(p: &TokenPattern, g: &parsuna::Grammar) -> TokenPattern {
     }
 }
 
-fn cmd_tree_sitter(grammar: &Path, name: Option<&str>, out: Option<PathBuf>) -> ExitCode {
-    let ag = match load_and_analyze(grammar, name) {
+fn cmd_tree_sitter(
+    grammar: &Path,
+    name: Option<&str>,
+    warnings: WarningPolicy,
+    out: Option<PathBuf>,
+) -> ExitCode {
+    let ag = match load_and_analyze(grammar, name, warnings) {
         Ok(ag) => ag,
         Err(code) => return code,
     };
@@ -878,8 +937,12 @@ fn cmd_tree_sitter(grammar: &Path, name: Option<&str>, out: Option<PathBuf>) -> 
     }
 }
 
-fn cmd_check(grammar_path: &Path, override_name: Option<&str>) -> ExitCode {
-    let ag = match load_and_analyze(grammar_path, override_name) {
+fn cmd_check(
+    grammar_path: &Path,
+    override_name: Option<&str>,
+    warnings: WarningPolicy,
+) -> ExitCode {
+    let ag = match load_and_analyze(grammar_path, override_name, warnings) {
         Ok(ag) => ag,
         Err(code) => return code,
     };
@@ -896,10 +959,11 @@ fn cmd_check(grammar_path: &Path, override_name: Option<&str>) -> ExitCode {
 fn cmd_generate(
     grammar: &Path,
     name: Option<&str>,
+    warnings: WarningPolicy,
     target: &str,
     out: Option<PathBuf>,
 ) -> ExitCode {
-    let ag = match load_and_analyze(grammar, name) {
+    let ag = match load_and_analyze(grammar, name, warnings) {
         Ok(ag) => ag,
         Err(code) => return code,
     };
@@ -935,6 +999,7 @@ fn cmd_generate(
 fn load_and_analyze(
     path: &Path,
     override_name: Option<&str>,
+    warnings_policy: WarningPolicy,
 ) -> Result<parsuna::AnalyzedGrammar, ExitCode> {
     let src = std::fs::read_to_string(path).map_err(|e| {
         eprintln!("error: {}: {}", path.display(), e);
@@ -942,7 +1007,7 @@ fn load_and_analyze(
     })?;
     let mut g = parse_grammar(&src).map_err(|errs| {
         for e in errs {
-            eprintln!("{}", e);
+            eprintln!("{}", Diagnostic::from(e));
         }
         ExitCode::FAILURE
     })?;
@@ -954,10 +1019,28 @@ fn load_and_analyze(
             .unwrap_or("parser")
             .to_string(),
     };
-    analyze(g).map_err(|errs| {
-        for e in errs {
-            eprintln!("{}", e);
+    let outcome = analyze(g);
+    let promote = warnings_policy == WarningPolicy::Error;
+    let mut had_warning = false;
+    for d in &outcome.diagnostics {
+        if d.is_error() {
+            eprintln!("{}", d);
+        } else {
+            had_warning = true;
+            // Promote at print time so the user sees the right severity
+            // label and the build fails below.
+            if promote {
+                let mut promoted = d.clone();
+                promoted.severity = parsuna::Severity::Error;
+                eprintln!("{}", promoted);
+            } else {
+                eprintln!("{}", d);
+            }
         }
-        ExitCode::FAILURE
-    })
+    }
+    let fail = outcome.has_errors() || (promote && had_warning);
+    match outcome.grammar {
+        Some(ag) if !fail => Ok(ag),
+        _ => Err(ExitCode::FAILURE),
+    }
 }

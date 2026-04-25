@@ -445,3 +445,200 @@ fn expr_nullable(e: &Expr, nullable: &BTreeMap<String, bool>) -> bool {
         Expr::Plus(x) => expr_nullable(x, nullable),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Span;
+
+    fn seq(xs: &[&str]) -> Seq {
+        xs.iter().map(|s| (*s).into()).collect()
+    }
+
+    fn fset(seqs: &[&[&str]]) -> FirstSet {
+        seqs.iter().map(|s| seq(s)).collect()
+    }
+
+    fn rule(name: &str, body: Expr) -> RuleDef {
+        RuleDef {
+            name: name.into(),
+            body,
+            is_fragment: false,
+            span: Span::default(),
+        }
+    }
+
+    fn tok(name: &str) -> TokenDef {
+        TokenDef {
+            name: name.into(),
+            pattern: TokenPattern::Empty,
+            skip: false,
+            is_fragment: false,
+            span: Span::default(),
+        }
+    }
+
+    #[test]
+    fn concat_k_truncates_at_k_tokens() {
+        let a = fset(&[&["A"]]);
+        let b = fset(&[&["B", "C"]]);
+        let merged = concat_k(&a, &b, 2);
+        assert_eq!(merged, fset(&[&["A", "B"]]));
+
+        let merged3 = concat_k(&a, &b, 3);
+        assert_eq!(merged3, fset(&[&["A", "B", "C"]]));
+    }
+
+    #[test]
+    fn concat_k_passes_through_long_left_sequences() {
+        let a = fset(&[&["A", "B"]]);
+        let b = fset(&[&["C"]]);
+        let merged = concat_k(&a, &b, 2);
+        assert_eq!(merged, fset(&[&["A", "B"]]));
+    }
+
+    #[test]
+    fn concat_k_propagates_epsilon_on_left() {
+        let a = fset(&[&[]]);
+        let b = fset(&[&["A"], &["B"]]);
+        let merged = concat_k(&a, &b, 1);
+        assert_eq!(merged, fset(&[&["A"], &["B"]]));
+    }
+
+    #[test]
+    fn star_k_includes_epsilon_and_iterates_to_bound() {
+        let inner = fset(&[&["A"]]);
+        let s = star_k(&inner, 3);
+        assert_eq!(s, fset(&[&[], &["A"], &["A", "A"], &["A", "A", "A"]]));
+    }
+
+    #[test]
+    fn split_nullable_separates_epsilon() {
+        let s = fset(&[&[], &["A"], &["B", "C"]]);
+        let (non_eps, null) = split_nullable(&s);
+        assert!(null);
+        assert_eq!(non_eps, fset(&[&["A"], &["B", "C"]]));
+
+        let s2 = fset(&[&["X"]]);
+        let (non_eps2, null2) = split_nullable(&s2);
+        assert!(!null2);
+        assert_eq!(non_eps2, fset(&[&["X"]]));
+    }
+
+    #[test]
+    fn first_of_token_at_k1_is_singleton() {
+        let nullable = BTreeMap::new();
+        let first = BTreeMap::new();
+        let f = first_of(&Expr::Token("A".into()), &nullable, &first, 1);
+        assert_eq!(f, fset(&[&["A"]]));
+    }
+
+    #[test]
+    fn first_of_token_at_k0_is_epsilon() {
+        let nullable = BTreeMap::new();
+        let first = BTreeMap::new();
+        let f = first_of(&Expr::Token("A".into()), &nullable, &first, 0);
+        assert_eq!(f, fset(&[&[]]));
+    }
+
+    #[test]
+    fn first_of_opt_includes_epsilon() {
+        let nullable = BTreeMap::new();
+        let first = BTreeMap::new();
+        let f = first_of(
+            &Expr::Opt(Box::new(Expr::Token("A".into()))),
+            &nullable,
+            &first,
+            1,
+        );
+        assert_eq!(f, fset(&[&[], &["A"]]));
+    }
+
+    #[test]
+    fn first_of_plus_does_not_include_epsilon() {
+        let nullable = BTreeMap::new();
+        let first = BTreeMap::new();
+        let f = first_of(
+            &Expr::Plus(Box::new(Expr::Token("A".into()))),
+            &nullable,
+            &first,
+            1,
+        );
+        assert_eq!(f, fset(&[&["A"]]));
+    }
+
+    #[test]
+    fn compute_first_marks_nullable_rule() {
+        // r = A?  → r is nullable; FIRST(r) = {ε, [A]}
+        let mut g = Grammar::default();
+        g.tokens.push(tok("A"));
+        g.rules.push(rule(
+            "r",
+            Expr::Opt(Box::new(Expr::Token("A".into()))),
+        ));
+        let (nullable, first) = compute_first(&g, 1);
+        assert_eq!(nullable.get("r"), Some(&true));
+        assert_eq!(first.get("r").unwrap(), &fset(&[&[], &["A"]]));
+    }
+
+    #[test]
+    fn compute_first_propagates_through_rule_reference() {
+        // r = s; s = A;  → FIRST(r) = {[A]}
+        let mut g = Grammar::default();
+        g.tokens.push(tok("A"));
+        g.rules.push(rule("r", Expr::Rule("s".into())));
+        g.rules.push(rule("s", Expr::Token("A".into())));
+        let (nullable, first) = compute_first(&g, 1);
+        assert_eq!(nullable.get("r"), Some(&false));
+        assert_eq!(first.get("r").unwrap(), &fset(&[&["A"]]));
+    }
+
+    #[test]
+    fn compute_follow_includes_eof_for_every_rule() {
+        let mut g = Grammar::default();
+        g.tokens.push(tok("A"));
+        g.rules.push(rule("r", Expr::Token("A".into())));
+        let (nullable, first) = compute_first(&g, 1);
+        let follow = compute_follow(&g, &first, &nullable);
+        assert!(follow.get("r").unwrap().contains(EOF_MARKER));
+    }
+
+    #[test]
+    fn compute_follow_passes_first_of_tail_to_inner_rule() {
+        // outer = inner B; inner = A;  → FOLLOW(inner) ⊇ {B}
+        let mut g = Grammar::default();
+        g.tokens.push(tok("A"));
+        g.tokens.push(tok("B"));
+        g.rules.push(rule("inner", Expr::Token("A".into())));
+        g.rules.push(rule(
+            "outer",
+            Expr::Seq(vec![Expr::Rule("inner".into()), Expr::Token("B".into())]),
+        ));
+        let (nullable, first) = compute_first(&g, 1);
+        let follow = compute_follow(&g, &first, &nullable);
+        let inner_follow = follow.get("inner").unwrap();
+        assert!(inner_follow.contains("B"));
+    }
+
+    #[test]
+    fn compute_follow_k_lookahead_sequences() {
+        // outer = inner B C; inner = A;  → FOLLOW_2(inner) includes [B, C]
+        let mut g = Grammar::default();
+        g.tokens.push(tok("A"));
+        g.tokens.push(tok("B"));
+        g.tokens.push(tok("C"));
+        g.rules.push(rule("inner", Expr::Token("A".into())));
+        g.rules.push(rule(
+            "outer",
+            Expr::Seq(vec![
+                Expr::Rule("inner".into()),
+                Expr::Token("B".into()),
+                Expr::Token("C".into()),
+            ]),
+        ));
+        let (nullable, first) = compute_first(&g, 2);
+        let follow = compute_follow_k(&g, &first, &nullable, 2);
+        let inner_follow = follow.get("inner").unwrap();
+        assert!(inner_follow.contains(&seq(&["B", "C"])));
+    }
+}

@@ -1,8 +1,8 @@
 use parsuna_rt::RuleKindEnum;
 
-use crate::error::Error;
 use crate::grammar::ir::*;
-use crate::span::Span;
+use crate::Span;
+use parsuna_rt::Error;
 
 use super::generated::{self, Event, RuleKind, Token, TokenKind};
 
@@ -626,4 +626,201 @@ fn unquote_string(lit: &str, span: Span, issues: &mut Vec<Error>) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_simple_token_and_rule() {
+        let g = parse_grammar("A = \"a\"; main = A;").expect("ok");
+        assert_eq!(g.tokens.len(), 1);
+        assert_eq!(g.tokens[0].name, "A");
+        assert!(matches!(g.tokens[0].pattern, TokenPattern::Literal(ref s) if s == "a"));
+        assert_eq!(g.rules.len(), 1);
+        assert_eq!(g.rules[0].name, "main");
+        assert!(matches!(g.rules[0].body, Expr::Token(ref n) if n == "A"));
+    }
+
+    #[test]
+    fn skip_prefix_marks_token_as_skip() {
+        let g = parse_grammar("?WS = \" \"+; T = \"t\"; main = T;").expect("ok");
+        let ws = g.token("WS").expect("WS");
+        assert!(ws.skip);
+        assert!(!ws.is_fragment);
+    }
+
+    #[test]
+    fn underscore_prefix_marks_fragment() {
+        let g = parse_grammar(
+            "_DIGIT = '0'..'9'; NUM = _DIGIT+; main = NUM;",
+        )
+        .expect("ok");
+        let frag = g.token("_DIGIT").expect("_DIGIT");
+        assert!(frag.is_fragment);
+        assert!(!frag.skip);
+    }
+
+    #[test]
+    fn skip_and_fragment_combo_rejected() {
+        // `?_X` is both skip and fragment — should produce an error.
+        let errs = parse_grammar("?_X = \"x\"; T = \"t\"; main = T;").err().expect("err");
+        assert!(errs
+            .iter()
+            .any(|e| e.message.contains("skip") && e.message.contains("fragment")));
+    }
+
+    #[test]
+    fn skip_on_rule_is_rejected() {
+        // `?` is only valid on tokens, not rules.
+        let errs = parse_grammar("T = \"t\"; ?main = T;").err().expect("err");
+        assert!(errs.iter().any(|e| e.message.contains("only applies to tokens")));
+    }
+
+    #[test]
+    fn quantifiers_become_opt_star_plus_in_rule_body() {
+        let g = parse_grammar("A = \"a\"; main = A? A* A+;").expect("ok");
+        let body = &g.rules[0].body;
+        let xs = match body {
+            Expr::Seq(xs) => xs,
+            other => panic!("expected Seq, got {:?}", other),
+        };
+        assert!(matches!(xs[0], Expr::Opt(_)));
+        assert!(matches!(xs[1], Expr::Star(_)));
+        assert!(matches!(xs[2], Expr::Plus(_)));
+    }
+
+    #[test]
+    fn alt_with_pipe_in_rule_body() {
+        let g = parse_grammar("A = \"a\"; B = \"b\"; main = A | B;").expect("ok");
+        assert!(matches!(g.rules[0].body, Expr::Alt(ref xs) if xs.len() == 2));
+    }
+
+    #[test]
+    fn group_parentheses_in_token_pattern() {
+        let g = parse_grammar("T = (\"a\" | \"b\")+; main = T;").expect("ok");
+        let pat = &g.token("T").unwrap().pattern;
+        assert!(matches!(pat, TokenPattern::Plus(_)));
+    }
+
+    #[test]
+    fn char_range_pattern() {
+        let g = parse_grammar("D = '0'..'9'; main = D;").expect("ok");
+        let pat = &g.token("D").unwrap().pattern;
+        match pat {
+            TokenPattern::Class(cc) => {
+                assert!(!cc.negated);
+                assert_eq!(cc.items.len(), 1);
+                assert!(matches!(cc.items[0], ClassItem::Range(0x30, 0x39)));
+            }
+            _ => panic!("expected Class, got {:?}", pat),
+        }
+    }
+
+    #[test]
+    fn dot_atom_means_negated_empty_class_any_char() {
+        // `.` is "any byte" — represented as a negated empty class.
+        let g = parse_grammar("ANY = .; main = ANY;").expect("ok");
+        let pat = &g.token("ANY").unwrap().pattern;
+        match pat {
+            TokenPattern::Class(cc) => {
+                assert!(cc.negated);
+                assert!(cc.items.is_empty());
+            }
+            _ => panic!("expected negated class, got {:?}", pat),
+        }
+    }
+
+    #[test]
+    fn negated_class_with_bang() {
+        let g = parse_grammar("X = !'a'; main = X;").expect("ok");
+        let pat = &g.token("X").unwrap().pattern;
+        match pat {
+            TokenPattern::Class(cc) => {
+                assert!(cc.negated);
+                assert_eq!(cc.items.len(), 1);
+                assert!(matches!(cc.items[0], ClassItem::Char(0x61)));
+            }
+            _ => panic!("expected negated class, got {:?}", pat),
+        }
+    }
+
+    #[test]
+    fn unicode_escape_in_char_literal() {
+        let g = parse_grammar("X = '\\u{0041}'; main = X;").expect("ok");
+        let pat = &g.token("X").unwrap().pattern;
+        // `'A'` (a single char literal) folds to a one-character literal pattern.
+        assert!(matches!(pat, TokenPattern::Literal(ref s) if s == "A"));
+    }
+
+    #[test]
+    fn string_atom_in_rule_body_is_rejected() {
+        // String literals are token-only.
+        let errs = parse_grammar("T = \"t\"; main = \"t\";").err().expect("err");
+        assert!(errs
+            .iter()
+            .any(|e| e.message.contains("string literal atoms")));
+    }
+
+    #[test]
+    fn char_atom_in_rule_body_is_rejected() {
+        let errs = parse_grammar("T = \"t\"; main = 'a';").err().expect("err");
+        assert!(errs.iter().any(|e| e.message.contains("character atom")));
+    }
+
+    #[test]
+    fn empty_source_yields_empty_grammar() {
+        let g = parse_grammar("").expect("ok");
+        assert!(g.tokens.is_empty());
+        assert!(g.rules.is_empty());
+    }
+
+    #[test]
+    fn comments_and_whitespace_are_skipped() {
+        let src = "
+            // a leading comment
+            A = \"a\"; // trailing
+            // between
+            main = A;
+        ";
+        let g = parse_grammar(src).expect("ok");
+        assert_eq!(g.tokens.len(), 1);
+        assert_eq!(g.tokens[0].name, "A");
+        assert_eq!(g.rules.len(), 1);
+        assert_eq!(g.rules[0].name, "main");
+    }
+
+    #[test]
+    fn multiple_decls_preserve_source_order() {
+        let g = parse_grammar(
+            "Z = \"z\"; A = \"a\"; second = A; first = Z;",
+        )
+        .expect("ok");
+        let token_names: Vec<&str> = g.tokens.iter().map(|t| t.name.as_str()).collect();
+        let rule_names: Vec<&str> = g.rules.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(token_names, vec!["Z", "A"]);
+        assert_eq!(rule_names, vec!["second", "first"]);
+    }
+
+    #[test]
+    fn negated_class_with_grouped_alternatives() {
+        // `!('a' | 'b')` is a negated class with two char items.
+        let g = parse_grammar("X = !('a' | 'b'); main = X;").expect("ok");
+        let pat = &g.token("X").unwrap().pattern;
+        match pat {
+            TokenPattern::Class(cc) => {
+                assert!(cc.negated);
+                assert_eq!(cc.items.len(), 2);
+            }
+            _ => panic!("expected negated class, got {:?}", pat),
+        }
+    }
+
+    #[test]
+    fn string_with_escape_unquotes_correctly() {
+        let g = parse_grammar(r#"NL = "\n"; main = NL;"#).expect("ok");
+        let pat = &g.token("NL").unwrap().pattern;
+        assert!(matches!(pat, TokenPattern::Literal(ref s) if s == "\n"));
+    }
 }

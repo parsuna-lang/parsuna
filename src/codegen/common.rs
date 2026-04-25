@@ -91,3 +91,71 @@ pub fn escape_string_bmp(s: &str) -> String {
     out
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pascal_capitalizes_words_and_drops_underscores() {
+        assert_eq!(pascal("hello_world"), "HelloWorld");
+        assert_eq!(pascal("foo"), "Foo");
+        assert_eq!(pascal("ABC_DEF"), "AbcDef");
+        assert_eq!(pascal(""), "");
+        assert_eq!(pascal("_leading"), "Leading");
+        assert_eq!(pascal("a_b_c"), "ABC");
+    }
+
+    #[test]
+    fn screaming_snake_uppercases_and_inserts_underscores() {
+        assert_eq!(screaming_snake("helloWorld"), "HELLO_WORLD");
+        assert_eq!(screaming_snake("foo"), "FOO");
+        assert_eq!(screaming_snake("FooBar"), "FOO_BAR");
+        assert_eq!(screaming_snake("already_snake"), "ALREADY_SNAKE");
+    }
+
+    #[test]
+    fn escape_string_handles_special_chars() {
+        assert_eq!(escape_string("hi"), "hi");
+        assert_eq!(escape_string("a\"b"), "a\\\"b");
+        assert_eq!(escape_string("a\\b"), "a\\\\b");
+        assert_eq!(escape_string("\n"), "\\n");
+        assert_eq!(escape_string("\r"), "\\r");
+        assert_eq!(escape_string("\t"), "\\t");
+    }
+
+    #[test]
+    fn escape_string_uses_braced_unicode_for_low_controls() {
+        // Below 0x20 → `\u{0001}` style.
+        assert_eq!(escape_string("\x01"), "\\u{0001}");
+    }
+
+    #[test]
+    fn escape_string_bmp_uses_unbraced_unicode_for_low_controls() {
+        // BMP variant (Java/C# style) → ``.
+        assert_eq!(escape_string_bmp("\x01"), "\\u0001");
+    }
+
+    #[test]
+    fn visit_hits_every_subexpression_pre_order() {
+        // (A B)? — visits Opt, Seq, A, B
+        let e = Expr::Opt(Box::new(Expr::Seq(vec![
+            Expr::Token("A".into()),
+            Expr::Token("B".into()),
+        ])));
+        let mut seen: Vec<String> = Vec::new();
+        visit(&e, &mut |x| {
+            seen.push(match x {
+                Expr::Empty => "Empty".into(),
+                Expr::Token(n) => format!("Token({})", n),
+                Expr::Rule(n) => format!("Rule({})", n),
+                Expr::Seq(_) => "Seq".into(),
+                Expr::Alt(_) => "Alt".into(),
+                Expr::Opt(_) => "Opt".into(),
+                Expr::Star(_) => "Star".into(),
+                Expr::Plus(_) => "Plus".into(),
+            });
+        });
+        assert_eq!(seen, vec!["Opt", "Seq", "Token(A)", "Token(B)"]);
+    }
+}
+

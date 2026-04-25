@@ -187,3 +187,90 @@ fn sanitize_name(s: &str) -> String {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::analysis::analyze;
+    use crate::grammar::parse_grammar;
+
+    fn analyze_src(src: &str, name: &str) -> crate::AnalyzedGrammar {
+        let mut g = parse_grammar(src).expect("parse");
+        g.name = name.into();
+        let outcome = analyze(g);
+        assert!(!outcome.has_errors(), "{:?}", outcome.diagnostics);
+        outcome.grammar.expect("grammar")
+    }
+
+    #[test]
+    fn sanitize_name_handles_special_chars() {
+        assert_eq!(sanitize_name("foo"), "foo");
+        assert_eq!(sanitize_name("foo-bar"), "foo_bar");
+        assert_eq!(sanitize_name(""), "_");
+        assert_eq!(sanitize_name("123abc"), "_123abc");
+        assert_eq!(sanitize_name("a.b.c"), "a_b_c");
+    }
+
+    #[test]
+    fn js_string_quotes_and_escapes() {
+        assert_eq!(js_string("hi"), "'hi'");
+        assert_eq!(js_string("it's"), "'it\\'s'");
+        assert_eq!(js_string("a\\b"), "'a\\\\b'");
+        assert_eq!(js_string("\n"), "'\\n'");
+    }
+
+    #[test]
+    fn render_class_emits_regex_literal() {
+        let cc = CharClass {
+            negated: false,
+            items: vec![ClassItem::Range(b'a' as u32, b'z' as u32)],
+        };
+        assert_eq!(render_class(&cc), "/[a-z]/");
+
+        let neg = CharClass {
+            negated: true,
+            items: vec![ClassItem::Char(b'a' as u32)],
+        };
+        assert_eq!(render_class(&neg), "/[^a]/");
+    }
+
+    #[test]
+    fn render_expr_maps_each_node_to_tree_sitter_helper() {
+        assert_eq!(render_expr(&Expr::Empty), "blank()");
+        assert_eq!(render_expr(&Expr::Token("A".into())), "$.A");
+        assert_eq!(render_expr(&Expr::Rule("main".into())), "$.main");
+        assert_eq!(
+            render_expr(&Expr::Opt(Box::new(Expr::Token("A".into())))),
+            "optional($.A)"
+        );
+        assert_eq!(
+            render_expr(&Expr::Star(Box::new(Expr::Token("A".into())))),
+            "repeat($.A)"
+        );
+        assert_eq!(
+            render_expr(&Expr::Plus(Box::new(Expr::Token("A".into())))),
+            "repeat1($.A)"
+        );
+    }
+
+    #[test]
+    fn emit_includes_extras_for_skip_tokens_and_rule_names() {
+        let ag = analyze_src(
+            "?WS = \" \"+; T = \"t\"; main = T;",
+            "demo",
+        );
+        let js = emit(&ag);
+        assert!(js.contains("module.exports = grammar({"));
+        assert!(js.contains("name: 'demo'"));
+        assert!(js.contains("$.WS"), "extras list missing skip token: {}", js);
+        assert!(js.contains("main: $ => $.T"));
+        assert!(js.contains("T: $ => token('t')"));
+    }
+
+    #[test]
+    fn emit_with_no_skip_tokens_has_empty_extras() {
+        let ag = analyze_src("T = \"t\"; main = T;", "demo");
+        let js = emit(&ag);
+        assert!(js.contains("extras: $ => [],"), "{}", js);
+    }
+}

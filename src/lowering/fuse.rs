@@ -115,3 +115,121 @@ fn collect_tree_targets(tree: &DispatchTree, out: &mut Vec<StateId>) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::analysis::analyze;
+    use crate::grammar::parse_grammar;
+    use crate::lowering::{lower, DfaTable, StateTable};
+
+    fn analyze_src(src: &str) -> crate::AnalyzedGrammar {
+        let g = parse_grammar(src).expect("parse");
+        let outcome = analyze(g);
+        assert!(!outcome.has_errors(), "{:?}", outcome.diagnostics);
+        outcome.grammar.expect("grammar")
+    }
+
+    fn empty_dfa() -> DfaTable {
+        DfaTable {
+            states: vec![crate::lowering::lexer_dfa::DfaState {
+                trans: vec![0; 256],
+                accept: None,
+            }],
+            start: 0,
+        }
+    }
+
+    fn make_state(id: StateId, ops: Vec<Op>) -> State {
+        State {
+            id,
+            label: format!("s{}", id),
+            ops,
+        }
+    }
+
+    #[test]
+    fn default_max_depth_is_positive() {
+        assert!(DEFAULT_MAX_DEPTH > 0);
+    }
+
+    #[test]
+    fn fuse_real_lowering_reaches_fixpoint_and_keeps_entries() {
+        // Smoke: lower() runs fuse() last; the resulting table should still
+        // have each entry state present in `states`.
+        let ag = analyze_src("T = \"t\"; main = T;");
+        let st = lower(&ag);
+        for (_, id) in &st.entry_states {
+            assert!(st.states.contains_key(id), "entry {} missing post-fuse", id);
+        }
+    }
+
+    #[test]
+    fn eliminate_dead_drops_states_no_entry_can_reach() {
+        // Build a tiny table by hand: state 1 is the entry, jumps to 2;
+        // state 99 is unreferenced and should be dropped.
+        let mut states = BTreeMap::new();
+        states.insert(1, make_state(1, vec![Op::Jump(2)]));
+        states.insert(2, make_state(2, vec![Op::Ret]));
+        states.insert(99, make_state(99, vec![Op::Ret]));
+        let mut table = StateTable {
+            grammar_name: "x".into(),
+            tokens: vec![],
+            rule_kinds: vec![],
+            first_sets: vec![],
+            sync_sets: vec![],
+            states,
+            entry_states: vec![("main".into(), 1)],
+            eof_id: 0,
+            error_id: -1,
+            k: 1,
+            lexer_dfa: empty_dfa(),
+        };
+        fuse(&mut table);
+        assert!(table.states.contains_key(&1));
+        // Either kept as a separate state, or spliced into 1 — but 99 must go.
+        assert!(!table.states.contains_key(&99));
+    }
+
+    #[test]
+    fn splice_chains_absorbs_jump_chain_into_first_state() {
+        // 1 -> Jump(2); 2 -> Jump(3); 3 -> Ret.
+        // After splice, state 1's tail Jump should be replaced with the
+        // chain, ending at Ret.
+        let mut states = BTreeMap::new();
+        states.insert(1, make_state(1, vec![Op::Jump(2)]));
+        states.insert(2, make_state(2, vec![Op::Jump(3)]));
+        states.insert(3, make_state(3, vec![Op::Ret]));
+        splice_chains(&mut states);
+        let s1_ops = &states.get(&1).unwrap().ops;
+        // Final op should now be Ret (chain absorbed).
+        assert!(matches!(s1_ops.last(), Some(Op::Ret)), "{:?}", s1_ops);
+    }
+
+    #[test]
+    fn splice_chains_stops_at_branchy_target() {
+        // 1 -> Jump(2); 2 starts with a Dispatch (branchy) — splicing must
+        // stop at 1 so the original Jump is retained.
+        let dispatch = Op::Dispatch {
+            tree: DispatchTree::Leaf(DispatchLeaf::Fallthrough),
+            sync: 0,
+            next: 99,
+        };
+        let mut states = BTreeMap::new();
+        states.insert(1, make_state(1, vec![Op::Jump(2)]));
+        states.insert(2, make_state(2, vec![dispatch]));
+        splice_chains(&mut states);
+        let s1_ops = &states.get(&1).unwrap().ops;
+        assert!(matches!(s1_ops.last(), Some(Op::Jump(2))), "{:?}", s1_ops);
+    }
+
+    #[test]
+    fn splice_chains_breaks_self_loop() {
+        // A jump that loops back on itself must not inline forever.
+        let mut states = BTreeMap::new();
+        states.insert(1, make_state(1, vec![Op::Jump(1)]));
+        splice_chains(&mut states); // would diverge if the visited-set guard were missing
+        let s1_ops = &states.get(&1).unwrap().ops;
+        assert_eq!(s1_ops.len(), 1);
+    }
+}
