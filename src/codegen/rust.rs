@@ -291,22 +291,19 @@ fn emit_tables(s: &mut String, st: &StateTable) {
     writeln!(s).unwrap();
 
     for f in &st.first_sets {
+        write!(s, "static FIRST_{}: &[&[TokenKind]] = &[", f.id).unwrap();
         for (j, seq) in f.seqs.iter().enumerate() {
-            write!(s, "static FIRST_{}_{}: &[TokenKind] = &[", f.id, j).unwrap();
+            if j > 0 {
+                s.push_str(", ");
+            }
+            s.push_str("&[");
             for (k, t) in seq.iter().enumerate() {
                 if k > 0 {
                     s.push_str(", ");
                 }
                 write!(s, "{}", token_variant(st, *t)).unwrap();
             }
-            writeln!(s, "];").unwrap();
-        }
-        write!(s, "static FIRST_{}: &[&[TokenKind]] = &[", f.id).unwrap();
-        for j in 0..f.seqs.len() {
-            if j > 0 {
-                s.push_str(", ");
-            }
-            write!(s, "FIRST_{}_{}", f.id, j).unwrap();
+            s.push(']');
         }
         writeln!(s, "];").unwrap();
     }
