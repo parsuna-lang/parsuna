@@ -1,10 +1,22 @@
-//! FIRST(k)/FOLLOW computation and the helpers the grammar analysis builds
-//! on (length-bounded concatenation, bounded star closure, etc.).
+//! FIRST(k)/FOLLOW computation, plus the iterative-deepening driver that
+//! picks the smallest `k` for which the grammar has no LL conflicts.
+//!
+//! [`solve_lookahead`] is the entry point used by [`super::analyze`]; the
+//! rest are helpers it (and the lints) build on (length-bounded
+//! concatenation, bounded star closure, conflict detection).
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::EOF_MARKER;
+use crate::diagnostic::Diagnostic;
 use crate::grammar::ir::*;
+use crate::Span;
+
+/// How many rounds of raising `k` we tolerate with no reduction in the
+/// number of conflicting sequences before giving up on the grammar. Keeps
+/// the iteration in [`solve_lookahead`] from looping forever on genuinely
+/// ambiguous grammars.
+const STUCK_LIMIT: usize = 3;
 
 /// A sequence of token names, bounded by the analysis' `k`. Tokens are
 /// referred to by name here rather than numeric id because analysis runs
@@ -46,7 +58,7 @@ pub fn concat_k(a: &FirstSet, b: &FirstSet, k: usize) -> FirstSet {
 /// Length-bounded Kleene star over FIRST sets. Seeded with ε and saturated
 /// by repeatedly concatenating `inner`; the fixed point is finite because
 /// sequences are capped at `k` tokens.
-pub fn star_k(inner: &FirstSet, k: usize) -> FirstSet {
+fn star_k(inner: &FirstSet, k: usize) -> FirstSet {
     let mut out: FirstSet = FirstSet::new();
     out.insert(Vec::new());
     loop {
@@ -67,7 +79,7 @@ pub fn star_k(inner: &FirstSet, k: usize) -> FirstSet {
 /// Classic worklist-free saturation: on each pass we recompute every rule's
 /// FIRST from the current approximation and stop once nothing changed. The
 /// iteration always terminates because FIRST(k) is a finite lattice.
-pub fn compute_first(
+fn compute_first(
     g: &Grammar,
     k: usize,
 ) -> (BTreeMap<String, bool>, BTreeMap<String, FirstSet>) {
@@ -446,10 +458,209 @@ fn expr_nullable(e: &Expr, nullable: &BTreeMap<String, bool>) -> bool {
     }
 }
 
+/// Pick the smallest `k` for which the grammar is LL(k): raise `k` one at a
+/// time, recompute FIRST/FOLLOW, scan for conflicts, and stop when none
+/// remain. If no finite `k` works, push descriptive diagnostics into
+/// `diags` and return `Err(())`.
+///
+/// Termination: gives up after [`STUCK_LIMIT`] rounds in which the conflict
+/// count failed to decrease — past that point more lookahead is unlikely to
+/// resolve anything.
+pub fn solve_lookahead(
+    g: &Grammar,
+    diags: &mut Vec<Diagnostic>,
+) -> Result<(usize, BTreeMap<String, bool>, BTreeMap<String, FirstSet>), ()> {
+    let mut chosen: Option<(usize, BTreeMap<String, bool>, BTreeMap<String, FirstSet>)> = None;
+    let mut last_conflicts: Vec<RawConflict> = Vec::new();
+    let mut last_k;
+    let mut min_size: Option<usize> = None;
+    let mut stuck = 0usize;
+
+    let mut k = 0usize;
+    loop {
+        k += 1;
+        last_k = k;
+        let (nullable, first) = compute_first(g, k);
+        let follow_k = compute_follow_k(g, &first, &nullable, k);
+        let conflicts = detect_conflicts(g, &nullable, &first, &follow_k, k);
+        if conflicts.is_empty() {
+            chosen = Some((k, nullable, first));
+            break;
+        }
+        let size: usize = conflicts.iter().map(|c| c.ambiguous.len()).sum();
+        match min_size {
+            Some(m) if size < m => {
+                min_size = Some(size);
+                stuck = 0;
+            }
+            Some(_) => stuck += 1,
+            None => min_size = Some(size),
+        }
+        last_conflicts = conflicts;
+        if stuck >= STUCK_LIMIT {
+            break;
+        }
+    }
+
+    chosen.ok_or_else(|| {
+        diags.push(Diagnostic::error(format!(
+            "grammar is not LL(k) for any finite k: conflicts are stable \
+             at k = {} (stopped iterating after no progress over {} rounds)",
+            last_k, STUCK_LIMIT
+        )));
+        diags.extend(render_conflicts(&last_conflicts));
+    })
+}
+
+#[derive(Clone, Debug)]
+struct RawConflict {
+    rule_name: String,
+    rule_span: Span,
+    arm_i: usize,
+    arm_j: usize,
+    ambiguous: BTreeSet<Seq>,
+}
+
+fn render_conflicts(raws: &[RawConflict]) -> Vec<Diagnostic> {
+    raws.iter()
+        .map(|c| {
+            let sample: Vec<String> = c.ambiguous.iter().take(3).map(|s| format_seq(s)).collect();
+            Diagnostic::error(format!(
+                "rule `{}`: alternatives {} and {} both predict on {}{}",
+                c.rule_name,
+                c.arm_i + 1,
+                c.arm_j + 1,
+                sample.join(", "),
+                if c.ambiguous.len() > 3 { ", …" } else { "" }
+            ))
+            .at(c.rule_span)
+        })
+        .collect()
+}
+
+fn detect_conflicts(
+    g: &Grammar,
+    nullable: &BTreeMap<String, bool>,
+    first: &BTreeMap<String, FirstSet>,
+    follow_k: &BTreeMap<String, FirstSet>,
+    k: usize,
+) -> Vec<RawConflict> {
+    let mut out = Vec::new();
+    for r in &g.rules {
+        let tail = follow_k.get(&r.name).cloned().unwrap_or_default();
+        walk_check_conflicts(
+            &r.body, &tail, &r.name, r.span, nullable, first, k, &mut out,
+        );
+    }
+    out
+}
+
+fn walk_check_conflicts(
+    e: &Expr,
+    tail: &FirstSet,
+    rule_name: &str,
+    rule_span: Span,
+    nullable: &BTreeMap<String, bool>,
+    first: &BTreeMap<String, FirstSet>,
+    k: usize,
+    out: &mut Vec<RawConflict>,
+) {
+    match e {
+        Expr::Empty | Expr::Token(_) | Expr::Rule(_) => {}
+        Expr::Seq(xs) => {
+            // Compute the "tail after position i" (succ[i+1] = tail after
+            // xs[i]) by folding right-to-left: each element's lookahead is
+            // its own FIRST concatenated with the tail that follows it.
+            let n = xs.len();
+            let mut succ: Vec<FirstSet> = vec![tail.clone(); n + 1];
+            for i in (0..n).rev() {
+                let fx = first_of(&xs[i], nullable, first, k);
+                succ[i] = concat_k(&fx, &succ[i + 1], k);
+            }
+            for i in 0..n {
+                walk_check_conflicts(
+                    &xs[i],
+                    &succ[i + 1],
+                    rule_name,
+                    rule_span,
+                    nullable,
+                    first,
+                    k,
+                    out,
+                );
+            }
+        }
+        Expr::Alt(xs) => {
+            // Predict set for each arm: FIRST(arm) extended by the enclosing
+            // tail. Nullable arms contribute their ε via the tail, so we
+            // strip ε here and compare on the non-empty prefixes.
+            let arms: Vec<(usize, FirstSet)> = xs
+                .iter()
+                .enumerate()
+                .map(|(i, x)| {
+                    let f = first_of(x, nullable, first, k);
+                    let predict = concat_k(&f, tail, k);
+                    let (non_eps, _) = split_nullable(&predict);
+                    (i, non_eps)
+                })
+                .collect();
+            // Conflict detection: any prefix relation between two arms'
+            // prediction sequences is ambiguous — if arm i predicts [a b]
+            // and arm j predicts [a], seeing [a c] is fine for j but a
+            // pure [a b …] input could match either.
+            for i in 0..arms.len() {
+                for j in (i + 1)..arms.len() {
+                    let mut ambiguous: BTreeSet<Seq> = BTreeSet::new();
+                    for a in &arms[i].1 {
+                        for b in &arms[j].1 {
+                            if a.starts_with(b.as_slice()) {
+                                ambiguous.insert(b.clone());
+                            } else if b.starts_with(a.as_slice()) {
+                                ambiguous.insert(a.clone());
+                            }
+                        }
+                    }
+                    if !ambiguous.is_empty() {
+                        out.push(RawConflict {
+                            rule_name: rule_name.to_string(),
+                            rule_span,
+                            arm_i: arms[i].0,
+                            arm_j: arms[j].0,
+                            ambiguous,
+                        });
+                    }
+                }
+            }
+            for x in xs {
+                walk_check_conflicts(x, tail, rule_name, rule_span, nullable, first, k, out);
+            }
+        }
+        Expr::Opt(x) => {
+            walk_check_conflicts(x, tail, rule_name, rule_span, nullable, first, k, out);
+        }
+        Expr::Star(x) | Expr::Plus(x) => {
+            // Inside a repetition, each iteration can be followed by
+            // another iteration or by the outer tail — hence star_k
+            // concatenated with tail rather than just tail.
+            let fx = first_of(x, nullable, first, k);
+            let star = star_k(&fx, k);
+            let body_tail = concat_k(&star, tail, k);
+            walk_check_conflicts(x, &body_tail, rule_name, rule_span, nullable, first, k, out);
+        }
+    }
+}
+
+fn format_seq(seq: &Seq) -> String {
+    if seq.is_empty() {
+        "ε".to_string()
+    } else {
+        format!("[{}]", seq.join(" "))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Span;
 
     fn seq(xs: &[&str]) -> Seq {
         xs.iter().map(|s| (*s).into()).collect()

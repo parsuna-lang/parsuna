@@ -102,8 +102,10 @@ present analysis returns; warnings alone do not stop the build.
 Sub-pass 2c — Iterative FIRST/FOLLOW at the smallest viable k
 -------------------------------------------------------------
 
-File: ``src/analysis/first_follow.rs`` plus the outer loop in
-``src/analysis/mod.rs``.
+File: ``src/analysis/first_follow.rs``. The entry point used by
+``analyze`` is ``solve_lookahead``; FIRST/FOLLOW computation,
+conflict detection, and the iterative deepening loop all live
+together in this module.
 
 The driver algorithm is **iterative deepening on k**:
 
