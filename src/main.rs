@@ -4,7 +4,7 @@ use std::process::ExitCode;
 
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use parsuna::grammar::ir::{CharClass, ClassItem};
-use parsuna::lowering::lexer_dfa::{DfaTable, DEAD};
+use parsuna::lowering::lexer_dfa::{DfaState, START};
 use parsuna::{
     analysis::{analyze, EOF_MARKER},
     codegen::{self, Backend, BACKENDS},
@@ -90,12 +90,9 @@ enum DebugCmd {
     Analysis,
     /// Dump the lowered state table that drives the generated parser.
     Lowering,
-    /// Dump the lexer DFA. By default minimized; use --full for the raw
-    /// pre-minimization table.
+    /// Dump the lexer DFA — one entry per state, with transitions
+    /// collapsed into byte ranges per target.
     Dfa {
-        /// Show the un-minimized DFA.
-        #[arg(long)]
-        full: bool,
         /// Output format: human-readable text or Graphviz dot.
         #[arg(long, default_value = "plain")]
         format: OutputFormat,
@@ -176,9 +173,9 @@ fn cmd_debug(
         }
         DebugCmd::Analysis => dbg_load_analyzed(grammar, name, warnings, print_analysis),
         DebugCmd::Lowering => dbg_load_lowered(grammar, name, warnings, print_lowering),
-        DebugCmd::Dfa { full, format } => {
+        DebugCmd::Dfa { format } => {
             dbg_load_lowered(grammar, name, warnings, move |_, st| match format {
-                OutputFormat::Plain => print_dfa(st, full),
+                OutputFormat::Plain => print_dfa(st),
                 OutputFormat::Dot => print_dfa_dot(st),
             })
         }
@@ -231,8 +228,8 @@ fn print_stats(ag: &parsuna::AnalyzedGrammar, st: &StateTable) {
     println!("SYNC pool     : {} interned", st.sync_sets.len());
     println!(
         "lexer DFA     : {} states, start {}",
-        st.lexer_dfa.states.len(),
-        st.lexer_dfa.start
+        st.lexer_dfa.len(),
+        parsuna::lowering::lexer_dfa::START
     );
     println!("entry points  : {}", st.entry_states.len());
 }
@@ -358,40 +355,26 @@ fn print_lowering(_ag: &parsuna::AnalyzedGrammar, st: &StateTable) {
     }
 }
 
-fn print_dfa(st: &StateTable, full: bool) {
-    let dfa: &DfaTable = &st.lexer_dfa;
+fn print_dfa(st: &StateTable) {
+    let dfa: &[DfaState] = &st.lexer_dfa;
 
-    let real_count = dfa.states.len().saturating_sub(1);
-    println!("DFA: {} real states, start = {}", real_count, dfa.start);
+    let real_count = dfa.len().saturating_sub(1);
+    println!("DFA: {} real states, start = {}", real_count, START);
     println!();
 
-    for (i, state) in dfa.states.iter().enumerate().skip(1) {
+    for (i, state) in dfa.iter().enumerate().skip(1) {
         let accept = match state.accept {
             Some(k) => format!("accept={}({})", k, token_name_for_kind(st, k)),
             None => "-".to_string(),
         };
         println!("state {:>3}  {}", i, accept);
-        if full {
-            for chunk_start in (0..256).step_by(32) {
-                print!("            {:3}:", chunk_start);
-                for b in chunk_start..chunk_start + 32 {
-                    let t = state.trans[b];
-                    if t == DEAD {
-                        print!("   .");
-                    } else {
-                        print!(" {:>3}", t);
-                    }
-                }
-                println!();
-            }
+        if state.arms.is_empty() {
+            println!("            (terminal — no live transitions)");
         } else {
-            let ranges = collapse_transitions(&state.trans);
-            if ranges.is_empty() {
-                println!("            (terminal — no live transitions)");
-            } else {
-                for (from, to, target) in ranges {
+            for arm in &state.arms {
+                for &(from, to) in &arm.ranges {
                     let label = byte_range_label(from, to);
-                    println!("            {:>18}  -> {}", label, target);
+                    println!("            {:>18}  -> {}", label, arm.target);
                 }
             }
         }
@@ -658,24 +641,6 @@ fn token_name_for_kind_fallback<'a>(st: &'a StateTable, kind: i16, fallback: &'a
     }
 }
 
-fn collapse_transitions(row: &[u32]) -> Vec<(u8, u8, u32)> {
-    let mut out = Vec::new();
-    let mut i = 0usize;
-    while i < 256 {
-        let t = row[i];
-        if t == DEAD {
-            i += 1;
-            continue;
-        }
-        let start = i;
-        while i < 256 && row[i] == t {
-            i += 1;
-        }
-        out.push((start as u8, (i - 1) as u8, t));
-    }
-    out
-}
-
 fn byte_range_label(from: u8, to: u8) -> String {
     if from == to {
         display_byte(from)
@@ -696,16 +661,16 @@ fn display_byte(b: u8) -> String {
 }
 
 fn print_dfa_dot(st: &StateTable) {
-    let dfa: &DfaTable = &st.lexer_dfa;
+    let dfa: &[DfaState] = &st.lexer_dfa;
     println!("digraph lexer_dfa {{");
     println!("  rankdir=LR;");
     println!("  node [fontname=\"Menlo,Monaco,Consolas,monospace\"];");
     println!("  edge [fontname=\"Menlo,Monaco,Consolas,monospace\"];");
 
     println!("  _start [shape=point, width=0.12];");
-    println!("  _start -> s{};", dfa.start);
+    println!("  _start -> s{};", START);
 
-    for (i, state) in dfa.states.iter().enumerate().skip(1) {
+    for (i, state) in dfa.iter().enumerate().skip(1) {
         let (shape, label) = match state.accept {
             Some(k) => (
                 "doublecircle",
@@ -714,9 +679,11 @@ fn print_dfa_dot(st: &StateTable) {
             None => ("circle", i.to_string()),
         };
         println!("  s{} [shape={}, label=\"{}\"];", i, shape, label);
-        for (from, to, target) in collapse_transitions(&state.trans) {
-            let label = dot_escape(&byte_range_label(from, to));
-            println!("  s{} -> s{} [label=\"{}\"];", i, target, label);
+        for arm in &state.arms {
+            for &(from, to) in &arm.ranges {
+                let label = dot_escape(&byte_range_label(from, to));
+                println!("  s{} -> s{} [label=\"{}\"];", i, arm.target, label);
+            }
         }
     }
     println!("}}");

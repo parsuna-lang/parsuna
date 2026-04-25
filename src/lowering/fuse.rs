@@ -121,7 +121,8 @@ mod tests {
     use super::*;
     use crate::analysis::analyze;
     use crate::grammar::parse_grammar;
-    use crate::lowering::{lower, DfaTable, StateTable};
+    use crate::lowering::lexer_dfa::DfaState;
+    use crate::lowering::{lower, StateTable};
 
     fn analyze_src(src: &str) -> crate::AnalyzedGrammar {
         let g = parse_grammar(src).expect("parse");
@@ -130,14 +131,11 @@ mod tests {
         outcome.grammar.expect("grammar")
     }
 
-    fn empty_dfa() -> DfaTable {
-        DfaTable {
-            states: vec![crate::lowering::lexer_dfa::DfaState {
-                trans: vec![0; 256],
-                accept: None,
-            }],
-            start: 0,
-        }
+    fn empty_dfa() -> Vec<DfaState> {
+        vec![DfaState {
+            arms: vec![],
+            accept: None,
+        }]
     }
 
     fn make_state(id: StateId, ops: Vec<Op>) -> State {

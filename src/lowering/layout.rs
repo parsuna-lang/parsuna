@@ -298,21 +298,23 @@ mod tests {
         let entry_id = st.entry_states[0].1;
         let entry = st.states.get(&entry_id).expect("entry state");
         // The Enter wrapper is first; find an Expect anywhere in the block.
-        let saw_expect_then_jump = st
-            .states
-            .values()
-            .any(|s| s.ops.len() == 2
+        let saw_expect_then_jump = st.states.values().any(|s| {
+            s.ops.len() == 2
                 && matches!(s.ops[0], StateOp::Expect { .. })
-                && matches!(s.ops[1], StateOp::Jump(_)));
-        assert!(saw_expect_then_jump, "no Expect followed by Jump anywhere; entry={:?}", entry.ops);
+                && matches!(s.ops[1], StateOp::Jump(_))
+        });
+        assert!(
+            saw_expect_then_jump,
+            "no Expect followed by Jump anywhere; entry={:?}",
+            entry.ops
+        );
     }
 
     #[test]
     fn lexer_dfa_compiled_alongside_state_table() {
         let (_, st) = lay("T = \"t\"; main = T;");
         // DFA always has at least the dead state plus a real start.
-        assert!(st.lexer_dfa.states.len() >= 2);
-        assert!(st.lexer_dfa.start >= 1);
+        assert!(st.lexer_dfa.len() >= 2);
     }
 
     #[test]

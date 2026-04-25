@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 use crate::analysis::AnalyzedGrammar;
 use crate::grammar::ir::TokenPattern;
 
-pub use lexer_dfa::DfaTable;
+pub use lexer_dfa::{DfaState, DEAD, START};
 
 /// Numeric id of a parser state in the final [`StateTable`]. Small dense
 /// integers so targets can use them as switch labels.
@@ -86,7 +86,7 @@ pub struct StateTable {
     /// Lookahead required to disambiguate every alternative (LL(k)).
     pub k: usize,
     /// The compiled lexer DFA.
-    pub lexer_dfa: DfaTable,
+    pub lexer_dfa: Vec<DfaState>,
 }
 
 /// A single token as seen by the code generator: the name, the resolved
@@ -393,9 +393,7 @@ mod tests {
 
     #[test]
     fn lower_drops_fragment_rules_from_rule_kinds() {
-        let ag = analyze_src(
-            "T = \"t\"; _helper = T; main = T _helper;",
-        );
+        let ag = analyze_src("T = \"t\"; _helper = T; main = T _helper;");
         let st = lower(&ag);
         assert!(!st.rule_kinds.iter().any(|n| n == "_helper"));
         assert!(st.rule_kinds.iter().any(|n| n == "main"));
@@ -406,8 +404,7 @@ mod tests {
         let ag = analyze_src("A = \"a\"; B = \"b\"; main = A B;");
         let st = lower(&ag);
         // 1 dead + start + at least one accept per token = ≥ 4 states
-        assert!(st.lexer_dfa.states.len() >= 4);
-        assert!(st.lexer_dfa.start >= 1);
+        assert!(st.lexer_dfa.len() >= 4);
     }
 
     #[test]

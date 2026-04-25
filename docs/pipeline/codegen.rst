@@ -135,12 +135,15 @@ classic longest-match rule falls out of the structure.
 Byte-range collapsing
 ~~~~~~~~~~~~~~~~~~~~~
 
-A naive emission would produce 256 arms per DFA state. Instead each
-backend builds ``ByteArm`` groups: bytes that share the same
-target state are folded into one arm, and contiguous bytes within
-a group collapse into ranges. So ``IDENT = ('a'..'z' | '_')+;``
-compiles to two arms per state — one for ``b'a'..=b'z'``, one for
-``b'_'`` — not 27.
+A naive emission would produce 256 arms per DFA state. Instead the
+DFA compiler in ``lowering::lexer_dfa`` returns its states with
+transitions already grouped: each ``DfaState`` carries its
+``arms: Vec<ByteArm>``, where bytes sharing a target collapse into
+one arm and contiguous bytes within an arm collapse into ranges.
+So ``IDENT = ('a'..'z' | '_')+;`` compiles to two arms per state —
+one for ``b'a'..=b'z'``, one for ``b'_'`` — not 27. Every backend
+works from the same pre-grouped shape; no per-backend collapsing
+logic is needed.
 
 Why code instead of tables
 ~~~~~~~~~~~~~~~~~~~~~~~~~~

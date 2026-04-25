@@ -1,49 +1,100 @@
 //! Compile a set of [`TokenPattern`]s into a deterministic byte-level DFA.
 //!
 //! Thompson-style NFA construction followed by subset construction.
-//! Reserves state `0` as a "dead" sink — every missing transition lands
-//! there, which matches the runtime's single-branch "exit on 0" check.
+//! Reserves state `0` ([`DEAD`]) as a sink — every missing transition lands
+//! there, which matches the runtime's single-branch "exit on 0" check. The
+//! start state is always [`START`].
+//!
+//! The output is a flat `Vec<DfaState>` indexed by state id; each entry
+//! carries its accept kind and its transitions already collapsed into
+//! [`ByteArm`]s, ready for code generation.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use crate::grammar::ir::{CharClass, ClassItem, TokenPattern};
 use crate::lowering::TokenInfo;
 
-/// Reserved DFA state: the dead state every missing transition points at.
-/// Real states start at 1.
+/// Reserved DFA state: the dead sink every missing transition points at.
+/// Real states start at [`START`].
 pub const DEAD: u32 = 0;
 
-/// Compiled lexer DFA: a vector of states (state 0 is the dead sink) and
-/// the id of the start state (always 1 in practice, but recorded so the
-/// runtime doesn't have to bake the assumption in).
-#[derive(Clone, Debug)]
-pub struct DfaTable {
-    /// All states. `states[0]` is the dead sink; real states start at `1`.
-    pub states: Vec<DfaState>,
-    /// Id of the start state (always `1`, but stored so the runtime
-    /// doesn't have to bake the assumption in).
-    pub start: u32,
-}
+/// Start state of every compiled lexer DFA. State 0 is reserved for the
+/// dead sink, so the start always lands at id 1.
+pub const START: u32 = 1;
 
-/// One DFA state: 256 transitions (indexed by byte) and an optional
-/// accepted token kind. `trans[b] == DEAD` means "no match on this byte".
+/// One DFA state: its byte transitions already grouped into [`ByteArm`]s
+/// plus an optional accepted token kind. The state id is the index in the
+/// `Vec<DfaState>` returned by [`compile`]; index 0 is [`DEAD`] and has no
+/// arms.
 #[derive(Clone, Debug)]
 pub struct DfaState {
-    /// 256-entry transition table, indexed by input byte.
-    pub trans: Vec<u32>,
-    /// Token-kind id accepted in this state, or `None` if not an accept
-    /// state. Filled by taking the minimum (= highest priority) of the
-    /// NFA states collapsed into this DFA state.
+    /// Byte transitions, grouped so bytes sharing a target collapse into
+    /// one arm and contiguous bytes within an arm collapse into ranges.
+    pub arms: Vec<ByteArm>,
+    /// Token-kind id accepted in this state, or `None` if it is not an
+    /// accept state. Filled by taking the minimum (= highest priority) of
+    /// the NFA states collapsed into this DFA state.
     pub accept: Option<i16>,
+}
+
+/// One `match`/`switch` arm in a generated DFA state: every byte that
+/// transitions to `target`, packed into inclusive ranges.
+#[derive(Clone, Debug)]
+pub struct ByteArm {
+    /// Destination DFA state id for every byte in `ranges`.
+    pub target: u32,
+    /// Inclusive byte ranges that all transition to `target`.
+    pub ranges: Vec<(u8, u8)>,
 }
 
 /// Compile tokens to a DFA. Each token becomes an NFA fragment whose end
 /// state accepts its kind; alternation at the start state lets the lexer
 /// try every pattern in parallel. Subset construction then determinises
-/// the combined machine.
-pub fn compile(tokens: &[TokenInfo]) -> DfaTable {
+/// the combined machine and the per-state byte transitions are collapsed
+/// into [`ByteArm`]s before returning.
+pub fn compile(tokens: &[TokenInfo]) -> Vec<DfaState> {
     let nfa = build_nfa(tokens);
-    subset_construct(&nfa)
+    let raw = subset_construct(&nfa);
+    raw.into_iter()
+        .map(|s| DfaState {
+            arms: collapse_arms(&s.trans),
+            accept: s.accept,
+        })
+        .collect()
+}
+
+/// Group a 256-byte transition row into [`ByteArm`]s: bytes sharing a
+/// target state fold into one arm, and contiguous bytes within an arm
+/// collapse into ranges.
+fn collapse_arms(trans: &[u32]) -> Vec<ByteArm> {
+    let mut by_target: BTreeMap<u32, Vec<u8>> = BTreeMap::new();
+    for (b, &t) in trans.iter().enumerate() {
+        if t != DEAD {
+            by_target.entry(t).or_default().push(b as u8);
+        }
+    }
+    by_target
+        .into_iter()
+        .map(|(target, bytes)| {
+            let mut ranges: Vec<(u8, u8)> = Vec::new();
+            let mut iter = bytes.into_iter();
+            if let Some(first) = iter.next() {
+                let mut lo = first;
+                let mut hi = first;
+                for b in iter {
+                    if b == hi + 1 {
+                        hi = b;
+                    } else {
+                        ranges.push((lo, hi));
+                        lo = b;
+                        hi = b;
+                    }
+                }
+                ranges.push((lo, hi));
+            }
+            ByteArm { target, ranges }
+        })
+        .collect()
 }
 
 type NfaStateId = usize;
@@ -215,18 +266,25 @@ fn class_bytes(cc: &CharClass) -> Vec<u8> {
     }
 }
 
-fn subset_construct(nfa: &Nfa) -> DfaTable {
+/// Raw DFA state used during subset construction. Carries a 256-byte
+/// transition row that's natural for the algorithm to fill in; collapsed
+/// into [`DfaState`] by [`compile`] before being exposed.
+struct RawDfaState {
+    trans: Vec<u32>,
+    accept: Option<i16>,
+}
+
+fn subset_construct(nfa: &Nfa) -> Vec<RawDfaState> {
     let mut set_to_id: HashMap<BTreeSet<NfaStateId>, u32> = HashMap::new();
-    let mut states: Vec<DfaState> = vec![DfaState {
+    let mut states: Vec<RawDfaState> = vec![RawDfaState {
         trans: vec![0; 256],
         accept: None,
     }];
     let mut queue: VecDeque<BTreeSet<NfaStateId>> = VecDeque::new();
 
     let start_set = epsilon_closure(nfa, [nfa.start].into_iter().collect());
-    let start_id = 1u32;
-    set_to_id.insert(start_set.clone(), start_id);
-    states.push(build_dfa_state(nfa, &start_set));
+    set_to_id.insert(start_set.clone(), START);
+    states.push(build_raw_state(nfa, &start_set));
     queue.push_back(start_set);
 
     while let Some(cur_set) = queue.pop_front() {
@@ -245,7 +303,7 @@ fn subset_construct(nfa: &Nfa) -> DfaTable {
             } else {
                 let id = states.len() as u32;
                 set_to_id.insert(closed.clone(), id);
-                states.push(build_dfa_state(nfa, &closed));
+                states.push(build_raw_state(nfa, &closed));
                 queue.push_back(closed);
                 id
             };
@@ -253,10 +311,7 @@ fn subset_construct(nfa: &Nfa) -> DfaTable {
         }
     }
 
-    DfaTable {
-        states,
-        start: start_id,
-    }
+    states
 }
 
 fn epsilon_closure(nfa: &Nfa, seeds: BTreeSet<NfaStateId>) -> BTreeSet<NfaStateId> {
@@ -272,7 +327,7 @@ fn epsilon_closure(nfa: &Nfa, seeds: BTreeSet<NfaStateId>) -> BTreeSet<NfaStateI
     out
 }
 
-fn build_dfa_state(nfa: &Nfa, set: &BTreeSet<NfaStateId>) -> DfaState {
+fn build_raw_state(nfa: &Nfa, set: &BTreeSet<NfaStateId>) -> RawDfaState {
     // Priority-ties in the NFA collapse here: when a single DFA state
     // accepts multiple kinds, we keep the smallest id — which matches the
     // grammar's declaration order and gives earlier tokens precedence (for
@@ -286,7 +341,7 @@ fn build_dfa_state(nfa: &Nfa, set: &BTreeSet<NfaStateId>) -> DfaState {
             });
         }
     }
-    DfaState {
+    RawDfaState {
         trans: vec![0; 256],
         accept,
     }
@@ -296,17 +351,28 @@ fn build_dfa_state(nfa: &Nfa, set: &BTreeSet<NfaStateId>) -> DfaState {
 mod tests {
     use super::*;
 
-    fn scan(dfa: &DfaTable, bytes: &[u8]) -> Option<(usize, i16)> {
-        let mut state = dfa.start;
+    fn step(s: &DfaState, b: u8) -> u32 {
+        for arm in &s.arms {
+            for &(lo, hi) in &arm.ranges {
+                if lo <= b && b <= hi {
+                    return arm.target;
+                }
+            }
+        }
+        DEAD
+    }
+
+    fn scan(dfa: &[DfaState], bytes: &[u8]) -> Option<(usize, i16)> {
+        let mut state = START;
         let mut pos = 0;
         let mut last: Option<(usize, i16)> = None;
         loop {
             if pos < bytes.len() {
-                let next = dfa.states[state as usize].trans[bytes[pos] as usize];
+                let next = step(&dfa[state as usize], bytes[pos]);
                 if next != DEAD {
                     state = next;
                     pos += 1;
-                    if let Some(k) = dfa.states[state as usize].accept {
+                    if let Some(k) = dfa[state as usize].accept {
                         last = Some((pos, k));
                     }
                     continue;
@@ -321,11 +387,11 @@ mod tests {
         let t = toks(vec![tok("A", lit("a"))]);
         let dfa = compile(&t);
 
-        assert_eq!(dfa.states[0].accept, None);
-        assert!(dfa.states[0].trans.iter().all(|&t| t == 0));
+        assert_eq!(dfa[DEAD as usize].accept, None);
+        assert!(dfa[DEAD as usize].arms.is_empty());
 
-        assert_eq!(dfa.start, 1);
-        assert!(dfa.states.len() >= 2);
+        assert_eq!(START, 1);
+        assert!(dfa.len() >= 2);
     }
 
     fn tok(name: &str, pat: TokenPattern) -> TokenInfo {
@@ -421,5 +487,65 @@ mod tests {
         let dfa = compile(&t);
         assert_eq!(scan(&dfa, b"xxx"), Some((3, 1)));
         assert_eq!(scan(&dfa, b"y"), None);
+    }
+
+    #[test]
+    fn arms_collapse_contiguous_bytes_into_ranges() {
+        // [a-z]+ — the start state has 26 transitions all going to the
+        // same target. They should fold into a single arm with one range.
+        let t = toks(vec![tok(
+            "ID",
+            TokenPattern::Plus(Box::new(cls(
+                vec![ClassItem::Range(b'a' as u32, b'z' as u32)],
+                false,
+            ))),
+        )]);
+        let dfa = compile(&t);
+        let arms = &dfa[START as usize].arms;
+        assert_eq!(arms.len(), 1);
+        assert_eq!(arms[0].ranges, vec![(b'a', b'z')]);
+    }
+
+    #[test]
+    fn arms_split_disjoint_byte_groups_into_ranges_per_arm() {
+        // ('0'..'9' | 'a'..'f') — one target, two non-contiguous ranges
+        // collapse into a single arm carrying both ranges.
+        let t = toks(vec![tok(
+            "HEX",
+            cls(
+                vec![
+                    ClassItem::Range(b'0' as u32, b'9' as u32),
+                    ClassItem::Range(b'a' as u32, b'f' as u32),
+                ],
+                false,
+            ),
+        )]);
+        let dfa = compile(&t);
+        let arms = &dfa[START as usize].arms;
+        assert_eq!(arms.len(), 1);
+        assert_eq!(arms[0].ranges, vec![(b'0', b'9'), (b'a', b'f')]);
+    }
+
+    #[test]
+    fn arms_grouped_by_target_state() {
+        // Two literal tokens with different first bytes — distinct targets.
+        let t = toks(vec![tok("A", lit("a")), tok("B", lit("b"))]);
+        let dfa = compile(&t);
+        let arms = &dfa[START as usize].arms;
+        assert_eq!(arms.len(), 2);
+        // Each arm should be a single-byte range and they should differ.
+        for arm in arms {
+            assert_eq!(arm.ranges.len(), 1);
+            let (lo, hi) = arm.ranges[0];
+            assert_eq!(lo, hi);
+        }
+        assert_ne!(arms[0].target, arms[1].target);
+    }
+
+    #[test]
+    fn dead_state_has_no_arms() {
+        let t = toks(vec![tok("A", lit("a"))]);
+        let dfa = compile(&t);
+        assert!(dfa[DEAD as usize].arms.is_empty());
     }
 }

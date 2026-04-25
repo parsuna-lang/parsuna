@@ -59,14 +59,17 @@ using standard Thompson construction plus subset determinization:
 2. **Top-level alternation.** All tokens share a single start state
    via ε-transitions. This is what lets the lexer try every pattern
    in parallel.
-3. **Subset construction.** The NFA is determinized into a ``DfaTable``:
-   a vector of states, each a 256-entry byte transition table plus
-   an optional ``accept: i16``. State ``0`` is reserved as the dead
-   sink — every missing transition lands there, so the runtime's
-   inner loop is a single branch ("exit on 0"). The accept kind for
-   a DFA state is the **minimum** token id present in the collapsed
-   NFA states, which encodes "declaration order = priority":
-   tokens declared earlier win on ties.
+3. **Subset construction.** The NFA is determinized into a flat
+   ``Vec<DfaState>``. Each state carries an optional ``accept: i16``
+   plus its byte transitions already grouped into ``ByteArm`` runs
+   (bytes sharing a target collapse into one arm; contiguous bytes
+   within an arm collapse into ranges). State ``0`` ([``DEAD``]) is
+   reserved as the dead sink — every missing transition lands there,
+   so the runtime's inner loop is a single branch ("exit on 0").
+   The start state is always ``1`` ([``START``]). The accept kind
+   for a DFA state is the **minimum** token id present in the
+   collapsed NFA states, which encodes "declaration order =
+   priority": tokens declared earlier win on ties.
 
 At runtime the lexer implements **longest match**: advance until the
 transition table lands on dead, then back up to the last DFA state
@@ -213,7 +216,7 @@ Steps:
    any deeper prefixes.
 5. **Lexer DFA.** ``lexer_dfa::compile`` is called on the token list
    (see the `The lexer DFA`_ section above). The resulting
-   ``DfaTable`` is stored on the state table.
+   ``Vec<DfaState>`` is stored on the state table.
 
 Output: a ``StateTable`` — complete but not yet optimised.
 

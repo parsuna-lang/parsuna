@@ -1,10 +1,9 @@
-use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::path::PathBuf;
 
 use crate::codegen::common::{pascal, screaming_snake};
 use crate::codegen::EmittedFile;
-use crate::lowering::lexer_dfa::DEAD;
+use crate::lowering::lexer_dfa::{DfaState, DEAD, START};
 use crate::lowering::{DispatchLeaf, DispatchTree, Op, StateTable};
 
 pub fn emit(st: &StateTable) -> Vec<EmittedFile> {
@@ -193,10 +192,10 @@ fn emit_dfa(s: &mut String, st: &StateTable) {
     writeln!(s, "        int pos = start;").unwrap();
     writeln!(s, "        int bestLen = 0;").unwrap();
     writeln!(s, "        int bestKind = TokenKind.ERROR.id;").unwrap();
-    writeln!(s, "        int state = {};", dfa.start).unwrap();
+    writeln!(s, "        int state = {};", START).unwrap();
     writeln!(s, "        outer: while (true) {{").unwrap();
     writeln!(s, "            switch (state) {{").unwrap();
-    for (id, ds) in dfa.states.iter().enumerate() {
+    for (id, ds) in dfa.iter().enumerate() {
         if id as u32 == DEAD {
             continue;
         }
@@ -234,12 +233,11 @@ fn emit_dfa(s: &mut String, st: &StateTable) {
 fn emit_dfa_state_arm(
     s: &mut String,
     st: &StateTable,
-    dfa: &crate::lowering::lexer_dfa::DfaTable,
+    dfa: &[DfaState],
     id: u32,
-    ds: &crate::lowering::lexer_dfa::DfaState,
+    ds: &DfaState,
 ) {
-    let arms = build_byte_arms(&ds.trans);
-    if arms.is_empty() {
+    if ds.arms.is_empty() {
         writeln!(s, "                case {}: break outer;", id).unwrap();
         return;
     }
@@ -247,11 +245,11 @@ fn emit_dfa_state_arm(
     writeln!(s, "                    if (pos >= bufLen) break outer;").unwrap();
     writeln!(s, "                    int b = buf[pos] & 0xFF;").unwrap();
     let mut first = true;
-    for arm in &arms {
+    for arm in &ds.arms {
         let cond = byte_cond(&arm.ranges);
         let kw = if first { "if" } else { "else if" };
         first = false;
-        let target_accept = dfa.states[arm.target as usize].accept;
+        let target_accept = dfa[arm.target as usize].accept;
         write!(
             s,
             "                    {} ({}) {{ pos++; state = {};",
@@ -273,41 +271,6 @@ fn emit_dfa_state_arm(
     writeln!(s, "                }}").unwrap();
 }
 
-struct ByteArm {
-    target: u32,
-    ranges: Vec<(u8, u8)>,
-}
-
-fn build_byte_arms(trans: &[u32]) -> Vec<ByteArm> {
-    let mut by_target: BTreeMap<u32, Vec<u8>> = BTreeMap::new();
-    for (b, &t) in trans.iter().enumerate() {
-        if t != DEAD {
-            by_target.entry(t).or_default().push(b as u8);
-        }
-    }
-    by_target
-        .into_iter()
-        .map(|(target, bytes)| {
-            let mut ranges: Vec<(u8, u8)> = Vec::new();
-            let mut iter = bytes.into_iter();
-            if let Some(first) = iter.next() {
-                let mut lo = first;
-                let mut hi = first;
-                for b in iter {
-                    if b == hi + 1 {
-                        hi = b;
-                    } else {
-                        ranges.push((lo, hi));
-                        lo = b;
-                        hi = b;
-                    }
-                }
-                ranges.push((lo, hi));
-            }
-            ByteArm { target, ranges }
-        })
-        .collect()
-}
 
 fn byte_cond(ranges: &[(u8, u8)]) -> String {
     ranges
