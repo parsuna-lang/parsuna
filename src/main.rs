@@ -362,12 +362,12 @@ fn print_dfa(st: &StateTable) {
     println!("DFA: {} real states, start = {}", real_count, START);
     println!();
 
-    for (i, state) in dfa.iter().enumerate().skip(1) {
+    for state in dfa.iter().skip(1) {
         let accept = match state.accept {
             Some(k) => format!("accept={}({})", k, token_name_for_kind(st, k)),
             None => "-".to_string(),
         };
-        println!("state {:>3}  {}", i, accept);
+        println!("state {:>3}  {}", state.id, accept);
         if state.arms.is_empty() {
             println!("            (terminal — no live transitions)");
         } else {
@@ -670,19 +670,19 @@ fn print_dfa_dot(st: &StateTable) {
     println!("  _start [shape=point, width=0.12];");
     println!("  _start -> s{};", START);
 
-    for (i, state) in dfa.iter().enumerate().skip(1) {
+    for state in dfa.iter().skip(1) {
         let (shape, label) = match state.accept {
             Some(k) => (
                 "doublecircle",
-                format!("{}\\n{}", i, dot_escape(token_name_for_kind(st, k))),
+                format!("{}\\n{}", state.id, dot_escape(token_name_for_kind(st, k))),
             ),
-            None => ("circle", i.to_string()),
+            None => ("circle", state.id.to_string()),
         };
-        println!("  s{} [shape={}, label=\"{}\"];", i, shape, label);
+        println!("  s{} [shape={}, label=\"{}\"];", state.id, shape, label);
         for arm in &state.arms {
             for &(from, to) in &arm.ranges {
                 let label = dot_escape(&byte_range_label(from, to));
-                println!("  s{} -> s{} [label=\"{}\"];", i, arm.target, label);
+                println!("  s{} -> s{} [label=\"{}\"];", state.id, arm.target, label);
             }
         }
     }

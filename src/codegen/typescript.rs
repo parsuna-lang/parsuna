@@ -195,11 +195,11 @@ fn emit_dfa(s: &mut String, st: &StateTable) {
     writeln!(s, "  let state = {};", START).unwrap();
     writeln!(s, "  for (;;) {{").unwrap();
     writeln!(s, "    switch (state) {{").unwrap();
-    for (id, ds) in dfa.iter().enumerate() {
-        if id as u32 == DEAD {
+    for ds in dfa {
+        if ds.id == DEAD {
             continue;
         }
-        emit_dfa_state_arm(s, st, dfa, id as u32, ds);
+        emit_dfa_state_arm(s, st, dfa, ds);
     }
     writeln!(
         s,
@@ -234,19 +234,18 @@ fn emit_dfa_state_arm(
     s: &mut String,
     st: &StateTable,
     dfa: &[DfaState],
-    id: u32,
     ds: &DfaState,
 ) {
     if ds.arms.is_empty() {
         writeln!(
             s,
             "      case {}: return {{ bestLen, bestKind, scanned: pos - start }};",
-            id
+            ds.id
         )
         .unwrap();
         return;
     }
-    writeln!(s, "      case {}: {{", id).unwrap();
+    writeln!(s, "      case {}: {{", ds.id).unwrap();
     writeln!(
         s,
         "        if (pos >= buf.length) return {{ bestLen, bestKind, scanned: pos - start }};"

@@ -191,11 +191,11 @@ fn emit_compiled_dfa(s: &mut String, st: &StateTable) {
     writeln!(s, "        loop {{").unwrap();
     writeln!(s, "            match state {{").unwrap();
 
-    for (id, ds) in dfa.iter().enumerate() {
-        if id as u32 == DEAD {
+    for ds in dfa {
+        if ds.id == DEAD {
             continue;
         }
-        emit_dfa_state_arm(s, st, dfa, id as u32, ds, "                ");
+        emit_dfa_state_arm(s, st, dfa, ds, "                ");
     }
 
     writeln!(s, "                _ => break,").unwrap();
@@ -215,15 +215,14 @@ fn emit_dfa_state_arm(
     s: &mut String,
     st: &StateTable,
     dfa: &[DfaState],
-    id: u32,
     ds: &DfaState,
     ind: &str,
 ) {
     if ds.arms.is_empty() {
-        writeln!(s, "{}{} => break,", ind, id).unwrap();
+        writeln!(s, "{}{} => break,", ind, ds.id).unwrap();
         return;
     }
-    writeln!(s, "{}{} => match buf.get(pos) {{", ind, id).unwrap();
+    writeln!(s, "{}{} => match buf.get(pos) {{", ind, ds.id).unwrap();
     for arm in &ds.arms {
         let pat = format_byte_pattern(&arm.ranges);
         let is_single_byte = arm.ranges.len() == 1 && arm.ranges[0].0 == arm.ranges[0].1;

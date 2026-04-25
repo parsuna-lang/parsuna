@@ -133,6 +133,7 @@ mod tests {
 
     fn empty_dfa() -> Vec<DfaState> {
         vec![DfaState {
+            id: 0,
             arms: vec![],
             accept: None,
         }]

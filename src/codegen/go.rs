@@ -187,11 +187,11 @@ fn emit_dfa(s: &mut String, st: &StateTable) {
     writeln!(s, "\tstate := uint32({})", START).unwrap();
     writeln!(s, "\tfor {{").unwrap();
     writeln!(s, "\t\tswitch state {{").unwrap();
-    for (id, ds) in dfa.iter().enumerate() {
-        if id as u32 == DEAD {
+    for ds in dfa {
+        if ds.id == DEAD {
             continue;
         }
-        emit_dfa_state_arm(s, st, dfa, id as u32, ds);
+        emit_dfa_state_arm(s, st, dfa, ds);
     }
     writeln!(
         s,
@@ -219,19 +219,18 @@ fn emit_dfa_state_arm(
     s: &mut String,
     st: &StateTable,
     dfa: &[DfaState],
-    id: u32,
     ds: &DfaState,
 ) {
     if ds.arms.is_empty() {
         writeln!(
             s,
             "\t\tcase {}:\n\t\t\treturn bestLen, bestKind, pos - start",
-            id
+            ds.id
         )
         .unwrap();
         return;
     }
-    writeln!(s, "\t\tcase {}:", id).unwrap();
+    writeln!(s, "\t\tcase {}:", ds.id).unwrap();
     writeln!(
         s,
         "\t\t\tif pos >= len(buf) {{ return bestLen, bestKind, pos - start }}"

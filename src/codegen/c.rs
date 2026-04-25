@@ -448,11 +448,11 @@ fn emit_dfa(c: &mut String, st: &StateTable, upper: &str) {
     writeln!(c, "  uint32_t state = {}u;", START).unwrap();
     writeln!(c, "  for (;;) {{").unwrap();
     writeln!(c, "    switch (state) {{").unwrap();
-    for (id, ds) in dfa.iter().enumerate() {
-        if id as u32 == DEAD {
+    for ds in dfa {
+        if ds.id == DEAD {
             continue;
         }
-        emit_dfa_state_arm(c, st, dfa, id as u32, ds, upper);
+        emit_dfa_state_arm(c, st, dfa, ds, upper);
     }
     writeln!(c, "      default: goto done;").unwrap();
     writeln!(c, "    }}").unwrap();
@@ -469,15 +469,14 @@ fn emit_dfa_state_arm(
     c: &mut String,
     st: &StateTable,
     dfa: &[DfaState],
-    id: u32,
     ds: &DfaState,
     upper: &str,
 ) {
     if ds.arms.is_empty() {
-        writeln!(c, "      case {}: goto done;", id).unwrap();
+        writeln!(c, "      case {}: goto done;", ds.id).unwrap();
         return;
     }
-    writeln!(c, "      case {}: {{", id).unwrap();
+    writeln!(c, "      case {}: {{", ds.id).unwrap();
     writeln!(c, "        if (pos >= buf_len) goto done;").unwrap();
     writeln!(c, "        unsigned char b = (unsigned char)buf[pos];").unwrap();
     let mut first = true;

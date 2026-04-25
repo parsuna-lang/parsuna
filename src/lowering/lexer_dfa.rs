@@ -22,12 +22,15 @@ pub const DEAD: u32 = 0;
 /// dead sink, so the start always lands at id 1.
 pub const START: u32 = 1;
 
-/// One DFA state: its byte transitions already grouped into [`ByteArm`]s
-/// plus an optional accepted token kind. The state id is the index in the
-/// `Vec<DfaState>` returned by [`compile`]; index 0 is [`DEAD`] and has no
-/// arms.
+/// One DFA state: its own state id, byte transitions already grouped into
+/// [`ByteArm`]s, and an optional accepted token kind. The state at index
+/// 0 in the `Vec<DfaState>` returned by [`compile`] is the [`DEAD`] sink
+/// (no arms); the start state is at index [`START`].
 #[derive(Clone, Debug)]
 pub struct DfaState {
+    /// State id — equal to this entry's index in the `Vec<DfaState>`.
+    /// Carried inline so backends can iterate without calling `enumerate`.
+    pub id: u32,
     /// Byte transitions, grouped so bytes sharing a target collapse into
     /// one arm and contiguous bytes within an arm collapse into ranges.
     pub arms: Vec<ByteArm>,
@@ -56,7 +59,9 @@ pub fn compile(tokens: &[TokenInfo]) -> Vec<DfaState> {
     let nfa = build_nfa(tokens);
     let raw = subset_construct(&nfa);
     raw.into_iter()
-        .map(|s| DfaState {
+        .enumerate()
+        .map(|(i, s)| DfaState {
+            id: i as u32,
             arms: collapse_arms(&s.trans),
             accept: s.accept,
         })
