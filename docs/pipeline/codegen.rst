@@ -29,10 +29,15 @@ target language's idioms:
    ``state_table.rule_kinds``, representation ``u16``.
 3. **Name-lookup helpers.** ``tokenKindName`` / ``ruleKindName`` —
    useful for diagnostics and test output.
-4. **Lexer DFA tables.** The 256-entry transition table flattened
-   into an integer array plus an accept table. For most backends
-   these are static arrays; for the C backend they are
-   ``const`` arrays at file scope.
+4. **Compiled lexer DFA.** Not a packed table — the DFA is emitted
+   as code. Each state becomes one arm of a ``match``/``switch``
+   that reads the current byte and dispatches on it; the whole
+   machine is wrapped in a ``longest_match`` function exposed
+   through the runtime's ``DfaMatcher`` (or equivalent) interface.
+   Byte ranges sharing the same target collapse into single arms
+   (so an ``[a-z]+`` token compiles to ``Some(&(b'a'..=b'z'))``
+   rather than 26 individual byte arms). See
+   :ref:`compiled-lexer-dfa` below for the shape and rationale.
 5. **FIRST and SYNC intern pools.** Each entry from
    ``state_table.first_sets`` / ``state_table.sync_sets`` becomes a
    named constant (``FIRST_N``, ``SYNC_N``). States refer to them by
@@ -92,6 +97,74 @@ statements in the target language. The mapping is direct:
 Because the ops are already linear and the state ids are dense
 integers, most backends can emit the whole parser as a single
 ``switch`` in a single function.
+
+.. _compiled-lexer-dfa:
+
+The compiled lexer DFA
+----------------------
+
+The lexer DFA is **compiled to code**, not to data. Each backend
+walks ``state_table.lexer_dfa.states`` and emits a ``longest_match``
+function shaped like:
+
+.. parsed-literal::
+
+    fn longest_match(buf, start) -> DfaMatch:
+        pos        = start
+        best_len   = 0
+        best_kind  = TokenKind.Error
+        state      = <dfa.start>
+        loop:
+            match state:
+                1 => match buf[pos]:
+                    'a'..='z' => { pos += 1; state = 2;
+                                   best_len = pos - start;
+                                   best_kind = TokenKind.Ident; }
+                    _         => break
+                2 => match buf[pos]:
+                    ...
+                ...
+            ...
+        return DfaMatch { len: best_len, kind: best_kind }
+
+One outer ``switch`` arm per DFA state, one inner ``switch`` arm
+per byte target. Whenever a transition lands on an accept state,
+the surrounding code records ``(best_len, best_kind)`` so the
+classic longest-match rule falls out of the structure.
+
+Byte-range collapsing
+~~~~~~~~~~~~~~~~~~~~~
+
+A naive emission would produce 256 arms per DFA state. Instead each
+backend builds ``ByteArm`` groups: bytes that share the same
+target state are folded into one arm, and contiguous bytes within
+a group collapse into ranges. So ``IDENT = ('a'..'z' | '_')+;``
+compiles to two arms per state — one for ``b'a'..=b'z'``, one for
+``b'_'`` — not 27.
+
+Why code instead of tables
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+* **Constant folding by the host compiler.** The byte-range
+  patterns and state transitions are visible to LLVM, javac, the
+  Go SSA pass, and friends; they compile to jump tables, branch
+  tables, or inlined comparisons depending on the target. A
+  data-driven walk over a packed transition array is opaque to
+  those optimisers.
+* **Dense binaries for sparse DFAs.** Most DFA states have only a
+  handful of live transitions; emitting just those arms is much
+  smaller than reserving 256 entries per state.
+* **Locality.** The parser dispatch is already one big
+  ``switch``; the DFA matcher is the same shape in the same file,
+  so a reader sees the whole machine as code rather than as
+  opaque tables threaded through a runtime helper.
+
+Each backend supplies its compiled matcher to the runtime through
+a ``DfaMatcher`` trait (Rust), interface (Go, TypeScript, Java,
+C#), or function pointer (C). The runtime calls
+``longest_match(buf, pos)`` once per token; everything else about
+the lexer (input buffering, position tracking, EOF handling) stays
+generic in the runtime crate.
 
 Shared helpers
 --------------
