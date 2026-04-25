@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use crate::codegen::common::screaming_snake;
 use crate::codegen::EmittedFile;
-use crate::lowering::lexer_dfa::{DfaState, DEAD, START};
+use crate::lowering::lexer_dfa::{DfaState, START};
 use crate::lowering::{DispatchLeaf, DispatchTree, Op, StateTable};
 
 /// Per-backend arguments. Currently empty — kept as a struct (deriving
@@ -454,12 +454,7 @@ fn emit_dfa(c: &mut String, st: &StateTable, upper: &str) {
     writeln!(c, "  uint32_t state = {}u;", START).unwrap();
     writeln!(c, "  for (;;) {{").unwrap();
     writeln!(c, "    switch (state) {{").unwrap();
-    for ds in dfa {
-        if ds.id == DEAD {
-            continue;
-        }
-        emit_dfa_state_arm(c, st, dfa, ds, upper);
-    }
+    for ds in dfa { emit_dfa_state_arm(c, st, ds, upper); }
     writeln!(c, "      default: goto done;").unwrap();
     writeln!(c, "    }}").unwrap();
     writeln!(c, "  }}").unwrap();
@@ -474,8 +469,7 @@ fn emit_dfa(c: &mut String, st: &StateTable, upper: &str) {
 fn emit_dfa_state_arm(
     c: &mut String,
     st: &StateTable,
-    dfa: &[DfaState],
-    ds: &DfaState,
+        ds: &DfaState,
     upper: &str,
 ) {
     if ds.arms.is_empty() {
@@ -490,14 +484,13 @@ fn emit_dfa_state_arm(
         let cond = byte_cond(&arm.ranges);
         let kw = if first { "if" } else { "else if" };
         first = false;
-        let target_accept = dfa[arm.target as usize].accept;
         write!(
             c,
             "        {} ({}) {{ pos++; state = {}u;",
             kw, cond, arm.target
         )
         .unwrap();
-        if let Some(kind) = target_accept {
+        if let Some(kind) = arm.target_accept {
             write!(
                 c,
                 " bl = pos - start; bk = {};",

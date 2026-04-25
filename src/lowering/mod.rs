@@ -421,7 +421,9 @@ mod tests {
         let ag = analyze_src("A = \"a\"; B = \"b\"; main = A B;");
         let st = lower(&ag);
         // 1 dead + start + at least one accept per token = ≥ 4 states
-        assert!(st.lexer_dfa.len() >= 4);
+        // start + at least one accept state per token (no dead in the vec).
+        assert!(st.lexer_dfa.len() >= 3);
+        assert_eq!(st.lexer_dfa[0].id, crate::lowering::lexer_dfa::START);
     }
 
     #[test]

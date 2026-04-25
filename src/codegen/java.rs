@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use crate::codegen::common::{pascal, screaming_snake};
 use crate::codegen::EmittedFile;
-use crate::lowering::lexer_dfa::{DfaState, DEAD, START};
+use crate::lowering::lexer_dfa::{DfaState, START};
 use crate::lowering::{DispatchLeaf, DispatchTree, Op, StateTable};
 
 /// Per-backend arguments for the Java target.
@@ -216,12 +216,7 @@ fn emit_dfa(s: &mut String, st: &StateTable) {
     writeln!(s, "        int state = {};", START).unwrap();
     writeln!(s, "        outer: while (true) {{").unwrap();
     writeln!(s, "            switch (state) {{").unwrap();
-    for ds in dfa {
-        if ds.id == DEAD {
-            continue;
-        }
-        emit_dfa_state_arm(s, st, dfa, ds);
-    }
+    for ds in dfa { emit_dfa_state_arm(s, st, ds); }
     writeln!(s, "                default: break outer;").unwrap();
     writeln!(s, "            }}").unwrap();
     writeln!(s, "        }}").unwrap();
@@ -254,8 +249,7 @@ fn emit_dfa(s: &mut String, st: &StateTable) {
 fn emit_dfa_state_arm(
     s: &mut String,
     st: &StateTable,
-    dfa: &[DfaState],
-    ds: &DfaState,
+        ds: &DfaState,
 ) {
     if ds.arms.is_empty() {
         writeln!(s, "                case {}: break outer;", ds.id).unwrap();
@@ -269,14 +263,13 @@ fn emit_dfa_state_arm(
         let cond = byte_cond(&arm.ranges);
         let kw = if first { "if" } else { "else if" };
         first = false;
-        let target_accept = dfa[arm.target as usize].accept;
         write!(
             s,
             "                    {} ({}) {{ pos++; state = {};",
             kw, cond, arm.target
         )
         .unwrap();
-        if let Some(kind) = target_accept {
+        if let Some(kind) = arm.target_accept {
             write!(
                 s,
                 " bestLen = pos - start; bestKind = {};",

@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use crate::codegen::common::pascal;
 use crate::codegen::EmittedFile;
-use crate::lowering::lexer_dfa::{DfaState, DEAD, START};
+use crate::lowering::lexer_dfa::{DfaState, START};
 use crate::lowering::{DispatchLeaf, DispatchTree, Op, StateTable};
 
 /// Per-backend arguments. Currently empty — kept as a struct (deriving
@@ -197,12 +197,7 @@ fn emit_compiled_dfa(s: &mut String, st: &StateTable) {
     writeln!(s, "        loop {{").unwrap();
     writeln!(s, "            match state {{").unwrap();
 
-    for ds in dfa {
-        if ds.id == DEAD {
-            continue;
-        }
-        emit_dfa_state_arm(s, st, dfa, ds, "                ");
-    }
+    for ds in dfa { emit_dfa_state_arm(s, st, ds, "                "); }
 
     writeln!(s, "                _ => break,").unwrap();
     writeln!(s, "            }}").unwrap();
@@ -220,8 +215,7 @@ fn emit_compiled_dfa(s: &mut String, st: &StateTable) {
 fn emit_dfa_state_arm(
     s: &mut String,
     st: &StateTable,
-    dfa: &[DfaState],
-    ds: &DfaState,
+        ds: &DfaState,
     ind: &str,
 ) {
     if ds.arms.is_empty() {
@@ -237,14 +231,13 @@ fn emit_dfa_state_arm(
         } else {
             format!("({})", pat)
         };
-        let target_accept = dfa[arm.target as usize].accept;
         write!(
             s,
             "{}    Some(&{}) => {{ pos += 1; state = {};",
             ind, wrapped, arm.target
         )
         .unwrap();
-        if let Some(kind) = target_accept {
+        if let Some(kind) = arm.target_accept {
             write!(
                 s,
                 " best_len = pos - start; best_kind = {};",

@@ -352,11 +352,10 @@ fn print_lowering(_ag: &parsuna::AnalyzedGrammar, st: &StateTable) {
 fn print_dfa(st: &StateTable) {
     let dfa: &[DfaState] = &st.lexer_dfa;
 
-    let real_count = dfa.len().saturating_sub(1);
-    println!("DFA: {} real states, start = {}", real_count, START);
+    println!("DFA: {} real states, start = {}", dfa.len(), START);
     println!();
 
-    for state in dfa.iter().skip(1) {
+    for state in dfa {
         let accept = match state.accept {
             Some(k) => format!("accept={}({})", k, token_name_for_kind(st, k)),
             None => "-".to_string(),
@@ -669,7 +668,7 @@ fn print_dfa_dot(st: &StateTable) {
     println!("  _start [shape=point, width=0.12];");
     println!("  _start -> s{};", START);
 
-    for state in dfa.iter().skip(1) {
+    for state in dfa {
         let (shape, label) = match state.accept {
             Some(k) => (
                 "doublecircle",

@@ -314,7 +314,8 @@ mod tests {
     fn lexer_dfa_compiled_alongside_state_table() {
         let (_, st) = lay("T = \"t\"; main = T;");
         // DFA always has at least the dead state plus a real start.
-        assert!(st.lexer_dfa.len() >= 2);
+        assert!(!st.lexer_dfa.is_empty());
+        assert_eq!(st.lexer_dfa[0].id, crate::lowering::lexer_dfa::START);
     }
 
     #[test]

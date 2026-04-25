@@ -1,21 +1,23 @@
 //! Compile a set of [`TokenPattern`]s into a deterministic byte-level DFA.
 //!
-//! Thompson-style NFA construction followed by subset construction.
-//! Reserves state `0` ([`DEAD`]) as a sink — every missing transition lands
-//! there, which matches the runtime's single-branch "exit on 0" check. The
-//! start state is always [`START`].
+//! Thompson-style NFA construction followed by interval-based subset
+//! construction. Both NFA edges and DFA arms carry inclusive byte ranges
+//! `(u8, u8)`, so wide character classes (`.`, negations, `'a'..'z'`) cost
+//! one edge / one arm regardless of how many bytes they cover. Subset
+//! construction uses a sweep-line over endpoints to find the maximal
+//! sub-intervals on which the active set of NFA targets is constant.
 //!
-//! The output is a flat `Vec<DfaState>` indexed by state id; each entry
-//! carries its accept kind and its transitions already collapsed into
-//! [`ByteArm`]s, ready for code generation.
+//! [`DEAD`] is a runtime sentinel meaning "stop"; it never appears as a
+//! DFA state in the [`compile`] output. The start state's id is always
+//! [`START`].
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use crate::grammar::ir::{CharClass, ClassItem, TokenPattern};
 use crate::lowering::TokenInfo;
 
-/// Reserved DFA state: the dead sink every missing transition points at.
-/// Real states start at [`START`].
+/// Reserved DFA state: the dead sink the runtime exits on. Never appears
+/// as an entry in the [`compile`] output.
 pub const DEAD: u32 = 0;
 
 /// Start state of every compiled lexer DFA. State 0 is reserved for the
@@ -23,9 +25,7 @@ pub const DEAD: u32 = 0;
 pub const START: u32 = 1;
 
 /// One DFA state: its own state id, byte transitions already grouped into
-/// [`ByteArm`]s, and an optional accepted token kind. The state at index
-/// 0 in the `Vec<DfaState>` returned by [`compile`] is the [`DEAD`] sink
-/// (no arms); the start state is at index [`START`].
+/// [`ByteArm`]s, and an optional accepted token kind.
 #[derive(Clone, Debug)]
 pub struct DfaState {
     /// State id — equal to this entry's index in the `Vec<DfaState>`.
@@ -46,60 +46,27 @@ pub struct DfaState {
 pub struct ByteArm {
     /// Destination DFA state id for every byte in `ranges`.
     pub target: u32,
-    /// Inclusive byte ranges that all transition to `target`.
+    /// If `target` is an accept state, the token-kind id it accepts. Folded
+    /// onto the arm so backends can emit `best_kind = ...` inline at the
+    /// transition site without re-resolving `target` against the state vec.
+    pub target_accept: Option<i16>,
+    /// Inclusive byte ranges that all transition to `target`. Stored
+    /// sorted and gap-separated; adjacent runs (`hi + 1 == next.lo`)
+    /// merge into a single range.
     pub ranges: Vec<(u8, u8)>,
 }
 
-/// Compile tokens to a DFA. Each token becomes an NFA fragment whose end
-/// state accepts its kind; alternation at the start state lets the lexer
-/// try every pattern in parallel. Subset construction then determinises
-/// the combined machine and the per-state byte transitions are collapsed
-/// into [`ByteArm`]s before returning.
+/// Compile tokens to a DFA.
+///
+/// Each token becomes an NFA fragment whose end state accepts that token's
+/// kind id; the per-token fragments share a single ε-joined start so the
+/// lexer tries every pattern in parallel. Subset construction then
+/// determinises the combined machine, partitioning each state's outgoing
+/// byte ranges into the disjoint sub-intervals on which the destination
+/// is constant.
 pub fn compile(tokens: &[TokenInfo]) -> Vec<DfaState> {
     let nfa = build_nfa(tokens);
-    let raw = subset_construct(&nfa);
-    raw.into_iter()
-        .enumerate()
-        .map(|(i, s)| DfaState {
-            id: i as u32,
-            arms: collapse_arms(&s.trans),
-            accept: s.accept,
-        })
-        .collect()
-}
-
-/// Group a 256-byte transition row into [`ByteArm`]s: bytes sharing a
-/// target state fold into one arm, and contiguous bytes within an arm
-/// collapse into ranges.
-fn collapse_arms(trans: &[u32]) -> Vec<ByteArm> {
-    let mut by_target: BTreeMap<u32, Vec<u8>> = BTreeMap::new();
-    for (b, &t) in trans.iter().enumerate() {
-        if t != DEAD {
-            by_target.entry(t).or_default().push(b as u8);
-        }
-    }
-    by_target
-        .into_iter()
-        .map(|(target, bytes)| {
-            let mut ranges: Vec<(u8, u8)> = Vec::new();
-            let mut iter = bytes.into_iter();
-            if let Some(first) = iter.next() {
-                let mut lo = first;
-                let mut hi = first;
-                for b in iter {
-                    if b == hi + 1 {
-                        hi = b;
-                    } else {
-                        ranges.push((lo, hi));
-                        lo = b;
-                        hi = b;
-                    }
-                }
-                ranges.push((lo, hi));
-            }
-            ByteArm { target, ranges }
-        })
-        .collect()
+    subset_construct(&nfa)
 }
 
 type NfaStateId = usize;
@@ -111,7 +78,9 @@ struct Nfa {
 
 #[derive(Default)]
 struct NfaState {
-    byte_trans: Vec<(u8, NfaStateId)>,
+    /// Each entry is a half-open byte range `(lo, hi)` (inclusive) and the
+    /// NFA state to enter on any byte in that range.
+    range_trans: Vec<((u8, u8), NfaStateId)>,
     epsilon: Vec<NfaStateId>,
     accept: Option<i16>,
 }
@@ -139,8 +108,8 @@ impl NfaBuilder {
         self.states[from].epsilon.push(to);
     }
 
-    fn add_byte(&mut self, from: NfaStateId, byte: u8, to: NfaStateId) {
-        self.states[from].byte_trans.push((byte, to));
+    fn add_range(&mut self, from: NfaStateId, lo: u8, hi: u8, to: NfaStateId) {
+        self.states[from].range_trans.push(((lo, hi), to));
     }
 
     fn set_accept(&mut self, s: NfaStateId, kind: i16) {
@@ -160,7 +129,7 @@ impl NfaBuilder {
                 let mut cur = s;
                 for b in lit.as_bytes() {
                     let n = self.new_state();
-                    self.add_byte(cur, *b, n);
+                    self.add_range(cur, *b, *b, n);
                     cur = n;
                 }
                 NfaFragment { start: s, end: cur }
@@ -168,8 +137,8 @@ impl NfaBuilder {
             TokenPattern::Class(cc) => {
                 let s = self.new_state();
                 let e = self.new_state();
-                for b in class_bytes(cc) {
-                    self.add_byte(s, b, e);
+                for (lo, hi) in class_ranges(cc) {
+                    self.add_range(s, lo, hi, e);
                 }
                 NfaFragment { start: s, end: e }
             }
@@ -246,93 +215,196 @@ fn build_nfa(tokens: &[TokenInfo]) -> Nfa {
     }
 }
 
-fn class_bytes(cc: &CharClass) -> Vec<u8> {
-    let mut hit = [false; 256];
-    for it in &cc.items {
-        match *it {
-            ClassItem::Char(c) => {
-                if c <= 0xFF {
-                    hit[c as usize] = true;
+/// Reduce a [`CharClass`] to a sorted list of disjoint, gap-separated
+/// inclusive byte ranges. Codepoints above `0xFF` are clamped to byte
+/// space (matching the existing byte-DFA semantics — multi-byte codepoints
+/// are surfaced through their constituent bytes by the parser).
+fn class_ranges(cc: &CharClass) -> Vec<(u8, u8)> {
+    let mut ranges: Vec<(u8, u8)> = cc
+        .items
+        .iter()
+        .filter_map(|it| match *it {
+            ClassItem::Char(c) if c <= 0xFF => Some((c as u8, c as u8)),
+            ClassItem::Char(_) => None,
+            ClassItem::Range(lo, hi) => {
+                if lo > 0xFF {
+                    None
+                } else {
+                    Some((lo as u8, hi.min(0xFF) as u8))
                 }
             }
-            ClassItem::Range(lo, hi) => {
-                let lo = lo.min(0xFF);
-                let hi = hi.min(0xFF);
-                for b in lo..=hi {
-                    hit[b as usize] = true;
-                }
+        })
+        .collect();
+    ranges.sort();
+    let mut merged: Vec<(u8, u8)> = Vec::new();
+    for (lo, hi) in ranges {
+        if let Some(last) = merged.last_mut() {
+            // Overlap or adjacency (last.hi + 1 == lo) → extend.
+            if last.1 >= lo || (last.1 < 255 && last.1 + 1 == lo) {
+                last.1 = last.1.max(hi);
+                continue;
             }
         }
+        merged.push((lo, hi));
     }
     if cc.negated {
-        (0..=255u8).filter(|b| !hit[*b as usize]).collect()
+        complement(&merged)
     } else {
-        (0..=255u8).filter(|b| hit[*b as usize]).collect()
+        merged
     }
 }
 
-/// Raw DFA state used during subset construction. Carries a 256-byte
-/// transition row that's natural for the algorithm to fill in; collapsed
-/// into [`DfaState`] by [`compile`] before being exposed.
-struct RawDfaState {
-    trans: Vec<u32>,
-    accept: Option<i16>,
-}
-
-fn subset_construct(nfa: &Nfa) -> Vec<RawDfaState> {
-    let mut set_to_id: HashMap<BTreeSet<NfaStateId>, u32> = HashMap::new();
-    let mut states: Vec<RawDfaState> = vec![RawDfaState {
-        trans: vec![0; 256],
-        accept: None,
-    }];
-    let mut queue: VecDeque<BTreeSet<NfaStateId>> = VecDeque::new();
-
-    let start_set = epsilon_closure(nfa, [nfa.start].into_iter().collect());
-    set_to_id.insert(start_set.clone(), START);
-    states.push(build_raw_state(nfa, &start_set));
-    queue.push_back(start_set);
-
-    while let Some(cur_set) = queue.pop_front() {
-        let cur_id = set_to_id[&cur_set];
-
-        let mut by_byte: BTreeMap<u8, BTreeSet<NfaStateId>> = BTreeMap::new();
-        for &s in &cur_set {
-            for &(b, t) in &nfa.states[s].byte_trans {
-                by_byte.entry(b).or_default().insert(t);
-            }
+/// Complement of `ranges` over `[0, 255]`. Assumes `ranges` is sorted and
+/// gap-separated (the form [`class_ranges`] produces before negation).
+fn complement(ranges: &[(u8, u8)]) -> Vec<(u8, u8)> {
+    let mut out: Vec<(u8, u8)> = Vec::new();
+    let mut cursor: u16 = 0;
+    for &(lo, hi) in ranges {
+        if cursor < lo as u16 {
+            out.push((cursor as u8, lo - 1));
         }
-        for (b, targets) in by_byte {
-            let closed = epsilon_closure(nfa, targets);
-            let tgt_id = if let Some(id) = set_to_id.get(&closed) {
-                *id
-            } else {
-                let id = states.len() as u32;
-                set_to_id.insert(closed.clone(), id);
-                states.push(build_raw_state(nfa, &closed));
-                queue.push_back(closed);
-                id
-            };
-            states[cur_id as usize].trans[b as usize] = tgt_id;
-        }
+        cursor = hi as u16 + 1;
     }
-
-    states
+    if cursor <= 255 {
+        out.push((cursor as u8, 255));
+    }
+    out
 }
 
-fn epsilon_closure(nfa: &Nfa, seeds: BTreeSet<NfaStateId>) -> BTreeSet<NfaStateId> {
-    let mut out = seeds.clone();
-    let mut stack: Vec<NfaStateId> = seeds.into_iter().collect();
-    while let Some(s) = stack.pop() {
-        for &e in &nfa.states[s].epsilon {
-            if out.insert(e) {
-                stack.push(e);
+#[derive(Copy, Clone)]
+enum Endpoint {
+    /// `target` becomes active at this position.
+    Open(NfaStateId),
+    /// `target` becomes inactive at this position (events use `hi + 1` so
+    /// the close lands one past the last covered byte).
+    Close(NfaStateId),
+}
+
+/// Sweep-line over `(range, target)` pairs, returning the maximal disjoint
+/// sub-intervals together with the set of NFA targets active on each one.
+/// Empty result is empty input.
+fn partition_ranges(
+    edges: &[((u8, u8), NfaStateId)],
+) -> Vec<((u8, u8), BTreeSet<NfaStateId>)> {
+    if edges.is_empty() {
+        return Vec::new();
+    }
+    let mut events: Vec<(u16, Endpoint)> = Vec::with_capacity(edges.len() * 2);
+    for &((lo, hi), target) in edges {
+        events.push((lo as u16, Endpoint::Open(target)));
+        events.push((hi as u16 + 1, Endpoint::Close(target)));
+    }
+    events.sort_by_key(|(p, _)| *p);
+
+    let mut out: Vec<((u8, u8), BTreeSet<NfaStateId>)> = Vec::new();
+    let mut active: BTreeSet<NfaStateId> = BTreeSet::new();
+    let mut i = 0;
+    while i < events.len() {
+        let cur_pos = events[i].0;
+        // Apply every event at this position before reading off the
+        // active set — Open and Close at the same position cancel
+        // cleanly because the result only matters for the *next* range.
+        while i < events.len() && events[i].0 == cur_pos {
+            match events[i].1 {
+                Endpoint::Open(t) => {
+                    active.insert(t);
+                }
+                Endpoint::Close(t) => {
+                    active.remove(&t);
+                }
             }
+            i += 1;
+        }
+        let next_pos = if i < events.len() { events[i].0 } else { 256 };
+        if !active.is_empty() && cur_pos < next_pos {
+            out.push((
+                (cur_pos as u8, (next_pos - 1) as u8),
+                active.clone(),
+            ));
         }
     }
     out
 }
 
-fn build_raw_state(nfa: &Nfa, set: &BTreeSet<NfaStateId>) -> RawDfaState {
+fn subset_construct(nfa: &Nfa) -> Vec<DfaState> {
+    let mut set_to_id: HashMap<BTreeSet<NfaStateId>, u32> = HashMap::new();
+    let mut states: Vec<DfaState> = Vec::new();
+    let mut queue: VecDeque<BTreeSet<NfaStateId>> = VecDeque::new();
+
+    let start_set = epsilon_closure(nfa, [nfa.start].into_iter().collect());
+    set_to_id.insert(start_set.clone(), START);
+    states.push(new_dfa_state(START, nfa, &start_set));
+    queue.push_back(start_set);
+
+    while let Some(cur_set) = queue.pop_front() {
+        let cur_id = set_to_id[&cur_set];
+
+        // Collect this DFA state's outgoing NFA range edges.
+        let mut edges: Vec<((u8, u8), NfaStateId)> = Vec::new();
+        for &s in &cur_set {
+            for &(range, t) in &nfa.states[s].range_trans {
+                edges.push((range, t));
+            }
+        }
+
+        // Partition into disjoint sub-intervals; each interval maps to a
+        // set of NFA targets, which we close and look up / register as a
+        // DFA state. Track each target's accept kind alongside its ranges
+        // so we can fold it onto the emitted `ByteArm`.
+        let mut by_target: BTreeMap<u32, (Option<i16>, Vec<(u8, u8)>)> = BTreeMap::new();
+        for ((lo, hi), targets) in partition_ranges(&edges) {
+            let closed = epsilon_closure(nfa, targets);
+            let tgt_id = if let Some(id) = set_to_id.get(&closed) {
+                *id
+            } else {
+                let id = (states.len() as u32) + 1; // +1 because state 0 = DEAD is reserved.
+                set_to_id.insert(closed.clone(), id);
+                states.push(new_dfa_state(id, nfa, &closed));
+                queue.push_back(closed);
+                id
+            };
+            let target_accept = states[(tgt_id - START) as usize].accept;
+            by_target
+                .entry(tgt_id)
+                .or_insert_with(|| (target_accept, Vec::new()))
+                .1
+                .push((lo, hi));
+        }
+
+        // Per-target ranges arrive in ascending order from the sweep;
+        // merge any that turned out to be byte-adjacent so each ByteArm
+        // carries the minimum-cardinality range list.
+        let arms: Vec<ByteArm> = by_target
+            .into_iter()
+            .map(|(target, (target_accept, ranges))| ByteArm {
+                target,
+                target_accept,
+                ranges: merge_adjacent(ranges),
+            })
+            .collect();
+        states[(cur_id - START) as usize].arms = arms;
+    }
+
+    states
+}
+
+/// Merge adjacent byte ranges: `[(0, 5), (6, 9)]` → `[(0, 9)]`. Input is
+/// expected to be sorted (which the sweep guarantees).
+fn merge_adjacent(ranges: Vec<(u8, u8)>) -> Vec<(u8, u8)> {
+    let mut out: Vec<(u8, u8)> = Vec::new();
+    for (lo, hi) in ranges {
+        if let Some(last) = out.last_mut() {
+            if last.1 < 255 && last.1 + 1 == lo {
+                last.1 = hi;
+                continue;
+            }
+        }
+        out.push((lo, hi));
+    }
+    out
+}
+
+fn new_dfa_state(id: u32, nfa: &Nfa, set: &BTreeSet<NfaStateId>) -> DfaState {
     // Priority-ties in the NFA collapse here: when a single DFA state
     // accepts multiple kinds, we keep the smallest id — which matches the
     // grammar's declaration order and gives earlier tokens precedence (for
@@ -346,10 +418,24 @@ fn build_raw_state(nfa: &Nfa, set: &BTreeSet<NfaStateId>) -> RawDfaState {
             });
         }
     }
-    RawDfaState {
-        trans: vec![0; 256],
+    DfaState {
+        id,
+        arms: Vec::new(),
         accept,
     }
+}
+
+fn epsilon_closure(nfa: &Nfa, seeds: BTreeSet<NfaStateId>) -> BTreeSet<NfaStateId> {
+    let mut out = seeds.clone();
+    let mut stack: Vec<NfaStateId> = seeds.into_iter().collect();
+    while let Some(s) = stack.pop() {
+        for &e in &nfa.states[s].epsilon {
+            if out.insert(e) {
+                stack.push(e);
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -367,17 +453,23 @@ mod tests {
         DEAD
     }
 
+    /// Find a state by id (real states only; the dead sentinel never
+    /// appears in `dfa`).
+    fn by_id(dfa: &[DfaState], id: u32) -> &DfaState {
+        dfa.iter().find(|s| s.id == id).expect("state id not in dfa")
+    }
+
     fn scan(dfa: &[DfaState], bytes: &[u8]) -> Option<(usize, i16)> {
         let mut state = START;
         let mut pos = 0;
         let mut last: Option<(usize, i16)> = None;
         loop {
             if pos < bytes.len() {
-                let next = step(&dfa[state as usize], bytes[pos]);
+                let next = step(by_id(dfa, state), bytes[pos]);
                 if next != DEAD {
                     state = next;
                     pos += 1;
-                    if let Some(k) = dfa[state as usize].accept {
+                    if let Some(k) = by_id(dfa, state).accept {
                         last = Some((pos, k));
                     }
                     continue;
@@ -385,18 +477,6 @@ mod tests {
             }
             return last;
         }
-    }
-
-    #[test]
-    fn dead_state_at_zero_real_states_shifted() {
-        let t = toks(vec![tok("A", lit("a"))]);
-        let dfa = compile(&t);
-
-        assert_eq!(dfa[DEAD as usize].accept, None);
-        assert!(dfa[DEAD as usize].arms.is_empty());
-
-        assert_eq!(START, 1);
-        assert!(dfa.len() >= 2);
     }
 
     fn tok(name: &str, pat: TokenPattern) -> TokenInfo {
@@ -429,6 +509,15 @@ mod tests {
     }
 
     #[test]
+    fn output_omits_dead_state_and_starts_at_start() {
+        let t = toks(vec![tok("A", lit("a"))]);
+        let dfa = compile(&t);
+        assert!(!dfa.is_empty());
+        assert_eq!(dfa[0].id, START);
+        assert!(dfa.iter().all(|s| s.id != DEAD));
+    }
+
+    #[test]
     fn longest_match_and_priority() {
         let t = toks(vec![
             tok("IF", lit("if")),
@@ -443,11 +532,8 @@ mod tests {
         let dfa = compile(&t);
 
         assert_eq!(scan(&dfa, b"iff"), Some((3, 2)));
-
         assert_eq!(scan(&dfa, b"if"), Some((2, 1)));
-
         assert_eq!(scan(&dfa, b"z"), Some((1, 2)));
-
         assert_eq!(scan(&dfa, b"1"), None);
     }
 
@@ -506,7 +592,7 @@ mod tests {
             ))),
         )]);
         let dfa = compile(&t);
-        let arms = &dfa[START as usize].arms;
+        let arms = &dfa[0].arms;
         assert_eq!(arms.len(), 1);
         assert_eq!(arms[0].ranges, vec![(b'a', b'z')]);
     }
@@ -526,7 +612,7 @@ mod tests {
             ),
         )]);
         let dfa = compile(&t);
-        let arms = &dfa[START as usize].arms;
+        let arms = &dfa[0].arms;
         assert_eq!(arms.len(), 1);
         assert_eq!(arms[0].ranges, vec![(b'0', b'9'), (b'a', b'f')]);
     }
@@ -536,7 +622,7 @@ mod tests {
         // Two literal tokens with different first bytes — distinct targets.
         let t = toks(vec![tok("A", lit("a")), tok("B", lit("b"))]);
         let dfa = compile(&t);
-        let arms = &dfa[START as usize].arms;
+        let arms = &dfa[0].arms;
         assert_eq!(arms.len(), 2);
         // Each arm should be a single-byte range and they should differ.
         for arm in arms {
@@ -548,9 +634,51 @@ mod tests {
     }
 
     #[test]
-    fn dead_state_has_no_arms() {
-        let t = toks(vec![tok("A", lit("a"))]);
-        let dfa = compile(&t);
-        assert!(dfa[DEAD as usize].arms.is_empty());
+    fn class_ranges_merges_overlapping_and_adjacent() {
+        let cc = CharClass {
+            negated: false,
+            items: vec![
+                ClassItem::Range(b'a' as u32, b'c' as u32),
+                ClassItem::Range(b'b' as u32, b'e' as u32), // overlaps
+                ClassItem::Char(b'f' as u32),                // adjacent to the merged run
+                ClassItem::Char(b'z' as u32),                // disjoint
+            ],
+        };
+        assert_eq!(class_ranges(&cc), vec![(b'a', b'f'), (b'z', b'z')]);
+    }
+
+    #[test]
+    fn class_ranges_negation_matches_complement_over_all_bytes() {
+        let cc = CharClass {
+            negated: true,
+            items: vec![ClassItem::Char(b'a' as u32)],
+        };
+        assert_eq!(class_ranges(&cc), vec![(0, b'a' - 1), (b'a' + 1, 255)]);
+
+        // Negated empty class = all bytes.
+        let any = CharClass {
+            negated: true,
+            items: vec![],
+        };
+        assert_eq!(class_ranges(&any), vec![(0, 255)]);
+    }
+
+    #[test]
+    fn partition_ranges_splits_overlapping_into_disjoint_pieces() {
+        // Two NFA states (1 and 2) with overlapping ranges.
+        let edges = vec![((b'a', b'd'), 1usize), ((b'b', b'e'), 2usize)];
+        let parts = partition_ranges(&edges);
+        let names: Vec<((u8, u8), Vec<usize>)> = parts
+            .into_iter()
+            .map(|(r, set)| (r, set.into_iter().collect()))
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                ((b'a', b'a'), vec![1]),
+                ((b'b', b'd'), vec![1, 2]),
+                ((b'e', b'e'), vec![2]),
+            ]
+        );
     }
 }

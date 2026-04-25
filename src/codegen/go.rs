@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use crate::codegen::common::pascal;
 use crate::codegen::EmittedFile;
-use crate::lowering::lexer_dfa::{DfaState, DEAD, START};
+use crate::lowering::lexer_dfa::{DfaState, START};
 use crate::lowering::{DispatchLeaf, DispatchTree, Op, StateTable};
 
 /// Per-backend arguments. Currently empty — kept as a struct (deriving
@@ -193,12 +193,7 @@ fn emit_dfa(s: &mut String, st: &StateTable) {
     writeln!(s, "\tstate := uint32({})", START).unwrap();
     writeln!(s, "\tfor {{").unwrap();
     writeln!(s, "\t\tswitch state {{").unwrap();
-    for ds in dfa {
-        if ds.id == DEAD {
-            continue;
-        }
-        emit_dfa_state_arm(s, st, dfa, ds);
-    }
+    for ds in dfa { emit_dfa_state_arm(s, st, ds); }
     writeln!(
         s,
         "\t\tdefault:\n\t\t\treturn bestLen, bestKind, pos - start"
@@ -224,8 +219,7 @@ fn emit_dfa(s: &mut String, st: &StateTable) {
 fn emit_dfa_state_arm(
     s: &mut String,
     st: &StateTable,
-    dfa: &[DfaState],
-    ds: &DfaState,
+        ds: &DfaState,
 ) {
     if ds.arms.is_empty() {
         writeln!(
@@ -246,14 +240,13 @@ fn emit_dfa_state_arm(
     writeln!(s, "\t\t\tswitch {{").unwrap();
     for arm in &ds.arms {
         let cond = byte_cond(&arm.ranges);
-        let target_accept = dfa[arm.target as usize].accept;
         write!(
             s,
             "\t\t\tcase {}:\n\t\t\t\tpos++; state = {}",
             cond, arm.target
         )
         .unwrap();
-        if let Some(kind) = target_accept {
+        if let Some(kind) = arm.target_accept {
             write!(
                 s,
                 "; bestLen = pos - start; bestKind = int16({})",
