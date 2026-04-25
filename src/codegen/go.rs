@@ -6,7 +6,13 @@ use crate::codegen::EmittedFile;
 use crate::lowering::lexer_dfa::{DfaState, DEAD, START};
 use crate::lowering::{DispatchLeaf, DispatchTree, Op, StateTable};
 
-pub fn emit(st: &StateTable) -> Vec<EmittedFile> {
+/// Per-backend arguments. Currently empty — kept as a struct (deriving
+/// [`clap::Args`]) so the CLI can flatten any future flags in directly
+/// and the [`emit`] signature stays stable.
+#[derive(clap::Args, Clone, Debug, Default)]
+pub struct Args {}
+
+pub fn emit(st: &StateTable, _args: &Args) -> Vec<EmittedFile> {
     let mut s = String::new();
 
     emit_header(&mut s, st);

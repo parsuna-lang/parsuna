@@ -2,12 +2,12 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
+use clap::{Parser, Subcommand};
 use parsuna::grammar::ir::{CharClass, ClassItem};
 use parsuna::lowering::lexer_dfa::{DfaState, START};
 use parsuna::{
     analysis::{analyze, EOF_MARKER},
-    codegen::{self, Backend, BACKENDS},
+    codegen::{EmittedFile, GenerateTarget},
     grammar::parse_grammar,
     lowering::{self, StateTable},
     tree_sitter, Diagnostic, Expr, TokenPattern,
@@ -53,15 +53,7 @@ enum Op {
     /// Exits non-zero on diagnostics — suitable as a CI gate.
     Check,
     /// Emit a parser for the given backend target.
-    Generate {
-        /// Backend name (e.g. `rust`, `python`, `typescript`, `go`,
-        /// `java`, `csharp`, `c`), or `all` to emit every backend.
-        target: String,
-        /// Output directory. With multiple backends, files are written
-        /// under one sub-directory per backend. Defaults to `.`.
-        #[arg(short = 'o', long = "out")]
-        out: Option<PathBuf>,
-    },
+    Generate(GenerateCmd),
     /// Emit a tree-sitter `grammar.js` for editor tooling.
     TreeSitter {
         /// Output directory for `grammar.js`. Defaults to `.`.
@@ -72,6 +64,17 @@ enum Op {
     /// developing a grammar.
     #[command(subcommand)]
     Debug(DebugCmd),
+}
+
+/// `generate` subcommand: an output directory plus one per-backend
+/// sub-subcommand carrying that target's `Args`.
+#[derive(clap::Args)]
+struct GenerateCmd {
+    /// Output directory. Defaults to `.`.
+    #[arg(short = 'o', long = "out", global = true)]
+    out: Option<PathBuf>,
+    #[command(subcommand)]
+    target: GenerateTarget,
 }
 
 #[derive(Subcommand)]
@@ -117,10 +120,6 @@ enum RulesFormat {
     Dot,
 }
 
-fn backend_names() -> Vec<&'static str> {
-    BACKENDS.iter().map(|b| b.name).collect()
-}
-
 fn write_file(path: &Path, contents: &[u8]) -> Result<(), ExitCode> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -139,18 +138,13 @@ fn write_file(path: &Path, contents: &[u8]) -> Result<(), ExitCode> {
 }
 
 fn main() -> ExitCode {
-    let footer = format!("Targets: {}, all", backend_names().join(", "));
-    let matches = Cli::command()
-        .mut_subcommand("generate", |s| s.after_help(footer))
-        .get_matches();
-    let cli = Cli::from_arg_matches(&matches).expect("clap matches");
-
+    let cli = Cli::parse();
     let grammar = cli.grammar.as_path();
     let name = cli.name.as_deref();
     let warnings = cli.warnings;
     match cli.op {
         Op::Check => cmd_check(grammar, name, warnings),
-        Op::Generate { target, out } => cmd_generate(grammar, name, warnings, &target, out),
+        Op::Generate(cmd) => cmd_generate(grammar, name, warnings, cmd),
         Op::TreeSitter { out } => cmd_tree_sitter(grammar, name, warnings, out),
         Op::Debug(sub) => cmd_debug(grammar, name, warnings, sub),
     }
@@ -932,40 +926,26 @@ fn cmd_generate(
     grammar: &Path,
     name: Option<&str>,
     warnings: WarningPolicy,
-    target: &str,
-    out: Option<PathBuf>,
+    cmd: GenerateCmd,
 ) -> ExitCode {
     let ag = match load_and_analyze(grammar, name, warnings) {
         Ok(ag) => ag,
         Err(code) => return code,
     };
-
-    let backends: Vec<&Backend> = if target == "all" {
-        BACKENDS.iter().collect()
-    } else if let Some(b) = codegen::find(target) {
-        vec![b]
-    } else {
-        eprintln!("unknown target: {}", target);
-        eprintln!("available: {}", backend_names().join(", "));
-        return ExitCode::FAILURE;
-    };
-
     let st = lowering::lower(&ag);
+    let files = cmd.target.emit(&st);
 
-    let multi = backends.len() > 1;
-    for b in backends {
-        let base = match &out {
-            Some(d) if multi => d.join(b.name),
-            Some(d) => d.clone(),
-            None => PathBuf::from("."),
-        };
-        for f in (b.emit)(&st) {
-            if let Err(code) = write_file(&base.join(&f.path), f.contents.as_bytes()) {
-                return code;
-            }
+    let base = cmd.out.unwrap_or_else(|| PathBuf::from("."));
+    for f in files {
+        if let Err(code) = write_emitted(&base, &f) {
+            return code;
         }
     }
     ExitCode::SUCCESS
+}
+
+fn write_emitted(base: &Path, f: &EmittedFile) -> Result<(), ExitCode> {
+    write_file(&base.join(&f.path), f.contents.as_bytes())
 }
 
 fn load_and_analyze(

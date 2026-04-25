@@ -1,15 +1,14 @@
 //! Target-language code generators.
 //!
-//! Each backend consumes a [`crate::lowering::StateTable`] and returns one
-//! or more [`EmittedFile`]s ready to be written to disk. The set of
-//! available backends is listed in [`BACKENDS`]; [`find`] resolves a
-//! case-insensitive name and [`emit`] is a convenience that runs
-//! [`crate::lowering::lower`] and then the backend.
+//! Each backend is a sibling submodule exposing a `pub struct Args` and a
+//! `pub fn emit(st: &StateTable, args: &Args) -> Vec<EmittedFile>`. There
+//! is no central registry — the CLI dispatches per target via a clap
+//! subcommand and calls the chosen backend directly. Backends are pure;
+//! they never touch the filesystem.
 
 use std::path::PathBuf;
 
-use crate::analysis::AnalyzedGrammar;
-use crate::lowering::{self, StateTable};
+use crate::lowering::StateTable;
 
 pub mod c;
 pub mod common;
@@ -30,71 +29,51 @@ pub struct EmittedFile {
     pub contents: String,
 }
 
-/// Signature every backend implements: turn a state table into a list of
-/// files. Backends are pure — they never touch the filesystem themselves.
-pub type EmitFn = fn(&StateTable) -> Vec<EmittedFile>;
-
-/// A named target language plus its emit function. Appears in [`BACKENDS`]
-/// and is what the CLI hands to [`emit`].
-pub struct Backend {
-    /// Target name used by the CLI (`rust`, `python`, …). Always
-    /// lowercase ASCII.
-    pub name: &'static str,
-    /// Emit function implementing this target.
-    pub emit: EmitFn,
+/// One subcommand per backend. The wrapped `Args` struct carries the
+/// target-specific flags (e.g. `java --package com.example.foo`); the
+/// `Args` types derive [`clap::Args`] so the CLI gets per-target options
+/// for free without re-declaring them at the dispatch site.
+#[derive(clap::Subcommand)]
+pub enum GenerateTarget {
+    /// Rust crate source — `<grammar>.rs`. Plug into a `parsuna-rt` crate dep.
+    Rust(rust::Args),
+    /// Python package built around a generated Rust+pyo3 extension.
+    Python(python::Args),
+    /// TypeScript module — `<grammar>.ts`. Requires the `parsuna-rt` npm package.
+    Typescript(typescript::Args),
+    /// Go package — single file. Requires the `parsuna.dev/parsuna-rt-go` module.
+    Go(go::Args),
+    /// Java class — `<package>/Grammar.java`. Requires `dev.parsuna:parsuna-rt`.
+    Java(java::Args),
+    /// C# class — `<namespace>/Grammar.cs`. Requires the `Parsuna.Runtime` library.
+    Csharp(csharp::Args),
+    /// C header + implementation — `<grammar>.h` and `<grammar>.c`. Self-contained.
+    C(c::Args),
 }
 
-/// Every registered backend, in the order the CLI lists them. Order is not
-/// semantically meaningful but is kept stable for predictable help output.
-pub const BACKENDS: &[Backend] = &[
-    Backend {
-        name: "rust",
-        emit: rust::emit,
-    },
-    Backend {
-        name: "python",
-        emit: python::emit,
-    },
-    Backend {
-        name: "typescript",
-        emit: typescript::emit,
-    },
-    Backend {
-        name: "go",
-        emit: go::emit,
-    },
-    Backend {
-        name: "java",
-        emit: java::emit,
-    },
-    Backend {
-        name: "csharp",
-        emit: csharp::emit,
-    },
-    Backend {
-        name: "c",
-        emit: c::emit,
-    },
-];
-
-/// Look up a backend by case-insensitive name. Returns `None` if no such
-/// target exists.
-pub fn find(name: &str) -> Option<&'static Backend> {
-    let n = name.to_ascii_lowercase();
-    BACKENDS.iter().find(|b| b.name == n)
-}
-
-/// Lower an analyzed grammar and emit files for the given backend.
-pub fn emit(backend: &Backend, ag: &AnalyzedGrammar) -> Vec<EmittedFile> {
-    let st = lowering::lower(ag);
-    (backend.emit)(&st)
+impl GenerateTarget {
+    /// Run the chosen backend's `emit` function on `st` and return its
+    /// files. Pure dispatch — backends are responsible for their own
+    /// output shape.
+    pub fn emit(&self, st: &StateTable) -> Vec<EmittedFile> {
+        match self {
+            GenerateTarget::Rust(args) => rust::emit(st, args),
+            GenerateTarget::Python(args) => python::emit(st, args),
+            GenerateTarget::Typescript(args) => typescript::emit(st, args),
+            GenerateTarget::Go(args) => go::emit(st, args),
+            GenerateTarget::Java(args) => java::emit(st, args),
+            GenerateTarget::Csharp(args) => csharp::emit(st, args),
+            GenerateTarget::C(args) => c::emit(st, args),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::analysis::analyze;
+    use crate::analysis::{analyze, AnalyzedGrammar};
     use crate::grammar::parse_grammar;
+    use crate::lowering::{self, StateTable};
 
     fn analyze_minimal() -> AnalyzedGrammar {
         let g = parse_grammar("T = \"t\"; main = T;").expect("parse");
@@ -102,48 +81,102 @@ mod tests {
         outcome.grammar.expect("grammar")
     }
 
-    #[test]
-    fn find_is_case_insensitive() {
-        assert!(find("rust").is_some());
-        assert!(find("RUST").is_some());
-        assert!(find("RuSt").is_some());
-        assert!(find("nonexistent").is_none());
+    fn lowered_minimal() -> StateTable {
+        lowering::lower(&analyze_minimal())
     }
 
-    #[test]
-    fn backends_list_is_non_empty_and_distinct() {
-        assert!(!BACKENDS.is_empty());
-        let names: std::collections::BTreeSet<&str> =
-            BACKENDS.iter().map(|b| b.name).collect();
-        assert_eq!(names.len(), BACKENDS.len(), "duplicate backend name");
-        for b in BACKENDS {
-            assert!(b.name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()));
+    fn assert_non_empty(target: &str, files: Vec<EmittedFile>) {
+        assert!(!files.is_empty(), "backend `{}` emitted no files", target);
+        for f in &files {
+            assert!(
+                !f.contents.is_empty(),
+                "backend `{}` emitted empty file {:?}",
+                target,
+                f.path
+            );
         }
     }
 
     #[test]
-    fn every_backend_emits_at_least_one_file() {
-        let ag = analyze_minimal();
-        for b in BACKENDS {
-            let files = emit(b, &ag);
-            assert!(!files.is_empty(), "backend `{}` emitted no files", b.name);
-            for f in &files {
-                assert!(
-                    !f.contents.is_empty(),
-                    "backend `{}` emitted empty file {:?}",
-                    b.name,
-                    f.path
-                );
-            }
-        }
+    fn rust_backend_emits_file() {
+        let st = lowered_minimal();
+        assert_non_empty("rust", rust::emit(&st, &rust::Args::default()));
     }
 
     #[test]
-    fn rust_backend_mentions_grammar_name() {
-        let ag = analyze_minimal();
-        let rust = find("rust").expect("rust backend");
-        let files = emit(rust, &ag);
+    fn python_backend_emits_files() {
+        let st = lowered_minimal();
+        assert_non_empty("python", python::emit(&st, &python::Args::default()));
+    }
+
+    #[test]
+    fn typescript_backend_emits_file() {
+        let st = lowered_minimal();
+        assert_non_empty(
+            "typescript",
+            typescript::emit(&st, &typescript::Args::default()),
+        );
+    }
+
+    #[test]
+    fn go_backend_emits_file() {
+        let st = lowered_minimal();
+        assert_non_empty("go", go::emit(&st, &go::Args::default()));
+    }
+
+    #[test]
+    fn java_backend_emits_file() {
+        let st = lowered_minimal();
+        assert_non_empty("java", java::emit(&st, &java::Args::default()));
+    }
+
+    #[test]
+    fn java_package_arg_drives_package_declaration_and_path() {
+        let st = lowered_minimal();
+        let args = java::Args {
+            package: Some("com.example.foo".into()),
+        };
+        let files = java::emit(&st, &args);
+        let f = &files[0];
+        assert_eq!(
+            f.path,
+            std::path::PathBuf::from("com")
+                .join("example")
+                .join("foo")
+                .join("Grammar.java")
+        );
+        assert!(f.contents.contains("package com.example.foo;"));
+    }
+
+    #[test]
+    fn csharp_backend_emits_file() {
+        let st = lowered_minimal();
+        assert_non_empty("csharp", csharp::emit(&st, &csharp::Args::default()));
+    }
+
+    #[test]
+    fn csharp_namespace_arg_drives_namespace_declaration() {
+        let st = lowered_minimal();
+        let args = csharp::Args {
+            namespace: Some("MyApp.Parser".into()),
+        };
+        let files = csharp::emit(&st, &args);
+        let f = &files[0];
+        assert!(f.contents.contains("namespace MyApp.Parser;"));
+        assert!(f.path.starts_with("MyApp.Parser"));
+    }
+
+    #[test]
+    fn c_backend_emits_files() {
+        let st = lowered_minimal();
+        assert_non_empty("c", c::emit(&st, &c::Args::default()));
+    }
+
+    #[test]
+    fn rust_backend_mentions_grammar_name_or_entry_point() {
+        let st = lowered_minimal();
+        let files = rust::emit(&st, &rust::Args::default());
         let combined: String = files.iter().map(|f| f.contents.as_str()).collect();
-        assert!(combined.contains(&ag.grammar.name) || combined.contains("parse_main"));
+        assert!(combined.contains(&st.grammar_name) || combined.contains("parse_main"));
     }
 }

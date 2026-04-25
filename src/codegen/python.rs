@@ -5,8 +5,18 @@ use crate::codegen::rust;
 use crate::codegen::EmittedFile;
 use crate::lowering::StateTable;
 
-pub fn emit(st: &StateTable) -> Vec<EmittedFile> {
-    let rust_file = rust::emit(st).into_iter().next().unwrap().contents;
+/// Per-backend arguments. Currently empty — kept as a struct (deriving
+/// [`clap::Args`]) so the CLI can flatten any future flags in directly
+/// and the [`emit`] signature stays stable.
+#[derive(clap::Args, Clone, Debug, Default)]
+pub struct Args {}
+
+pub fn emit(st: &StateTable, _args: &Args) -> Vec<EmittedFile> {
+    let rust_file = rust::emit(st, &rust::Args::default())
+        .into_iter()
+        .next()
+        .unwrap()
+        .contents;
     let name = if st.grammar_name.is_empty() {
         "parser".to_string()
     } else {

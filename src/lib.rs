@@ -18,7 +18,7 @@ pub mod lowering;
 pub mod tree_sitter;
 
 pub use analysis::{AnalysisOutcome, AnalyzedGrammar};
-pub use codegen::{emit, find, Backend, BACKENDS};
+pub use codegen::EmittedFile;
 pub use diagnostic::{Diagnostic, Severity};
 pub use grammar::ir::{Expr, Grammar, RuleDef, TokenDef, TokenPattern};
 pub use parsuna_rt::{Error, Span};
