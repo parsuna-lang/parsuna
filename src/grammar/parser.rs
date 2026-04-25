@@ -185,7 +185,11 @@ fn read_decl<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>, g: &mut G
                 .at(name_tok.span),
             );
         }
-        g.tokens.push(TokenDef {
+        if g.tokens.contains_key(&name) {
+            r.issues
+                .push(Error::new(format!("duplicate token: {}", name)).at(decl_span));
+        }
+        g.add_token(TokenDef {
             name,
             pattern: pattern.unwrap_or(TokenPattern::Empty),
             skip,
@@ -202,7 +206,11 @@ fn read_decl<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>, g: &mut G
                 .at(name_tok.span),
             );
         }
-        g.rules.push(RuleDef {
+        if g.rules.contains_key(&name) {
+            r.issues
+                .push(Error::new(format!("duplicate rule: {}", name)).at(decl_span));
+        }
+        g.add_rule(RuleDef {
             name,
             body: expr.unwrap_or(Expr::Empty),
             is_fragment,
@@ -636,17 +644,17 @@ mod tests {
     fn parses_simple_token_and_rule() {
         let g = parse_grammar("A = \"a\"; main = A;").expect("ok");
         assert_eq!(g.tokens.len(), 1);
-        assert_eq!(g.tokens[0].name, "A");
-        assert!(matches!(g.tokens[0].pattern, TokenPattern::Literal(ref s) if s == "a"));
+        let a = g.tokens.get("A").expect("A");
+        assert!(matches!(a.pattern, TokenPattern::Literal(ref s) if s == "a"));
         assert_eq!(g.rules.len(), 1);
-        assert_eq!(g.rules[0].name, "main");
-        assert!(matches!(g.rules[0].body, Expr::Token(ref n) if n == "A"));
+        let main = g.rules.get("main").expect("main");
+        assert!(matches!(main.body, Expr::Token(ref n) if n == "A"));
     }
 
     #[test]
     fn skip_prefix_marks_token_as_skip() {
         let g = parse_grammar("?WS = \" \"+; T = \"t\"; main = T;").expect("ok");
-        let ws = g.token("WS").expect("WS");
+        let ws = g.tokens.get("WS").expect("WS");
         assert!(ws.skip);
         assert!(!ws.is_fragment);
     }
@@ -657,7 +665,7 @@ mod tests {
             "_DIGIT = '0'..'9'; NUM = _DIGIT+; main = NUM;",
         )
         .expect("ok");
-        let frag = g.token("_DIGIT").expect("_DIGIT");
+        let frag = g.tokens.get("_DIGIT").expect("_DIGIT");
         assert!(frag.is_fragment);
         assert!(!frag.skip);
     }
@@ -681,7 +689,7 @@ mod tests {
     #[test]
     fn quantifiers_become_opt_star_plus_in_rule_body() {
         let g = parse_grammar("A = \"a\"; main = A? A* A+;").expect("ok");
-        let body = &g.rules[0].body;
+        let body = &g.rules.get("main").expect("main").body;
         let xs = match body {
             Expr::Seq(xs) => xs,
             other => panic!("expected Seq, got {:?}", other),
@@ -694,20 +702,21 @@ mod tests {
     #[test]
     fn alt_with_pipe_in_rule_body() {
         let g = parse_grammar("A = \"a\"; B = \"b\"; main = A | B;").expect("ok");
-        assert!(matches!(g.rules[0].body, Expr::Alt(ref xs) if xs.len() == 2));
+        let main = g.rules.get("main").expect("main");
+        assert!(matches!(main.body, Expr::Alt(ref xs) if xs.len() == 2));
     }
 
     #[test]
     fn group_parentheses_in_token_pattern() {
         let g = parse_grammar("T = (\"a\" | \"b\")+; main = T;").expect("ok");
-        let pat = &g.token("T").unwrap().pattern;
+        let pat = &g.tokens.get("T").unwrap().pattern;
         assert!(matches!(pat, TokenPattern::Plus(_)));
     }
 
     #[test]
     fn char_range_pattern() {
         let g = parse_grammar("D = '0'..'9'; main = D;").expect("ok");
-        let pat = &g.token("D").unwrap().pattern;
+        let pat = &g.tokens.get("D").unwrap().pattern;
         match pat {
             TokenPattern::Class(cc) => {
                 assert!(!cc.negated);
@@ -722,7 +731,7 @@ mod tests {
     fn dot_atom_means_negated_empty_class_any_char() {
         // `.` is "any byte" — represented as a negated empty class.
         let g = parse_grammar("ANY = .; main = ANY;").expect("ok");
-        let pat = &g.token("ANY").unwrap().pattern;
+        let pat = &g.tokens.get("ANY").unwrap().pattern;
         match pat {
             TokenPattern::Class(cc) => {
                 assert!(cc.negated);
@@ -735,7 +744,7 @@ mod tests {
     #[test]
     fn negated_class_with_bang() {
         let g = parse_grammar("X = !'a'; main = X;").expect("ok");
-        let pat = &g.token("X").unwrap().pattern;
+        let pat = &g.tokens.get("X").unwrap().pattern;
         match pat {
             TokenPattern::Class(cc) => {
                 assert!(cc.negated);
@@ -749,7 +758,7 @@ mod tests {
     #[test]
     fn unicode_escape_in_char_literal() {
         let g = parse_grammar("X = '\\u{0041}'; main = X;").expect("ok");
-        let pat = &g.token("X").unwrap().pattern;
+        let pat = &g.tokens.get("X").unwrap().pattern;
         // `'A'` (a single char literal) folds to a one-character literal pattern.
         assert!(matches!(pat, TokenPattern::Literal(ref s) if s == "A"));
     }
@@ -770,6 +779,15 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_token_and_rule_names_flagged() {
+        let errs = parse_grammar("T = \"t\"; T = \"u\"; r = T; r = T;")
+            .err()
+            .expect("err");
+        assert!(errs.iter().any(|e| e.message == "duplicate token: T"));
+        assert!(errs.iter().any(|e| e.message == "duplicate rule: r"));
+    }
+
+    #[test]
     fn empty_source_yields_empty_grammar() {
         let g = parse_grammar("").expect("ok");
         assert!(g.tokens.is_empty());
@@ -786,9 +804,9 @@ mod tests {
         ";
         let g = parse_grammar(src).expect("ok");
         assert_eq!(g.tokens.len(), 1);
-        assert_eq!(g.tokens[0].name, "A");
+        assert!(g.tokens.get("A").is_some());
         assert_eq!(g.rules.len(), 1);
-        assert_eq!(g.rules[0].name, "main");
+        assert!(g.rules.get("main").is_some());
     }
 
     #[test]
@@ -797,8 +815,8 @@ mod tests {
             "Z = \"z\"; A = \"a\"; second = A; first = Z;",
         )
         .expect("ok");
-        let token_names: Vec<&str> = g.tokens.iter().map(|t| t.name.as_str()).collect();
-        let rule_names: Vec<&str> = g.rules.iter().map(|r| r.name.as_str()).collect();
+        let token_names: Vec<&str> = g.tokens.values().map(|t| t.name.as_str()).collect();
+        let rule_names: Vec<&str> = g.rules.values().map(|r| r.name.as_str()).collect();
         assert_eq!(token_names, vec!["Z", "A"]);
         assert_eq!(rule_names, vec!["second", "first"]);
     }
@@ -807,7 +825,7 @@ mod tests {
     fn negated_class_with_grouped_alternatives() {
         // `!('a' | 'b')` is a negated class with two char items.
         let g = parse_grammar("X = !('a' | 'b'); main = X;").expect("ok");
-        let pat = &g.token("X").unwrap().pattern;
+        let pat = &g.tokens.get("X").unwrap().pattern;
         match pat {
             TokenPattern::Class(cc) => {
                 assert!(cc.negated);
@@ -820,7 +838,7 @@ mod tests {
     #[test]
     fn string_with_escape_unquotes_correctly() {
         let g = parse_grammar(r#"NL = "\n"; main = NL;"#).expect("ok");
-        let pat = &g.token("NL").unwrap().pattern;
+        let pat = &g.tokens.get("NL").unwrap().pattern;
         assert!(matches!(pat, TokenPattern::Literal(ref s) if s == "\n"));
     }
 }

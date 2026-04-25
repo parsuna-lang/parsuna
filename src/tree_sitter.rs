@@ -24,7 +24,7 @@ pub fn emit(ag: &AnalyzedGrammar) -> String {
 
     let skips: Vec<&TokenDef> = g
         .tokens
-        .iter()
+        .values()
         .filter(|t| t.skip && !t.is_fragment)
         .collect();
     write!(out, "  extras: $ => [").unwrap();
@@ -40,21 +40,21 @@ pub fn emit(ag: &AnalyzedGrammar) -> String {
     writeln!(out, "  rules: {{").unwrap();
 
     let mut need_blank = false;
-    for r in g.rules.iter().filter(|r| !r.is_fragment) {
+    for r in g.rules.values().filter(|r| !r.is_fragment) {
         if need_blank {
             writeln!(out).unwrap();
         }
         writeln!(out, "    {}: $ => {},", r.name, render_expr(&r.body)).unwrap();
         need_blank = true;
     }
-    for r in g.rules.iter().filter(|r| r.is_fragment) {
+    for r in g.rules.values().filter(|r| r.is_fragment) {
         if need_blank {
             writeln!(out).unwrap();
         }
         writeln!(out, "    {}: $ => {},", r.name, render_expr(&r.body)).unwrap();
         need_blank = true;
     }
-    for t in g.tokens.iter().filter(|t| !t.is_fragment) {
+    for t in g.tokens.values().filter(|t| !t.is_fragment) {
         if need_blank {
             writeln!(out).unwrap();
         }
@@ -98,7 +98,7 @@ fn render_token(p: &TokenPattern, g: &Grammar) -> String {
         TokenPattern::Class(cc) => render_class(cc),
         TokenPattern::Ref(name) => {
             
-            let t = g.token(name).expect("reference validated upstream");
+            let t = g.tokens.get(name).expect("reference validated upstream");
             render_token(&t.pattern, g)
         }
         TokenPattern::Seq(xs) => {

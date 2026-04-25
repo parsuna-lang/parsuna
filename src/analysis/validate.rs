@@ -1,8 +1,10 @@
 //! Purely-structural grammar checks that do not need FIRST/FOLLOW.
 //!
-//! Catches reserved or duplicate names, undefined token/rule references,
-//! token-reference cycles, and left recursion — all things that would
-//! otherwise crash or loop later stages.
+//! Catches reserved names, undefined token/rule references, token
+//! reference cycles, and left recursion — all things that would otherwise
+//! crash or loop later stages. Duplicate names are caught at parse time
+//! (see [`crate::grammar::parser`]) since the IR's name-keyed
+//! [`indexmap::IndexMap`] would silently dedupe them otherwise.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -14,7 +16,7 @@ use crate::Span;
 /// The analysis pipeline only proceeds if `issues` is empty after this
 /// call.
 pub fn run(g: &Grammar, issues: &mut Vec<Diagnostic>) {
-    for t in &g.tokens {
+    for t in g.tokens.values() {
         if is_reserved_token_name(&t.name) {
             issues.push(
                 Diagnostic::error(format!(
@@ -26,28 +28,11 @@ pub fn run(g: &Grammar, issues: &mut Vec<Diagnostic>) {
         }
     }
 
-    let mut seen: BTreeMap<&str, Span> = BTreeMap::new();
-    for t in &g.tokens {
-        if seen.contains_key(t.name.as_str()) {
-            issues.push(Diagnostic::error(format!("duplicate token: {}", t.name)).at(t.span));
-        } else {
-            seen.insert(&t.name, t.span);
-        }
-    }
-    let mut seen_r: BTreeMap<&str, Span> = BTreeMap::new();
-    for r in &g.rules {
-        if seen_r.contains_key(r.name.as_str()) {
-            issues.push(Diagnostic::error(format!("duplicate rule: {}", r.name)).at(r.span));
-        } else {
-            seen_r.insert(&r.name, r.span);
-        }
-    }
-
     let known_tokens: BTreeMap<&str, &TokenDef> =
-        g.tokens.iter().map(|t| (t.name.as_str(), t)).collect();
-    let known_rules: BTreeSet<&str> = g.rules.iter().map(|r| r.name.as_str()).collect();
+        g.tokens.values().map(|t| (t.name.as_str(), t)).collect();
+    let known_rules: BTreeSet<&str> = g.rules.values().map(|r| r.name.as_str()).collect();
 
-    for r in &g.rules {
+    for r in g.rules.values() {
         check_expr_refs(
             &r.body,
             &known_tokens,
@@ -58,19 +43,19 @@ pub fn run(g: &Grammar, issues: &mut Vec<Diagnostic>) {
         );
     }
 
-    for t in &g.tokens {
+    for t in g.tokens.values() {
         check_pattern_refs(&t.pattern, &known_tokens, issues, &t.name, t.span);
     }
 
     detect_token_cycles(g, &known_tokens, issues);
 
     let mut leads: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for r in &g.rules {
+    for r in g.rules.values() {
         let mut set = BTreeSet::new();
         collect_first_rule_names(&r.body, &mut set);
         leads.insert(r.name.clone(), set);
     }
-    for r in &g.rules {
+    for r in g.rules.values() {
         if leads.get(&r.name).map_or(false, |s| s.contains(&r.name)) {
             issues.push(
                 Diagnostic::error(format!("rule `{}` is left-recursive; parsuna is LL and does not accept left recursion, rewrite using `*` or `+` repetition", r.name))
@@ -79,7 +64,7 @@ pub fn run(g: &Grammar, issues: &mut Vec<Diagnostic>) {
         }
     }
 
-    if !g.rules.iter().any(|r| !r.is_fragment) {
+    if !g.rules.values().any(|r| !r.is_fragment) {
         issues.push(Diagnostic::error(
             "grammar contains no non-fragment rules; nothing would be emitted",
         ));
@@ -184,7 +169,7 @@ fn detect_token_cycles(g: &Grammar, tk: &BTreeMap<&str, &TokenDef>, issues: &mut
             return;
         }
         stack.push(name.to_string());
-        if let Some(td) = g.token(name) {
+        if let Some(td) = g.tokens.get(name) {
             let mut refs = Vec::new();
             collect_refs(&td.pattern, &mut refs);
             for r in refs {
@@ -195,7 +180,7 @@ fn detect_token_cycles(g: &Grammar, tk: &BTreeMap<&str, &TokenDef>, issues: &mut
     }
 
     let mut visited: BTreeSet<String> = BTreeSet::new();
-    for t in &g.tokens {
+    for t in g.tokens.values() {
         let mut stack: Vec<String> = Vec::new();
         visit(&t.name, g, tk, &mut stack, &mut visited, issues);
     }
@@ -267,9 +252,9 @@ mod tests {
     #[test]
     fn reserved_token_names_eof_and_error_are_rejected() {
         let mut g = Grammar::default();
-        g.tokens.push(tok("EOF", lit("e")));
-        g.tokens.push(tok("ERROR", lit("r")));
-        g.rules.push(rule("main", Expr::Empty));
+        g.add_token(tok("EOF", lit("e")));
+        g.add_token(tok("ERROR", lit("r")));
+        g.add_rule(rule("main", Expr::Empty));
         let issues = run_collect(&g);
         assert!(issues.iter().any(|d| d.message.contains("`EOF`")));
         assert!(issues.iter().any(|d| d.message.contains("`ERROR`")));
@@ -278,29 +263,20 @@ mod tests {
     #[test]
     fn reserved_check_is_case_insensitive() {
         let mut g = Grammar::default();
-        g.tokens.push(tok("eof", lit("e")));
-        g.rules.push(rule("main", Expr::Empty));
+        g.add_token(tok("eof", lit("e")));
+        g.add_rule(rule("main", Expr::Empty));
         let issues = run_collect(&g);
         assert!(issues.iter().any(|d| d.message.contains("reserved")));
     }
 
-    #[test]
-    fn duplicate_token_and_rule_names_flagged() {
-        let mut g = Grammar::default();
-        g.tokens.push(tok("T", lit("t")));
-        g.tokens.push(tok("T", lit("u")));
-        g.rules.push(rule("r", Expr::Token("T".into())));
-        g.rules.push(rule("r", Expr::Token("T".into())));
-        let issues = run_collect(&g);
-        assert!(issues.iter().any(|d| d.message == "duplicate token: T"));
-        assert!(issues.iter().any(|d| d.message == "duplicate rule: r"));
-    }
+    // Duplicate-name detection now lives in the parser (validate can't see
+    // duplicates because the IR's `IndexMap` dedupes on insert) — see
+    // `parser::tests::duplicate_token_and_rule_names_flagged`.
 
     #[test]
     fn undefined_token_in_rule_body_flagged() {
         let mut g = Grammar::default();
-        g.rules
-            .push(rule("main", Expr::Token("MISSING".into())));
+        g.add_rule(rule("main", Expr::Token("MISSING".into())));
         let issues = run_collect(&g);
         assert!(issues
             .iter()
@@ -310,9 +286,8 @@ mod tests {
     #[test]
     fn undefined_rule_in_body_flagged() {
         let mut g = Grammar::default();
-        g.tokens.push(tok("T", lit("t")));
-        g.rules
-            .push(rule("main", Expr::Rule("ghost".into())));
+        g.add_token(tok("T", lit("t")));
+        g.add_rule(rule("main", Expr::Rule("ghost".into())));
         let issues = run_collect(&g);
         assert!(issues
             .iter()
@@ -324,8 +299,8 @@ mod tests {
         let mut g = Grammar::default();
         let mut frag = tok("_F", lit("f"));
         frag.is_fragment = true;
-        g.tokens.push(frag);
-        g.rules.push(rule("main", Expr::Token("_F".into())));
+        g.add_token(frag);
+        g.add_rule(rule("main", Expr::Token("_F".into())));
         let issues = run_collect(&g);
         assert!(issues.iter().any(|d| d.message.contains("fragment token")));
     }
@@ -333,9 +308,8 @@ mod tests {
     #[test]
     fn undefined_token_ref_inside_pattern_flagged() {
         let mut g = Grammar::default();
-        g.tokens
-            .push(tok("OUTER", TokenPattern::Ref("MISSING".into())));
-        g.rules.push(rule("main", Expr::Token("OUTER".into())));
+        g.add_token(tok("OUTER", TokenPattern::Ref("MISSING".into())));
+        g.add_rule(rule("main", Expr::Token("OUTER".into())));
         let issues = run_collect(&g);
         assert!(issues
             .iter()
@@ -350,10 +324,10 @@ mod tests {
         a.is_fragment = true;
         let mut b = tok("B", TokenPattern::Ref("A".into()));
         b.is_fragment = true;
-        g.tokens.push(a);
-        g.tokens.push(b);
-        g.tokens.push(tok("USE", TokenPattern::Ref("A".into())));
-        g.rules.push(rule("main", Expr::Token("USE".into())));
+        g.add_token(a);
+        g.add_token(b);
+        g.add_token(tok("USE", TokenPattern::Ref("A".into())));
+        g.add_rule(rule("main", Expr::Token("USE".into())));
         let issues = run_collect(&g);
         assert!(issues.iter().any(|d| d.message.contains("cycle")));
     }
@@ -361,8 +335,8 @@ mod tests {
     #[test]
     fn left_recursion_direct_flagged() {
         let mut g = Grammar::default();
-        g.tokens.push(tok("T", lit("t")));
-        g.rules.push(rule(
+        g.add_token(tok("T", lit("t")));
+        g.add_rule(rule(
             "expr",
             Expr::Seq(vec![Expr::Rule("expr".into()), Expr::Token("T".into())]),
         ));
@@ -376,12 +350,12 @@ mod tests {
     fn left_recursion_through_nullable_prefix_flagged() {
         // `a = b? a T;` — `b?` is nullable, so `a` can begin with itself.
         let mut g = Grammar::default();
-        g.tokens.push(tok("T", lit("t")));
-        g.rules.push(rule(
+        g.add_token(tok("T", lit("t")));
+        g.add_rule(rule(
             "b",
             Expr::Token("T".into()),
         ));
-        g.rules.push(rule(
+        g.add_rule(rule(
             "a",
             Expr::Seq(vec![
                 Expr::Opt(Box::new(Expr::Rule("b".into()))),
@@ -399,7 +373,7 @@ mod tests {
         let mut g = Grammar::default();
         let mut frag = rule("_helper", Expr::Empty);
         frag.is_fragment = true;
-        g.rules.push(frag);
+        g.add_rule(frag);
         let issues = run_collect(&g);
         assert!(issues
             .iter()
@@ -409,8 +383,8 @@ mod tests {
     #[test]
     fn clean_grammar_yields_no_issues() {
         let mut g = Grammar::default();
-        g.tokens.push(tok("T", lit("t")));
-        g.rules.push(rule("main", Expr::Token("T".into())));
+        g.add_token(tok("T", lit("t")));
+        g.add_rule(rule("main", Expr::Token("T".into())));
         let issues = run_collect(&g);
         assert!(issues.is_empty(), "{:?}", issues);
     }

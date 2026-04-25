@@ -178,7 +178,7 @@ pub fn build(ag: &AnalyzedGrammar) -> Program {
     // never become a real token kind at run time.
     let tokens: Vec<TokenInfo> = g
         .tokens
-        .iter()
+        .values()
         .filter(|t| !t.is_fragment)
         .enumerate()
         .map(|(i, t)| TokenInfo {
@@ -204,7 +204,7 @@ pub fn build(ag: &AnalyzedGrammar) -> Program {
 
     let mut rule_entry: HashMap<String, BlockId> = HashMap::new();
     let mut rule_order: Vec<String> = Vec::with_capacity(g.rules.len());
-    for rule in &g.rules {
+    for rule in g.rules.values() {
         // Every rule gets its own SYNC set (its FOLLOW plus EOF). Interned
         // up-front and stashed in `current_sync` so every `Expect` emitted
         // inside this rule's body can refer to it without recomputing.
@@ -234,7 +234,7 @@ pub fn build(ag: &AnalyzedGrammar) -> Program {
 
     let public_rule_names: BTreeSet<String> = g
         .rules
-        .iter()
+        .values()
         .filter(|r| !r.is_fragment)
         .map(|r| r.name.clone())
         .collect();
@@ -502,7 +502,7 @@ impl Builder<'_> {
 /// Fragments are excluded because they don't become `RuleKind` variants.
 fn collect_rules(g: &Grammar) -> Vec<String> {
     let mut set: BTreeSet<String> = BTreeSet::new();
-    for r in &g.rules {
+    for r in g.rules.values() {
         if r.is_fragment {
             continue;
         }
@@ -534,7 +534,7 @@ fn compute_sync(ag: &AnalyzedGrammar, rule_name: &str, eof_id: i16) -> Vec<i16> 
 fn token_kind(ag: &AnalyzedGrammar, name: &str) -> i16 {
     ag.grammar
         .tokens
-        .iter()
+        .values()
         .filter(|t| !t.is_fragment)
         .position(|t| t.name == name)
         .map(|i| (i + 1) as i16)
@@ -547,7 +547,7 @@ fn token_kind(ag: &AnalyzedGrammar, name: &str) -> i16 {
 fn resolve_pattern(p: &TokenPattern, g: &Grammar) -> TokenPattern {
     match p {
         TokenPattern::Empty | TokenPattern::Literal(_) | TokenPattern::Class(_) => p.clone(),
-        TokenPattern::Ref(n) => match g.token(n) {
+        TokenPattern::Ref(n) => match g.tokens.get(n) {
             Some(td) => resolve_pattern(&td.pattern, g),
             None => TokenPattern::Empty,
         },
@@ -729,7 +729,7 @@ mod tests {
             span: Default::default(),
         };
         leaf.is_fragment = true;
-        g.tokens.push(leaf);
+        g.add_token(leaf);
         let mut mid = TokenDef {
             name: "_MID".into(),
             pattern: TokenPattern::Ref("_LEAF".into()),
@@ -738,7 +738,7 @@ mod tests {
             span: Default::default(),
         };
         mid.is_fragment = true;
-        g.tokens.push(mid);
+        g.add_token(mid);
         let resolved = resolve_pattern(&TokenPattern::Ref("_MID".into()), &g);
         assert!(matches!(resolved, TokenPattern::Literal(ref s) if s == "x"));
     }

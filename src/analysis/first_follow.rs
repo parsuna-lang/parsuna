@@ -84,16 +84,16 @@ fn compute_first(
     k: usize,
 ) -> (BTreeMap<String, bool>, BTreeMap<String, FirstSet>) {
     let mut nullable: BTreeMap<String, bool> =
-        g.rules.iter().map(|r| (r.name.clone(), false)).collect();
+        g.rules.values().map(|r| (r.name.clone(), false)).collect();
     let mut first: BTreeMap<String, FirstSet> = g
         .rules
-        .iter()
+        .values()
         .map(|r| (r.name.clone(), FirstSet::new()))
         .collect();
 
     loop {
         let mut changed = false;
-        for r in &g.rules {
+        for r in g.rules.values() {
             let e_first = first_of(&r.body, &nullable, &first, k);
             let mut cur = first.get(&r.name).cloned().unwrap_or_default();
             let cur_null = *nullable.get(&r.name).unwrap_or(&false);
@@ -210,7 +210,7 @@ pub fn compute_follow(
 ) -> BTreeMap<String, FollowSet> {
     let mut follow: BTreeMap<String, FollowSet> = g
         .rules
-        .iter()
+        .values()
         .map(|r| {
             let mut s = BTreeSet::new();
             s.insert(EOF_MARKER.to_string());
@@ -220,7 +220,7 @@ pub fn compute_follow(
 
     loop {
         let mut changed = false;
-        for r in &g.rules {
+        for r in g.rules.values() {
             walk_follow(&r.body, &r.name, nullable, first, &mut follow, &mut changed);
         }
         if !changed {
@@ -368,7 +368,7 @@ pub fn compute_follow_k(
 ) -> BTreeMap<String, FirstSet> {
     let mut follow: BTreeMap<String, FirstSet> = g
         .rules
-        .iter()
+        .values()
         .map(|r| {
             let mut s = FirstSet::new();
             s.insert(vec![EOF_MARKER.to_string()]);
@@ -378,7 +378,7 @@ pub fn compute_follow_k(
 
     loop {
         let mut changed = false;
-        for r in &g.rules {
+        for r in g.rules.values() {
             let host_follow = follow.get(&r.name).cloned().unwrap_or_default();
             walk_follow_k(
                 &r.body,
@@ -546,7 +546,7 @@ fn detect_conflicts(
     k: usize,
 ) -> Vec<RawConflict> {
     let mut out = Vec::new();
-    for r in &g.rules {
+    for r in g.rules.values() {
         let tail = follow_k.get(&r.name).cloned().unwrap_or_default();
         walk_check_conflicts(
             &r.body, &tail, &r.name, r.span, nullable, first, k, &mut out,
@@ -782,8 +782,8 @@ mod tests {
     fn compute_first_marks_nullable_rule() {
         // r = A?  → r is nullable; FIRST(r) = {ε, [A]}
         let mut g = Grammar::default();
-        g.tokens.push(tok("A"));
-        g.rules.push(rule(
+        g.add_token(tok("A"));
+        g.add_rule(rule(
             "r",
             Expr::Opt(Box::new(Expr::Token("A".into()))),
         ));
@@ -796,9 +796,9 @@ mod tests {
     fn compute_first_propagates_through_rule_reference() {
         // r = s; s = A;  → FIRST(r) = {[A]}
         let mut g = Grammar::default();
-        g.tokens.push(tok("A"));
-        g.rules.push(rule("r", Expr::Rule("s".into())));
-        g.rules.push(rule("s", Expr::Token("A".into())));
+        g.add_token(tok("A"));
+        g.add_rule(rule("r", Expr::Rule("s".into())));
+        g.add_rule(rule("s", Expr::Token("A".into())));
         let (nullable, first) = compute_first(&g, 1);
         assert_eq!(nullable.get("r"), Some(&false));
         assert_eq!(first.get("r").unwrap(), &fset(&[&["A"]]));
@@ -807,8 +807,8 @@ mod tests {
     #[test]
     fn compute_follow_includes_eof_for_every_rule() {
         let mut g = Grammar::default();
-        g.tokens.push(tok("A"));
-        g.rules.push(rule("r", Expr::Token("A".into())));
+        g.add_token(tok("A"));
+        g.add_rule(rule("r", Expr::Token("A".into())));
         let (nullable, first) = compute_first(&g, 1);
         let follow = compute_follow(&g, &first, &nullable);
         assert!(follow.get("r").unwrap().contains(EOF_MARKER));
@@ -818,10 +818,10 @@ mod tests {
     fn compute_follow_passes_first_of_tail_to_inner_rule() {
         // outer = inner B; inner = A;  → FOLLOW(inner) ⊇ {B}
         let mut g = Grammar::default();
-        g.tokens.push(tok("A"));
-        g.tokens.push(tok("B"));
-        g.rules.push(rule("inner", Expr::Token("A".into())));
-        g.rules.push(rule(
+        g.add_token(tok("A"));
+        g.add_token(tok("B"));
+        g.add_rule(rule("inner", Expr::Token("A".into())));
+        g.add_rule(rule(
             "outer",
             Expr::Seq(vec![Expr::Rule("inner".into()), Expr::Token("B".into())]),
         ));
@@ -835,11 +835,11 @@ mod tests {
     fn compute_follow_k_lookahead_sequences() {
         // outer = inner B C; inner = A;  → FOLLOW_2(inner) includes [B, C]
         let mut g = Grammar::default();
-        g.tokens.push(tok("A"));
-        g.tokens.push(tok("B"));
-        g.tokens.push(tok("C"));
-        g.rules.push(rule("inner", Expr::Token("A".into())));
-        g.rules.push(rule(
+        g.add_token(tok("A"));
+        g.add_token(tok("B"));
+        g.add_token(tok("C"));
+        g.add_rule(rule("inner", Expr::Token("A".into())));
+        g.add_rule(rule(
             "outer",
             Expr::Seq(vec![
                 Expr::Rule("inner".into()),

@@ -19,7 +19,7 @@ pub fn run(g: &Grammar, diags: &mut Vec<Diagnostic>) {
 /// The lexer would happily accept at length 0 — depending on the runtime,
 /// that's either an infinite loop or a stream of zero-length tokens.
 fn check_empty_match_tokens(g: &Grammar, issues: &mut Vec<Diagnostic>) {
-    for t in &g.tokens {
+    for t in g.tokens.values() {
         if t.is_fragment {
             continue;
         }
@@ -45,7 +45,7 @@ fn pattern_nullable(p: &TokenPattern, g: &Grammar, visiting: &mut BTreeSet<Strin
             if !visiting.insert(n.clone()) {
                 return false;
             }
-            let res = match g.token(n) {
+            let res = match g.tokens.get(n) {
                 Some(td) => pattern_nullable(&td.pattern, g, visiting),
                 None => false,
             };
@@ -69,13 +69,13 @@ fn check_unused_fragments(g: &Grammar, issues: &mut Vec<Diagnostic>) {
     let mut token_queue: Vec<String> = Vec::new();
     let mut rule_queue: Vec<String> = Vec::new();
 
-    for t in &g.tokens {
+    for t in g.tokens.values() {
         if !t.is_fragment {
             reachable_tokens.insert(t.name.clone());
             token_queue.push(t.name.clone());
         }
     }
-    for r in &g.rules {
+    for r in g.rules.values() {
         if !r.is_fragment {
             reachable_rules.insert(r.name.clone());
             rule_queue.push(r.name.clone());
@@ -84,11 +84,11 @@ fn check_unused_fragments(g: &Grammar, issues: &mut Vec<Diagnostic>) {
 
     while !token_queue.is_empty() || !rule_queue.is_empty() {
         if let Some(name) = token_queue.pop() {
-            if let Some(td) = g.token(&name) {
+            if let Some(td) = g.tokens.get(&name) {
                 let mut refs = Vec::new();
                 collect_pattern_refs(&td.pattern, &mut refs);
                 for r in refs {
-                    if g.token(&r).is_some() && reachable_tokens.insert(r.clone()) {
+                    if g.tokens.get(&r).is_some() && reachable_tokens.insert(r.clone()) {
                         token_queue.push(r);
                     }
                 }
@@ -96,17 +96,17 @@ fn check_unused_fragments(g: &Grammar, issues: &mut Vec<Diagnostic>) {
             continue;
         }
         if let Some(name) = rule_queue.pop() {
-            if let Some(rd) = g.rule(&name) {
+            if let Some(rd) = g.rules.get(&name) {
                 let mut tok_refs = Vec::new();
                 let mut rule_refs = Vec::new();
                 collect_expr_refs(&rd.body, &mut tok_refs, &mut rule_refs);
                 for r in tok_refs {
-                    if g.token(&r).is_some() && reachable_tokens.insert(r.clone()) {
+                    if g.tokens.get(&r).is_some() && reachable_tokens.insert(r.clone()) {
                         token_queue.push(r);
                     }
                 }
                 for r in rule_refs {
-                    if g.rule(&r).is_some() && reachable_rules.insert(r.clone()) {
+                    if g.rules.get(&r).is_some() && reachable_rules.insert(r.clone()) {
                         rule_queue.push(r);
                     }
                 }
@@ -114,7 +114,7 @@ fn check_unused_fragments(g: &Grammar, issues: &mut Vec<Diagnostic>) {
         }
     }
 
-    for t in &g.tokens {
+    for t in g.tokens.values() {
         if t.is_fragment && !reachable_tokens.contains(&t.name) {
             issues.push(
                 Diagnostic::warning(format!("fragment token `{}` is never referenced", t.name))
@@ -122,7 +122,7 @@ fn check_unused_fragments(g: &Grammar, issues: &mut Vec<Diagnostic>) {
             );
         }
     }
-    for r in &g.rules {
+    for r in g.rules.values() {
         if r.is_fragment && !reachable_rules.contains(&r.name) {
             issues.push(
                 Diagnostic::warning(format!("fragment rule `{}` is never referenced", r.name))
@@ -162,7 +162,7 @@ fn check_non_productive_rules(g: &Grammar, issues: &mut Vec<Diagnostic>) {
     let mut productive: BTreeSet<String> = BTreeSet::new();
     loop {
         let mut changed = false;
-        for r in &g.rules {
+        for r in g.rules.values() {
             if productive.contains(&r.name) {
                 continue;
             }
@@ -175,7 +175,7 @@ fn check_non_productive_rules(g: &Grammar, issues: &mut Vec<Diagnostic>) {
             break;
         }
     }
-    for r in &g.rules {
+    for r in g.rules.values() {
         if !productive.contains(&r.name) {
             issues.push(
                 Diagnostic::error(format!(
@@ -240,8 +240,7 @@ mod tests {
     #[test]
     fn empty_match_flags_optional_token() {
         let mut g = Grammar::default();
-        g.tokens
-            .push(tok("BAD", TokenPattern::Opt(Box::new(lit("a")))));
+        g.add_token(tok("BAD", TokenPattern::Opt(Box::new(lit("a")))));
         let mut issues = Vec::new();
         check_empty_match_tokens(&g, &mut issues);
         assert_eq!(issues.len(), 1);
@@ -251,8 +250,7 @@ mod tests {
     #[test]
     fn empty_match_flags_star_token() {
         let mut g = Grammar::default();
-        g.tokens
-            .push(tok("BAD", TokenPattern::Star(Box::new(lit("a")))));
+        g.add_token(tok("BAD", TokenPattern::Star(Box::new(lit("a")))));
         let mut issues = Vec::new();
         check_empty_match_tokens(&g, &mut issues);
         assert_eq!(issues.len(), 1);
@@ -261,7 +259,7 @@ mod tests {
     #[test]
     fn empty_match_flags_empty_literal() {
         let mut g = Grammar::default();
-        g.tokens.push(tok("BAD", lit("")));
+        g.add_token(tok("BAD", lit("")));
         let mut issues = Vec::new();
         check_empty_match_tokens(&g, &mut issues);
         assert_eq!(issues.len(), 1);
@@ -270,10 +268,9 @@ mod tests {
     #[test]
     fn empty_match_passes_plus_and_class() {
         let mut g = Grammar::default();
-        g.tokens
-            .push(tok("OK1", TokenPattern::Plus(Box::new(lit("a")))));
-        g.tokens.push(tok("OK2", class_range('a', 'z')));
-        g.tokens.push(tok("OK3", lit("if")));
+        g.add_token(tok("OK1", TokenPattern::Plus(Box::new(lit("a")))));
+        g.add_token(tok("OK2", class_range('a', 'z')));
+        g.add_token(tok("OK3", lit("if")));
         let mut issues = Vec::new();
         check_empty_match_tokens(&g, &mut issues);
         assert!(issues.is_empty(), "{:?}", issues);
@@ -284,9 +281,8 @@ mod tests {
         let mut g = Grammar::default();
         let mut frag = tok("_NULLABLE", TokenPattern::Star(Box::new(lit("a"))));
         frag.is_fragment = true;
-        g.tokens.push(frag);
-        g.tokens
-            .push(tok("BAD", TokenPattern::Ref("_NULLABLE".into())));
+        g.add_token(frag);
+        g.add_token(tok("BAD", TokenPattern::Ref("_NULLABLE".into())));
         let mut issues = Vec::new();
         check_empty_match_tokens(&g, &mut issues);
         assert_eq!(issues.len(), 1);
@@ -300,7 +296,7 @@ mod tests {
         let mut g = Grammar::default();
         let mut frag = tok("_NULLABLE", TokenPattern::Star(Box::new(lit("a"))));
         frag.is_fragment = true;
-        g.tokens.push(frag);
+        g.add_token(frag);
         let mut issues = Vec::new();
         check_empty_match_tokens(&g, &mut issues);
         assert!(issues.is_empty(), "{:?}", issues);
@@ -313,10 +309,9 @@ mod tests {
         let mut g = Grammar::default();
         let mut frag = tok("_HEX_DIGIT", class_range('0', '9'));
         frag.is_fragment = true;
-        g.tokens.push(frag);
-        g.tokens.push(tok("IDENT", class_range('a', 'z')));
-        g.rules
-            .push(rule("r", Expr::Token("IDENT".into())));
+        g.add_token(frag);
+        g.add_token(tok("IDENT", class_range('a', 'z')));
+        g.add_rule(rule("r", Expr::Token("IDENT".into())));
         let mut issues = Vec::new();
         check_unused_fragments(&g, &mut issues);
         assert_eq!(issues.len(), 1);
@@ -326,11 +321,11 @@ mod tests {
     #[test]
     fn unused_fragment_rule() {
         let mut g = Grammar::default();
-        g.tokens.push(tok("T", lit("t")));
+        g.add_token(tok("T", lit("t")));
         let mut frag = rule("_unused", Expr::Token("T".into()));
         frag.is_fragment = true;
-        g.rules.push(frag);
-        g.rules.push(rule("main", Expr::Token("T".into())));
+        g.add_rule(frag);
+        g.add_rule(rule("main", Expr::Token("T".into())));
         let mut issues = Vec::new();
         check_unused_fragments(&g, &mut issues);
         assert_eq!(issues.len(), 1);
@@ -342,12 +337,12 @@ mod tests {
         let mut g = Grammar::default();
         let mut frag = tok("_HEX_DIGIT", class_range('0', '9'));
         frag.is_fragment = true;
-        g.tokens.push(frag);
-        g.tokens.push(tok(
+        g.add_token(frag);
+        g.add_token(tok(
             "HEX",
             TokenPattern::Plus(Box::new(TokenPattern::Ref("_HEX_DIGIT".into()))),
         ));
-        g.rules.push(rule("r", Expr::Token("HEX".into())));
+        g.add_rule(rule("r", Expr::Token("HEX".into())));
         let mut issues = Vec::new();
         check_unused_fragments(&g, &mut issues);
         assert!(issues.is_empty(), "{:?}", issues);
@@ -356,11 +351,11 @@ mod tests {
     #[test]
     fn used_fragment_rule_via_expr_ref() {
         let mut g = Grammar::default();
-        g.tokens.push(tok("T", lit("t")));
+        g.add_token(tok("T", lit("t")));
         let mut frag = rule("_helper", Expr::Token("T".into()));
         frag.is_fragment = true;
-        g.rules.push(frag);
-        g.rules.push(rule(
+        g.add_rule(frag);
+        g.add_rule(rule(
             "main",
             Expr::Seq(vec![Expr::Token("T".into()), Expr::Rule("_helper".into())]),
         ));
@@ -376,14 +371,14 @@ mod tests {
         let mut g = Grammar::default();
         let mut digit = tok("_DIGIT", class_range('0', '9'));
         digit.is_fragment = true;
-        g.tokens.push(digit);
+        g.add_token(digit);
         let mut ws = tok(
             "WS",
             TokenPattern::Plus(Box::new(TokenPattern::Ref("_DIGIT".into()))),
         );
         ws.skip = true;
-        g.tokens.push(ws);
-        g.rules.push(rule("r", Expr::Empty));
+        g.add_token(ws);
+        g.add_rule(rule("r", Expr::Empty));
         let mut issues = Vec::new();
         check_unused_fragments(&g, &mut issues);
         assert!(issues.is_empty(), "{:?}", issues);
@@ -396,15 +391,15 @@ mod tests {
         let mut g = Grammar::default();
         let mut leaf = tok("_LEAF", class_range('a', 'z'));
         leaf.is_fragment = true;
-        g.tokens.push(leaf);
+        g.add_token(leaf);
         let mut mid = tok("_MID", TokenPattern::Ref("_LEAF".into()));
         mid.is_fragment = true;
-        g.tokens.push(mid);
+        g.add_token(mid);
         let mut root = tok("_ROOT", TokenPattern::Ref("_MID".into()));
         root.is_fragment = true;
-        g.tokens.push(root);
-        g.tokens.push(tok("T", lit("t")));
-        g.rules.push(rule("r", Expr::Token("T".into())));
+        g.add_token(root);
+        g.add_token(tok("T", lit("t")));
+        g.add_rule(rule("r", Expr::Token("T".into())));
         let mut issues = Vec::new();
         check_unused_fragments(&g, &mut issues);
         assert_eq!(issues.len(), 3, "{:?}", issues);
@@ -415,8 +410,8 @@ mod tests {
     #[test]
     fn productive_via_token_alternative() {
         let mut g = Grammar::default();
-        g.tokens.push(tok("T", lit("t")));
-        g.rules.push(rule(
+        g.add_token(tok("T", lit("t")));
+        g.add_rule(rule(
             "a",
             Expr::Alt(vec![
                 Expr::Token("T".into()),
@@ -431,7 +426,7 @@ mod tests {
     #[test]
     fn non_productive_self_only() {
         let mut g = Grammar::default();
-        g.rules.push(rule("a", Expr::Rule("a".into())));
+        g.add_rule(rule("a", Expr::Rule("a".into())));
         let mut issues = Vec::new();
         check_non_productive_rules(&g, &mut issues);
         assert_eq!(issues.len(), 1);
@@ -441,8 +436,8 @@ mod tests {
     #[test]
     fn non_productive_mutual_cycle() {
         let mut g = Grammar::default();
-        g.rules.push(rule("a", Expr::Rule("b".into())));
-        g.rules.push(rule("b", Expr::Rule("a".into())));
+        g.add_rule(rule("a", Expr::Rule("b".into())));
+        g.add_rule(rule("b", Expr::Rule("a".into())));
         let mut issues = Vec::new();
         check_non_productive_rules(&g, &mut issues);
         assert_eq!(issues.len(), 2);
@@ -453,8 +448,8 @@ mod tests {
         // a = T a* — `Star(Rule(a))` is always productive (matches empty),
         // so the Seq is productive on its first iteration via just T.
         let mut g = Grammar::default();
-        g.tokens.push(tok("T", lit("t")));
-        g.rules.push(rule(
+        g.add_token(tok("T", lit("t")));
+        g.add_rule(rule(
             "a",
             Expr::Seq(vec![
                 Expr::Token("T".into()),
@@ -471,8 +466,8 @@ mod tests {
         // a = T a+ — Plus requires its body productive; a is unproductive
         // until proven otherwise, so this never bottoms out.
         let mut g = Grammar::default();
-        g.tokens.push(tok("T", lit("t")));
-        g.rules.push(rule(
+        g.add_token(tok("T", lit("t")));
+        g.add_rule(rule(
             "a",
             Expr::Seq(vec![
                 Expr::Token("T".into()),

@@ -208,9 +208,9 @@ fn dbg_load_lowered(
 }
 
 fn print_stats(ag: &parsuna::AnalyzedGrammar, st: &StateTable) {
-    let pub_tokens = ag.grammar.tokens.iter().filter(|t| !t.is_fragment).count();
+    let pub_tokens = ag.grammar.tokens.values().filter(|t| !t.is_fragment).count();
     let frag_tokens = ag.grammar.tokens.len() - pub_tokens;
-    let pub_rules = ag.grammar.rules.iter().filter(|r| !r.is_fragment).count();
+    let pub_rules = ag.grammar.rules.values().filter(|r| !r.is_fragment).count();
     let frag_rules = ag.grammar.rules.len() - pub_rules;
     println!("grammar       : {}", ag.grammar.name);
     println!("tokens        : {} ({} fragments)", pub_tokens, frag_tokens);
@@ -232,11 +232,11 @@ fn print_tokens(ag: &parsuna::AnalyzedGrammar) {
     let max_name = ag
         .grammar
         .tokens
-        .iter()
+        .values()
         .map(|t| t.name.len())
         .max()
         .unwrap_or(0);
-    for t in &ag.grammar.tokens {
+    for t in ag.grammar.tokens.values() {
         let tag = match (t.skip, t.is_fragment) {
             (true, _) => " [skip]",
             (_, true) => " [fragment]",
@@ -255,7 +255,7 @@ fn print_tokens(ag: &parsuna::AnalyzedGrammar) {
 }
 
 fn print_rules(ag: &parsuna::AnalyzedGrammar) {
-    for (i, r) in ag.grammar.rules.iter().enumerate() {
+    for (i, r) in ag.grammar.rules.values().enumerate() {
         if i > 0 {
             println!();
         }
@@ -268,14 +268,14 @@ fn print_rules(ag: &parsuna::AnalyzedGrammar) {
 
 fn print_analysis(ag: &parsuna::AnalyzedGrammar) {
     println!("nullable:");
-    for r in &ag.grammar.rules {
+    for r in ag.grammar.rules.values() {
         let nn = ag.nullable.get(&r.name).copied().unwrap_or(false);
         println!("  {:<20} {}", r.name, if nn { "yes" } else { "no" });
     }
     println!();
 
     println!("FIRST (k={}):", ag.k);
-    for r in &ag.grammar.rules {
+    for r in ag.grammar.rules.values() {
         let empty = Default::default();
         let f = ag.first.get(&r.name).unwrap_or(&empty);
         println!("  {:<20} {}", r.name, format_first_set(f));
@@ -283,7 +283,7 @@ fn print_analysis(ag: &parsuna::AnalyzedGrammar) {
     println!();
 
     println!("FOLLOW:");
-    for r in &ag.grammar.rules {
+    for r in ag.grammar.rules.values() {
         let mut names: Vec<&str> = ag
             .follow
             .get(&r.name)
@@ -695,7 +695,7 @@ fn print_rules_dot(ag: &parsuna::AnalyzedGrammar) {
     println!("  node [fontname=\"Menlo,Monaco,Consolas,monospace\"];");
     println!("  edge [fontname=\"Menlo,Monaco,Consolas,monospace\", arrowsize=0.6];");
 
-    for (rule_idx, r) in ag.grammar.rules.iter().enumerate() {
+    for (rule_idx, r) in ag.grammar.rules.values().enumerate() {
         let prefix = format!("r{}_", rule_idx);
         let cluster_label = if r.is_fragment {
             format!("{} (fragment)", r.name)
@@ -869,7 +869,7 @@ fn dot_escape(s: &str) -> String {
 fn resolve_pattern(p: &TokenPattern, g: &parsuna::Grammar) -> TokenPattern {
     match p {
         TokenPattern::Empty | TokenPattern::Literal(_) | TokenPattern::Class(_) => p.clone(),
-        TokenPattern::Ref(n) => match g.token(n) {
+        TokenPattern::Ref(n) => match g.tokens.get(n) {
             Some(td) => resolve_pattern(&td.pattern, g),
             None => TokenPattern::Empty,
         },

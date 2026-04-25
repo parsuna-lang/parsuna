@@ -159,8 +159,8 @@ mod tests {
 
     fn minimal() -> Grammar {
         let mut g = Grammar::default();
-        g.tokens.push(tok("T", lit("t")));
-        g.rules.push(rule("main", Expr::Token("T".into())));
+        g.add_token(tok("T", lit("t")));
+        g.add_rule(rule("main", Expr::Token("T".into())));
         g
     }
 
@@ -181,7 +181,7 @@ mod tests {
         let mut g = minimal();
         let mut frag = tok("_DEAD", lit("d"));
         frag.is_fragment = true;
-        g.tokens.insert(0, frag);
+        g.add_token(frag);
         let outcome = analyze(g);
         assert!(!outcome.has_errors());
         assert_eq!(outcome.diagnostics.len(), 1);
@@ -195,8 +195,7 @@ mod tests {
         // not run, so we expect exactly the one validate error and no
         // grammar.
         let mut g = Grammar::default();
-        g.rules
-            .push(rule("main", Expr::Token("UNDECLARED".into())));
+        g.add_rule(rule("main", Expr::Token("UNDECLARED".into())));
         let outcome = analyze(g);
         assert!(outcome.has_errors());
         assert!(outcome.grammar.is_none());
@@ -209,8 +208,7 @@ mod tests {
     #[test]
     fn empty_match_lint_blocks_compilation() {
         let mut g = minimal();
-        g.tokens
-            .push(tok("BAD", TokenPattern::Star(Box::new(lit("a")))));
+        g.add_token(tok("BAD", TokenPattern::Star(Box::new(lit("a")))));
         let outcome = analyze(g);
         assert!(outcome.has_errors());
         assert!(outcome.grammar.is_none());
@@ -223,9 +221,9 @@ mod tests {
     #[test]
     fn non_productive_lint_blocks_compilation() {
         let mut g = Grammar::default();
-        g.tokens.push(tok("T", lit("t")));
+        g.add_token(tok("T", lit("t")));
         // `loops = T loops+;` — Plus needs body productive; recursion never bottoms out.
-        g.rules.push(rule(
+        g.add_rule(rule(
             "loops",
             Expr::Seq(vec![
                 Expr::Token("T".into()),
@@ -244,9 +242,9 @@ mod tests {
     #[test]
     fn shadow_lint_blocks_compilation() {
         let mut g = Grammar::default();
-        g.tokens.push(tok("IDENT", alpha_plus()));
-        g.tokens.push(tok("IF", lit("if")));
-        g.rules.push(rule(
+        g.add_token(tok("IDENT", alpha_plus()));
+        g.add_token(tok("IF", lit("if")));
+        g.add_rule(rule(
             "main",
             Expr::Alt(vec![Expr::Token("IF".into()), Expr::Token("IDENT".into())]),
         ));
@@ -266,7 +264,7 @@ mod tests {
         for name in &["_F1", "_F2"] {
             let mut frag = tok(name, lit("x"));
             frag.is_fragment = true;
-            g.tokens.insert(0, frag);
+            g.add_token(frag);
         }
         let outcome = analyze(g);
         assert!(!outcome.has_errors());
@@ -282,8 +280,8 @@ mod tests {
     fn ll_conflict_reports_with_grammar_dropped() {
         // Two arms with the same FIRST set: classic LL(1) conflict.
         let mut g = Grammar::default();
-        g.tokens.push(tok("A", lit("a")));
-        g.rules.push(rule(
+        g.add_token(tok("A", lit("a")));
+        g.add_rule(rule(
             "main",
             Expr::Alt(vec![
                 Expr::Token("A".into()),

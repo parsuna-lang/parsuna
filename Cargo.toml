@@ -8,6 +8,7 @@ license = "LGPL-3.0-or-later"
 [dependencies]
 parsuna-rt = { version = "0.1.0", path = "runtimes/rust" }
 clap = { version = "4", features = ["derive"] }
+indexmap = "2"
 
 [dev-dependencies]
 

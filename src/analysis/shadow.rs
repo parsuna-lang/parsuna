@@ -17,7 +17,7 @@ use crate::grammar::ir::*;
 pub fn run(g: &Grammar, issues: &mut Vec<Diagnostic>) {
     let live: Vec<(usize, &TokenDef)> = g
         .tokens
-        .iter()
+        .values()
         .enumerate()
         .filter(|(_, t)| !t.is_fragment && !t.skip)
         .collect();
@@ -141,7 +141,7 @@ fn iterate_body(
 fn resolve_pattern(p: &TokenPattern, g: &Grammar) -> TokenPattern {
     match p {
         TokenPattern::Empty | TokenPattern::Literal(_) | TokenPattern::Class(_) => p.clone(),
-        TokenPattern::Ref(n) => match g.token(n) {
+        TokenPattern::Ref(n) => match g.tokens.get(n) {
             Some(td) => resolve_pattern(&td.pattern, g),
             None => TokenPattern::Empty,
         },
@@ -230,8 +230,8 @@ mod tests {
     #[test]
     fn flags_keyword_after_ident() {
         let mut g = Grammar::default();
-        g.tokens.push(tok("IDENT", alpha_plus()));
-        g.tokens.push(tok("IF", lit("if")));
+        g.add_token(tok("IDENT", alpha_plus()));
+        g.add_token(tok("IF", lit("if")));
         let mut issues = Vec::new();
         run(&g, &mut issues);
         assert_eq!(issues.len(), 1, "{:?}", issues);
@@ -242,8 +242,8 @@ mod tests {
     #[test]
     fn accepts_keyword_before_ident() {
         let mut g = Grammar::default();
-        g.tokens.push(tok("IF", lit("if")));
-        g.tokens.push(tok("IDENT", alpha_plus()));
+        g.add_token(tok("IF", lit("if")));
+        g.add_token(tok("IDENT", alpha_plus()));
         let mut issues = Vec::new();
         run(&g, &mut issues);
         assert!(issues.is_empty(), "{:?}", issues);
@@ -252,8 +252,8 @@ mod tests {
     #[test]
     fn flags_duplicate_literal_tokens() {
         let mut g = Grammar::default();
-        g.tokens.push(tok("A", lit("x")));
-        g.tokens.push(tok("B", lit("x")));
+        g.add_token(tok("A", lit("x")));
+        g.add_token(tok("B", lit("x")));
         let mut issues = Vec::new();
         run(&g, &mut issues);
         assert_eq!(issues.len(), 1);
@@ -264,8 +264,8 @@ mod tests {
     fn dot_not_shadowed_by_dotdot() {
         // PUNC=".." declared first; DOT="." stays reachable.
         let mut g = Grammar::default();
-        g.tokens.push(tok("PUNC", lit("..")));
-        g.tokens.push(tok("DOT", lit(".")));
+        g.add_token(tok("PUNC", lit("..")));
+        g.add_token(tok("DOT", lit(".")));
         let mut issues = Vec::new();
         run(&g, &mut issues);
         assert!(issues.is_empty(), "{:?}", issues);
@@ -276,13 +276,13 @@ mod tests {
         let mut g = Grammar::default();
         let mut frag = tok("_LETTERS", alpha_plus());
         frag.is_fragment = true;
-        g.tokens.push(frag);
+        g.add_token(frag);
         let mut skip = tok("_SKIPPY", alpha_plus());
         skip.skip = true;
         skip.is_fragment = false;
         skip.name = "SKIPPY".into();
-        g.tokens.push(skip);
-        g.tokens.push(tok("IF", lit("if")));
+        g.add_token(skip);
+        g.add_token(tok("IF", lit("if")));
         let mut issues = Vec::new();
         run(&g, &mut issues);
         // Neither a fragment nor a skip token should count as a shadower.
@@ -294,12 +294,12 @@ mod tests {
         let mut g = Grammar::default();
         let mut frag = tok("_LETTER", class_range('a', 'z'));
         frag.is_fragment = true;
-        g.tokens.push(frag);
-        g.tokens.push(tok(
+        g.add_token(frag);
+        g.add_token(tok(
             "IDENT",
             TokenPattern::Plus(Box::new(TokenPattern::Ref("_LETTER".into()))),
         ));
-        g.tokens.push(tok("IF", lit("if")));
+        g.add_token(tok("IF", lit("if")));
         let mut issues = Vec::new();
         run(&g, &mut issues);
         assert_eq!(issues.len(), 1, "{:?}", issues);

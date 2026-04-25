@@ -1,53 +1,49 @@
 //! In-memory representation of a parsed grammar.
 //!
-//! A [`Grammar`] is a flat collection of [`TokenDef`]s and [`RuleDef`]s.
+//! A [`Grammar`] holds [`TokenDef`]s and [`RuleDef`]s in name-keyed
+//! [`IndexMap`]s. `IndexMap` preserves insertion (= source) order on
+//! iteration, which the lexer DFA relies on for tie-breaking and
+//! `RuleKind` id assignment.
+//!
 //! Tokens are matched by a regular pattern ([`TokenPattern`]) compiled to a
 //! DFA at lowering time; rules are LL expressions ([`Expr`]) over tokens and
 //! other rules. Names starting with `_` are fragments — reusable building
 //! blocks that never appear in the emitted output.
 
+use indexmap::IndexMap;
+
 use crate::Span;
 
 /// A parsed grammar: its name (used to pick file names in code generation)
-/// plus every declared token and rule in source order.
+/// plus every declared token and rule, keyed by name. The `IndexMap`s
+/// iterate in declaration order, so `g.tokens.values()` / `g.rules.values()`
+/// walk the definitions in source order.
 #[derive(Clone, Debug, Default)]
 pub struct Grammar {
     /// Identifier used when the code generator needs to name the output
     /// (file stem, package/namespace, etc.). Usually the grammar file's
     /// stem unless the caller overrode it.
     pub name: String,
-    /// Every `token` declaration, including fragments, in source order.
-    pub tokens: Vec<TokenDef>,
-    /// Every `rule` declaration, including fragments, in source order.
-    pub rules: Vec<RuleDef>,
+    /// Every `token` declaration, including fragments, keyed by name.
+    pub tokens: IndexMap<String, TokenDef>,
+    /// Every `rule` declaration, including fragments, keyed by name.
+    pub rules: IndexMap<String, RuleDef>,
 }
 
 impl Grammar {
-    /// Look up a token by name. Returns `None` if no such token was declared.
-    pub fn token(&self, name: &str) -> Option<&TokenDef> {
-        self.tokens.iter().find(|t| t.name == name)
+    /// Insert a token by name. Returns the previous definition under the
+    /// same name, if any. The new entry takes the existing position
+    /// (matching `IndexMap::insert` semantics). For lookups, hit
+    /// `g.tokens` directly: `g.tokens.get(name)`,
+    /// `g.tokens.get_index_of(name)`, `g.tokens.values()`, …
+    pub fn add_token(&mut self, t: TokenDef) -> Option<TokenDef> {
+        self.tokens.insert(t.name.clone(), t)
     }
 
-    /// Look up a rule by name.
-    pub fn rule(&self, name: &str) -> Option<&RuleDef> {
-        self.rules.iter().find(|r| r.name == name)
-    }
-
-    /// Index of a rule in declaration order, if any. Useful when you need
-    /// to refer to a rule by a stable numeric id.
-    pub fn rule_index(&self, name: &str) -> Option<usize> {
-        self.rules.iter().position(|r| r.name == name)
-    }
-
-    /// Index of a token in declaration order, if any.
-    pub fn token_index(&self, name: &str) -> Option<usize> {
-        self.tokens.iter().position(|t| t.name == name)
-    }
-
-    /// The default start rule (the first rule declared). Returns `None` if
-    /// the grammar has no rules.
-    pub fn default_start(&self) -> Option<&RuleDef> {
-        self.rules.first()
+    /// Insert a rule by name. Returns the previous definition, if any.
+    /// See [`Grammar::add_token`] for how to read back from `g.rules`.
+    pub fn add_rule(&mut self, r: RuleDef) -> Option<RuleDef> {
+        self.rules.insert(r.name.clone(), r)
     }
 }
 
@@ -316,27 +312,53 @@ mod tests {
     #[test]
     fn grammar_lookups_by_name_and_index() {
         let mut g = Grammar::default();
-        g.tokens.push(tok("A"));
-        g.tokens.push(tok("B"));
-        g.rules.push(rule("first"));
-        g.rules.push(rule("second"));
+        g.add_token(tok("A"));
+        g.add_token(tok("B"));
+        g.add_rule(rule("first"));
+        g.add_rule(rule("second"));
 
-        assert_eq!(g.token("A").map(|t| t.name.as_str()), Some("A"));
-        assert!(g.token("Z").is_none());
-        assert_eq!(g.token_index("B"), Some(1));
-        assert_eq!(g.token_index("Z"), None);
+        assert_eq!(g.tokens.get("A").map(|t| t.name.as_str()), Some("A"));
+        assert!(g.tokens.get("Z").is_none());
+        assert_eq!(g.tokens.get_index_of("B"), Some(1));
+        assert_eq!(g.tokens.get_index_of("Z"), None);
 
-        assert_eq!(g.rule("second").map(|r| r.name.as_str()), Some("second"));
-        assert_eq!(g.rule_index("first"), Some(0));
-        assert_eq!(g.rule_index("missing"), None);
+        assert_eq!(
+            g.rules.get("second").map(|r| r.name.as_str()),
+            Some("second")
+        );
+        assert_eq!(g.rules.get_index_of("first"), Some(0));
+        assert_eq!(g.rules.get_index_of("missing"), None);
     }
 
     #[test]
-    fn grammar_default_start_is_first_rule_or_none() {
+    fn tokens_iterate_in_declaration_order_regardless_of_hash() {
+        // Insert names whose hash order is unlikely to match insertion order.
         let mut g = Grammar::default();
-        assert!(g.default_start().is_none());
-        g.rules.push(rule("only"));
-        g.rules.push(rule("ignored"));
-        assert_eq!(g.default_start().map(|r| r.name.as_str()), Some("only"));
+        for name in &["zeta", "alpha", "mu", "omega", "beta"] {
+            g.add_token(tok(name));
+        }
+        let observed: Vec<&str> = g.tokens.values().map(|t| t.name.as_str()).collect();
+        assert_eq!(observed, vec!["zeta", "alpha", "mu", "omega", "beta"]);
+    }
+
+    #[test]
+    fn rules_iterate_in_declaration_order() {
+        let mut g = Grammar::default();
+        for name in &["zeta", "alpha", "mu"] {
+            g.add_rule(rule(name));
+        }
+        let observed: Vec<&str> = g.rules.values().map(|r| r.name.as_str()).collect();
+        assert_eq!(observed, vec!["zeta", "alpha", "mu"]);
+    }
+
+    #[test]
+    fn add_token_returns_previous_definition_on_duplicate() {
+        let mut g = Grammar::default();
+        assert!(g.add_token(tok("A")).is_none());
+        let prev = g.add_token(tok("A"));
+        assert!(prev.is_some());
+        // IndexMap::insert overwrites in place, so the duplicate keeps the
+        // original position rather than appending.
+        assert_eq!(g.tokens.get_index_of("A"), Some(0));
     }
 }
