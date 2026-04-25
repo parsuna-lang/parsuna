@@ -311,8 +311,9 @@ fn emit_tables(s: &mut String, st: &StateTable) {
     writeln!(s).unwrap();
 
     writeln!(s, "var (").unwrap();
-    for (i, f) in st.first_sets.iter().enumerate() {
+    for f in &st.first_sets {
         let seqs: Vec<String> = f
+            .seqs
             .iter()
             .map(|seq| {
                 format!(
@@ -324,14 +325,15 @@ fn emit_tables(s: &mut String, st: &StateTable) {
                 )
             })
             .collect();
-        writeln!(s, "\tfirst_{} = [][]int16{{{}}}", i, seqs.join(", ")).unwrap();
+        writeln!(s, "\tfirst_{} = [][]int16{{{}}}", f.id, seqs.join(", ")).unwrap();
     }
-    for (i, f) in st.sync_sets.iter().enumerate() {
+    for f in &st.sync_sets {
         writeln!(
             s,
             "\tsync_{} = []int16{{{}}}",
-            i,
-            f.iter()
+            f.id,
+            f.kinds
+                .iter()
                 .map(|t| format!("int16({})", token_const(st, *t)))
                 .collect::<Vec<_>>()
                 .join(", ")

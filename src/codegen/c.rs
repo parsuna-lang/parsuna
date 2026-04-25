@@ -540,8 +540,9 @@ fn byte_literal(b: u8) -> String {
 fn emit_tables(c: &mut String, st: &StateTable, upper: &str) {
     /* Lookahead width is baked in via PARSUNA_K at the top of the file. */
 
-    for (i, f) in st.first_sets.iter().enumerate() {
-        for (j, seq) in f.iter().enumerate() {
+    for f in &st.first_sets {
+        let i = f.id;
+        for (j, seq) in f.seqs.iter().enumerate() {
             let parts: Vec<String> = seq.iter().map(|t| c_token_name(st, upper, *t)).collect();
             let joined = parts.join(", ");
             let sep = if parts.is_empty() { "" } else { ", " };
@@ -552,13 +553,14 @@ fn emit_tables(c: &mut String, st: &StateTable, upper: &str) {
             .unwrap();
         }
         write!(c, "static const int *const FIRST_{i}[] = {{").unwrap();
-        for j in 0..f.len() {
+        for j in 0..f.seqs.len() {
             write!(c, " FIRST_{i}_{j},").unwrap();
         }
         writeln!(c, " NULL }};").unwrap();
     }
-    for (i, f) in st.sync_sets.iter().enumerate() {
-        let s: Vec<String> = f.iter().map(|t| c_token_name(st, upper, *t)).collect();
+    for f in &st.sync_sets {
+        let i = f.id;
+        let s: Vec<String> = f.kinds.iter().map(|t| c_token_name(st, upper, *t)).collect();
         let joined = s.join(", ");
         let sep = if s.is_empty() { "" } else { ", " };
         writeln!(

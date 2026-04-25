@@ -37,16 +37,33 @@ pub type SyncSetId = u32;
 pub type LookaheadSeq = Vec<i16>;
 
 /// An interned FIRST set: every lookahead sequence that can open the
-/// dispatch site that owns this id. Stored as a sorted, deduplicated list
-/// (rather than a `Set`) so backends iterate it in a stable order.
-pub type FirstSet = Vec<LookaheadSeq>;
+/// dispatch site that owns this id. Sequences are stored as a sorted,
+/// deduplicated `Vec` (rather than a `Set`) so backends iterate in a
+/// stable order. The id is carried inline so iterating consumers don't
+/// need `enumerate`.
+#[derive(Clone, Debug)]
+pub struct FirstSet {
+    /// Pool index of this entry — equal to its position in
+    /// [`StateTable::first_sets`].
+    pub id: FirstSetId,
+    /// The lookahead sequences that comprise this FIRST set.
+    pub seqs: Vec<LookaheadSeq>,
+}
 
 /// Pool of interned FIRST sets, indexed by [`FirstSetId`].
 pub type FirstSetPool = Vec<FirstSet>;
 
 /// An interned SYNC set: token-kind ids that an `Expect` can recover to.
-/// Each entry is a single token, not a sequence.
-pub type SyncSet = Vec<i16>;
+/// Each entry is a single token, not a sequence. The id is carried
+/// inline so iterating consumers don't need `enumerate`.
+#[derive(Clone, Debug)]
+pub struct SyncSet {
+    /// Pool index of this entry — equal to its position in
+    /// [`StateTable::sync_sets`].
+    pub id: SyncSetId,
+    /// Token-kind ids the parser will recover to.
+    pub kinds: Vec<i16>,
+}
 
 /// Pool of interned SYNC sets, indexed by [`SyncSetId`].
 pub type SyncSetPool = Vec<SyncSet>;
@@ -222,7 +239,7 @@ pub fn build_dispatch_tree(
     };
     let mut entries: Vec<(Vec<i16>, StateId)> = Vec::new();
     for (fid, target) in arms {
-        for seq in &first_sets[*fid as usize] {
+        for seq in &first_sets[*fid as usize].seqs {
             entries.push((seq.clone(), *target));
         }
     }

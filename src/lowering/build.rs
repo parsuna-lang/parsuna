@@ -159,9 +159,9 @@ struct Builder<'a> {
     ag: &'a AnalyzedGrammar,
     blocks: Vec<Block>,
     first_sets: FirstSetPool,
-    first_intern: HashMap<FirstSet, FirstSetId>,
+    first_intern: HashMap<Vec<LookaheadSeq>, FirstSetId>,
     sync_sets: SyncSetPool,
-    sync_intern: HashMap<SyncSet, SyncSetId>,
+    sync_intern: HashMap<Vec<i16>, SyncSetId>,
     current_sync: SyncSetId,
     current_symbol: String,
 }
@@ -283,7 +283,7 @@ impl Builder<'_> {
     /// different orderings still hash to one entry — that turns N
     /// syntactically-similar grammar fragments into a single shared table
     /// row in the final output.
-    fn intern_first(&mut self, mut seqs: FirstSet) -> FirstSetId {
+    fn intern_first(&mut self, mut seqs: Vec<LookaheadSeq>) -> FirstSetId {
         seqs.sort();
         seqs.dedup();
         if let Some(id) = self.first_intern.get(&seqs) {
@@ -291,21 +291,21 @@ impl Builder<'_> {
         }
         let id = self.first_sets.len() as FirstSetId;
         self.first_intern.insert(seqs.clone(), id);
-        self.first_sets.push(seqs);
+        self.first_sets.push(FirstSet { id, seqs });
         id
     }
 
     /// Intern a SYNC set (a list of token ids). Same sort+dedup strategy
     /// as `intern_first`.
-    fn intern_sync(&mut self, mut toks: SyncSet) -> SyncSetId {
-        toks.sort();
-        toks.dedup();
-        if let Some(id) = self.sync_intern.get(&toks) {
+    fn intern_sync(&mut self, mut kinds: Vec<i16>) -> SyncSetId {
+        kinds.sort();
+        kinds.dedup();
+        if let Some(id) = self.sync_intern.get(&kinds) {
             return *id;
         }
         let id = self.sync_sets.len() as SyncSetId;
-        self.sync_intern.insert(toks.clone(), id);
-        self.sync_sets.push(toks);
+        self.sync_intern.insert(kinds.clone(), id);
+        self.sync_sets.push(SyncSet { id, kinds });
         id
     }
 
@@ -318,7 +318,7 @@ impl Builder<'_> {
     /// nullability as a separate bit (`has_eps`) rather than a sentinel
     /// inside the set.
     fn first_ids(&mut self, first: &analysis::FirstSet) -> FirstSetId {
-        let seqs: FirstSet = first
+        let seqs: Vec<LookaheadSeq> = first
             .iter()
             .filter(|seq| !seq.is_empty())
             .map(|seq| seq.iter().map(|n| token_kind(self.ag, n)).collect::<LookaheadSeq>())
@@ -514,7 +514,7 @@ fn collect_rules(g: &Grammar) -> Vec<String> {
 /// SYNC set for a rule: every real token in its FOLLOW plus EOF. `EOF`
 /// always sits at the end so the recovery loop will stop if nothing else
 /// catches it, rather than running off the input.
-fn compute_sync(ag: &AnalyzedGrammar, rule_name: &str, eof_id: i16) -> SyncSet {
+fn compute_sync(ag: &AnalyzedGrammar, rule_name: &str, eof_id: i16) -> Vec<i16> {
     let follow = ag.follow.get(rule_name).cloned().unwrap_or_default();
     let mut names: Vec<&str> = follow
         .iter()
@@ -523,7 +523,7 @@ fn compute_sync(ag: &AnalyzedGrammar, rule_name: &str, eof_id: i16) -> SyncSet {
         .collect();
     names.sort();
     names.dedup();
-    let mut ids: SyncSet = names.iter().map(|n| token_kind(ag, n)).collect();
+    let mut ids: Vec<i16> = names.iter().map(|n| token_kind(ag, n)).collect();
     ids.push(eof_id);
     ids
 }

@@ -304,8 +304,9 @@ fn emit_tables(s: &mut String, st: &StateTable) {
         writeln!(s, "const ENTRY_{} = {};", name.to_uppercase(), id).unwrap();
     }
 
-    for (i, f) in st.first_sets.iter().enumerate() {
+    for f in &st.first_sets {
         let seqs: Vec<String> = f
+            .seqs
             .iter()
             .map(|seq| {
                 format!(
@@ -320,17 +321,18 @@ fn emit_tables(s: &mut String, st: &StateTable) {
         writeln!(
             s,
             "const FIRST_{}: readonly (readonly TokenKind[])[] = [{}];",
-            i,
+            f.id,
             seqs.join(", ")
         )
         .unwrap();
     }
-    for (i, f) in st.sync_sets.iter().enumerate() {
+    for f in &st.sync_sets {
         writeln!(
             s,
             "const SYNC_{}: readonly TokenKind[] = [{}];",
-            i,
-            f.iter()
+            f.id,
+            f.kinds
+                .iter()
                 .map(|t| token_variant(st, *t))
                 .collect::<Vec<_>>()
                 .join(", ")

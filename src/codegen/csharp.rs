@@ -278,8 +278,9 @@ fn emit_tables(s: &mut String, st: &StateTable) {
     writeln!(s, "internal static class Tables {{").unwrap();
     writeln!(s, "    public const int K = {};", st.k).unwrap();
 
-    for (i, f) in st.first_sets.iter().enumerate() {
+    for f in &st.first_sets {
         let seqs: Vec<String> = f
+            .seqs
             .iter()
             .map(|seq| {
                 format!(
@@ -294,17 +295,18 @@ fn emit_tables(s: &mut String, st: &StateTable) {
         writeln!(
             s,
             "    public static readonly short[][] First{} = new short[][] {{ {} }};",
-            i,
+            f.id,
             seqs.join(", ")
         )
         .unwrap();
     }
-    for (i, f) in st.sync_sets.iter().enumerate() {
+    for f in &st.sync_sets {
         writeln!(
             s,
             "    public static readonly short[] Sync{} = new short[] {{ {} }};",
-            i,
-            f.iter()
+            f.id,
+            f.kinds
+                .iter()
                 .map(|t| token_short(st, *t))
                 .collect::<Vec<_>>()
                 .join(", ")

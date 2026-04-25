@@ -298,8 +298,9 @@ fn emit_tables(s: &mut String, st: &StateTable) {
         .unwrap();
     }
 
-    for (i, f) in st.first_sets.iter().enumerate() {
+    for f in &st.first_sets {
         let seqs: Vec<String> = f
+            .seqs
             .iter()
             .map(|seq| {
                 let kinds: Vec<String> = seq.iter().map(|t| token_short(st, *t)).collect();
@@ -309,17 +310,18 @@ fn emit_tables(s: &mut String, st: &StateTable) {
         writeln!(
             s,
             "    private static final short[][] FIRST_{} = new short[][]{{{}}};",
-            i,
+            f.id,
             seqs.join(", ")
         )
         .unwrap();
     }
-    for (i, f) in st.sync_sets.iter().enumerate() {
+    for f in &st.sync_sets {
         writeln!(
             s,
             "    private static final short[] SYNC_{} = new short[]{{{}}};",
-            i,
-            f.iter()
+            f.id,
+            f.kinds
+                .iter()
                 .map(|t| token_short(st, *t))
                 .collect::<Vec<_>>()
                 .join(", ")

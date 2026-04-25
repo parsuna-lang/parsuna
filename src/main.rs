@@ -567,10 +567,11 @@ fn format_dispatch_tree(
 }
 
 fn format_first_pool(st: &StateTable, id: u32) -> String {
-    let Some(seqs) = st.first_sets.get(id as usize) else {
+    let Some(set) = st.first_sets.get(id as usize) else {
         return format!("FIRST_{}", id);
     };
-    let mut parts: Vec<String> = seqs
+    let mut parts: Vec<String> = set
+        .seqs
         .iter()
         .map(|seq| {
             if seq.is_empty() {
@@ -589,10 +590,14 @@ fn format_first_pool(st: &StateTable, id: u32) -> String {
 }
 
 fn format_sync_set(st: &StateTable, id: u32) -> String {
-    let Some(kinds) = st.sync_sets.get(id as usize) else {
+    let Some(set) = st.sync_sets.get(id as usize) else {
         return format!("SYNC_{}", id);
     };
-    let mut names: Vec<&str> = kinds.iter().map(|k| token_name_for_kind(st, *k)).collect();
+    let mut names: Vec<&str> = set
+        .kinds
+        .iter()
+        .map(|k| token_name_for_kind(st, *k))
+        .collect();
     names.sort();
     names.dedup();
     format!("{{{}}}", names.join(", "))

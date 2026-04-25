@@ -290,9 +290,9 @@ fn emit_tables(s: &mut String, st: &StateTable) {
     }
     writeln!(s).unwrap();
 
-    for (i, f) in st.first_sets.iter().enumerate() {
-        for (j, seq) in f.iter().enumerate() {
-            write!(s, "static FIRST_{}_{}: &[TokenKind] = &[", i, j).unwrap();
+    for f in &st.first_sets {
+        for (j, seq) in f.seqs.iter().enumerate() {
+            write!(s, "static FIRST_{}_{}: &[TokenKind] = &[", f.id, j).unwrap();
             for (k, t) in seq.iter().enumerate() {
                 if k > 0 {
                     s.push_str(", ");
@@ -301,19 +301,19 @@ fn emit_tables(s: &mut String, st: &StateTable) {
             }
             writeln!(s, "];").unwrap();
         }
-        write!(s, "static FIRST_{}: &[&[TokenKind]] = &[", i).unwrap();
-        for j in 0..f.len() {
+        write!(s, "static FIRST_{}: &[&[TokenKind]] = &[", f.id).unwrap();
+        for j in 0..f.seqs.len() {
             if j > 0 {
                 s.push_str(", ");
             }
-            write!(s, "FIRST_{}_{}", i, j).unwrap();
+            write!(s, "FIRST_{}_{}", f.id, j).unwrap();
         }
         writeln!(s, "];").unwrap();
     }
     writeln!(s).unwrap();
-    for (i, f) in st.sync_sets.iter().enumerate() {
-        write!(s, "static SYNC_{}: &[TokenKind] = &[", i).unwrap();
-        for (k, t) in f.iter().enumerate() {
+    for f in &st.sync_sets {
+        write!(s, "static SYNC_{}: &[TokenKind] = &[", f.id).unwrap();
+        for (k, t) in f.kinds.iter().enumerate() {
             if k > 0 {
                 s.push_str(", ");
             }
@@ -444,7 +444,7 @@ fn emit_lookahead_branch(
     _unused: Option<()>,
 ) {
     if table.k == 1 {
-        let pat = kind_pattern(table, &table.first_sets[first as usize]);
+        let pat = kind_pattern(table, &table.first_sets[first as usize].seqs);
         writeln!(s, "{}match p.look(0).kind {{", ind).unwrap();
         writeln!(s, "{}    {} => {{", ind, pat).unwrap();
         on_match(s, &format!("{}        ", ind));
