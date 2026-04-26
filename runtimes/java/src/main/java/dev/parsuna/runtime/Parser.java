@@ -51,15 +51,11 @@ public final class Parser implements Iterator<Event> {
     /** True iff no events are queued. */
     public boolean queueIsEmpty() { return queue.isEmpty(); }
 
-    /**
-     * True iff the current lookahead matches any of the given prefixes.
-     * Lookahead slots whose kindOk is false never match.
-     */
-    public boolean matchesFirst(int[][] set) {
-        outer: for (int[] seq : set) {
+    /** True iff the current lookahead matches any of the given prefixes. */
+    public boolean matchesFirst(short[][] set) {
+        outer: for (short[] seq : set) {
             for (int i = 0; i < seq.length; i++) {
-                Token t = look(i);
-                if (!t.kindOk || t.kind != seq[i]) continue outer;
+                if (look(i).kind != seq[i]) continue outer;
             }
             return true;
         }
@@ -85,26 +81,17 @@ public final class Parser implements Iterator<Event> {
     }
 
     /** Consume a token of `kind`; on mismatch, error, recover to `sync`, retry once. */
-    public void tryConsume(int kind, int[] sync, String name) {
-        Token t0 = look(0);
-        if (t0.kindOk && t0.kind == kind) { consume(); return; }
+    public void tryConsume(short kind, short[] sync, String name) {
+        if (look(0).kind == kind) { consume(); return; }
         errorHere("expected " + name);
         recoverTo(sync);
-        Token t1 = look(0);
-        if (t1.kindOk && t1.kind == kind) consume();
+        if (look(0).kind == kind) consume();
     }
 
-    /**
-     * Consume tokens until the lookahead matches `sync` (or EOF).
-     * Tokens with kindOk == false are unconditionally consumed during
-     * recovery — they never match a sync kind and aren't EOF.
-     */
-    public void recoverTo(int[] sync) {
-        while (true) {
-            Token t = look(0);
-            if (t.kindOk && t.kind == cfg.eofKind) return;
-            if (t.kindOk && containsKind(sync, t.kind)) return;
-            emit(new Event.Token(t));
+    /** Consume tokens until the lookahead matches `sync` (or EOF). */
+    public void recoverTo(short[] sync) {
+        while (look(0).kind != cfg.eofKind && !containsKind(sync, look(0).kind)) {
+            emit(new Event.Token(look(0)));
             advanceLook();
         }
     }
@@ -119,9 +106,9 @@ public final class Parser implements Iterator<Event> {
             if (state == TERMINATED) {
                 if (!eofChecked) {
                     eofChecked = true;
-                    if (!atEof()) {
+                    if (look(0).kind != cfg.eofKind) {
                         errorHere("expected end of input");
-                        while (!atEof()) { emit(new Event.Token(look(0))); advanceLook(); }
+                        while (look(0).kind != cfg.eofKind) { emit(new Event.Token(look(0))); advanceLook(); }
                     }
                     flushSkipsBefore(look(0).span.end);
                     continue;
@@ -130,11 +117,6 @@ public final class Parser implements Iterator<Event> {
             }
             cfg.drive.accept(this);
         }
-    }
-
-    private boolean atEof() {
-        Token t = look(0);
-        return t.kindOk && t.kind == cfg.eofKind;
     }
 
     @Override public boolean hasNext() { if (ahead != null) return true; ahead = nextEvent(); return ahead != null; }
@@ -148,7 +130,7 @@ public final class Parser implements Iterator<Event> {
     private Token pumpToken() {
         while (true) {
             Token t = lex.nextToken();
-            if (t.kindOk && cfg.isSkip.test(t.kind)) { pendingSkips.addLast(t); continue; }
+            if (cfg.isSkip.test(t.kind)) { pendingSkips.addLast(t); continue; }
             return t;
         }
     }
@@ -175,8 +157,8 @@ public final class Parser implements Iterator<Event> {
         queue.addLast(ev);
     }
 
-    private static boolean containsKind(int[] set, int k) {
-        for (int x : set) if (x == k) return true;
+    private static boolean containsKind(short[] set, short k) {
+        for (short x : set) if (x == k) return true;
         return false;
     }
 }

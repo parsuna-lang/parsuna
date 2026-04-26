@@ -3,21 +3,18 @@ package dev.parsuna.runtime;
 /**
  * A lexed token: kind id, span, and the matched text.
  *
- * <p>{@code kind} is a uint16-range value matching the generated TokenKind
- * enum's {@code id} field. Read it only when {@code kindOk} is true;
- * {@code kindOk} is false only when the lexer could not match any
- * pattern at the current position. EOF has its own kind value
- * ({@code kindOk == true}).
+ * <p>{@code kind} is a {@code short} matching the generated TokenKind
+ * enum's {@code id} field. The runtime reserves {@code -1} as the "no
+ * DFA pattern matched" sentinel that the lexer emits when it can't
+ * classify a codepoint; real token kinds (including EOF = 0) are
+ * non-negative.
  */
 public final class Token {
-    public final int kind;
-    public final boolean kindOk;
+    public final short kind;
     public final Span span;
     public final String text;
-
-    public Token(int kind, boolean kindOk, Span span, String text) {
+    public Token(short kind, Span span, String text) {
         this.kind = kind;
-        this.kindOk = kindOk;
         this.span = span;
         this.text = text;
     }
