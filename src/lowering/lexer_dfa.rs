@@ -1,11 +1,14 @@
 //! Compile a set of [`TokenPattern`]s into a deterministic byte-level DFA.
 //!
 //! Thompson-style NFA construction followed by interval-based subset
-//! construction. Both NFA edges and DFA arms carry inclusive byte ranges
-//! `(u8, u8)`, so wide character classes (`.`, negations, `'a'..'z'`) cost
-//! one edge / one arm regardless of how many bytes they cover. Subset
-//! construction uses a sweep-line over endpoints to find the maximal
-//! sub-intervals on which the active set of NFA targets is constant.
+//! construction. NFA edges and DFA arms carry inclusive byte ranges
+//! `(u8, u8)`. Codepoint ranges in character classes (`'a'..'z'`, `.`,
+//! negations) are expanded to UTF-8 byte sequences before they reach the
+//! NFA, so a class like `'\u{00E0}'..'\u{017F}'` becomes a small
+//! alternation of multi-byte sequences rather than a malformed byte set;
+//! ASCII ranges still cost one edge. Subset construction uses a
+//! sweep-line over endpoints to find the maximal sub-intervals on which
+//! the active set of NFA targets is constant.
 //!
 //! [`DEAD`] is a runtime sentinel meaning "stop"; it never appears as a
 //! DFA state in the [`compile`] output. The start state's id is always
@@ -137,8 +140,18 @@ impl NfaBuilder {
             TokenPattern::Class(cc) => {
                 let s = self.new_state();
                 let e = self.new_state();
-                for (lo, hi) in class_ranges(cc) {
-                    self.add_range(s, lo, hi, e);
+                for seq in class_byte_seqs(cc) {
+                    if seq.is_empty() {
+                        self.add_epsilon(s, e);
+                        continue;
+                    }
+                    let mut cur = s;
+                    let last = seq.len() - 1;
+                    for (i, (lo, hi)) in seq.into_iter().enumerate() {
+                        let target = if i == last { e } else { self.new_state() };
+                        self.add_range(cur, lo, hi, target);
+                        cur = target;
+                    }
                 }
                 NfaFragment { start: s, end: e }
             }
@@ -215,60 +228,211 @@ fn build_nfa(tokens: &[TokenInfo]) -> Nfa {
     }
 }
 
-/// Reduce a [`CharClass`] to a sorted list of disjoint, gap-separated
-/// inclusive byte ranges. Codepoints above `0xFF` are clamped to byte
-/// space (matching the existing byte-DFA semantics — multi-byte codepoints
-/// are surfaced through their constituent bytes by the parser).
-fn class_ranges(cc: &CharClass) -> Vec<(u8, u8)> {
-    let mut ranges: Vec<(u8, u8)> = cc
+const MAX_CODEPOINT: u32 = 0x10FFFF;
+const SURROGATE_LO: u32 = 0xD800;
+const SURROGATE_HI: u32 = 0xDFFF;
+
+/// Reduce a [`CharClass`] to a list of UTF-8 byte sequences. Each inner
+/// `Vec<(u8, u8)>` is a sequence of byte ranges to match in order; the
+/// outer list is the alternation. Codepoint ranges expand to their UTF-8
+/// encoding via the canonical Russ-Cox decomposition, so `'\u{00E0}'..
+/// '\u{00FF}'` becomes one 2-byte sequence rather than a stray byte
+/// transition that would never match real UTF-8 input. Surrogates
+/// `U+D800..=U+DFFF` are silently excluded — they are not Unicode scalar
+/// values and cannot legally appear in UTF-8.
+fn class_byte_seqs(cc: &CharClass) -> Vec<Vec<(u8, u8)>> {
+    let mut cp_ranges: Vec<(u32, u32)> = cc
         .items
         .iter()
         .filter_map(|it| match *it {
-            ClassItem::Char(c) if c <= 0xFF => Some((c as u8, c as u8)),
+            ClassItem::Char(c) if c <= MAX_CODEPOINT => Some((c, c)),
             ClassItem::Char(_) => None,
-            ClassItem::Range(lo, hi) => {
-                if lo > 0xFF {
-                    None
-                } else {
-                    Some((lo as u8, hi.min(0xFF) as u8))
-                }
+            ClassItem::Range(lo, hi) if lo <= MAX_CODEPOINT && lo <= hi => {
+                Some((lo, hi.min(MAX_CODEPOINT)))
             }
+            ClassItem::Range(_, _) => None,
         })
         .collect();
-    ranges.sort();
-    let mut merged: Vec<(u8, u8)> = Vec::new();
-    for (lo, hi) in ranges {
-        if let Some(last) = merged.last_mut() {
-            // Overlap or adjacency (last.hi + 1 == lo) → extend.
-            if last.1 >= lo || (last.1 < 255 && last.1 + 1 == lo) {
+    cp_ranges.sort();
+    let cp_ranges = merge_codepoint_ranges(cp_ranges);
+
+    let cp_ranges = if cc.negated {
+        complement_codepoints(&cp_ranges)
+    } else {
+        exclude_surrogates(cp_ranges)
+    };
+
+    let mut out = Vec::new();
+    for (lo, hi) in cp_ranges {
+        utf8_byte_sequences(lo, hi, &mut out);
+    }
+    out
+}
+
+/// Coalesce sorted, possibly-overlapping codepoint ranges into a sorted,
+/// gap-separated list. Adjacent ranges (`a.hi + 1 == b.lo`) merge.
+fn merge_codepoint_ranges(sorted: Vec<(u32, u32)>) -> Vec<(u32, u32)> {
+    let mut out: Vec<(u32, u32)> = Vec::new();
+    for (lo, hi) in sorted {
+        if let Some(last) = out.last_mut() {
+            if lo <= last.1.saturating_add(1) {
                 last.1 = last.1.max(hi);
                 continue;
             }
         }
-        merged.push((lo, hi));
+        out.push((lo, hi));
     }
-    if cc.negated {
-        complement(&merged)
-    } else {
-        merged
+    out
+}
+
+/// Drop the surrogate range `U+D800..=U+DFFF` from each input range,
+/// splitting ranges that straddle it.
+fn exclude_surrogates(ranges: Vec<(u32, u32)>) -> Vec<(u32, u32)> {
+    let mut out = Vec::new();
+    for (lo, hi) in ranges {
+        if hi < SURROGATE_LO || lo > SURROGATE_HI {
+            out.push((lo, hi));
+        } else if lo < SURROGATE_LO && hi <= SURROGATE_HI {
+            out.push((lo, SURROGATE_LO - 1));
+        } else if lo >= SURROGATE_LO && hi > SURROGATE_HI {
+            out.push((SURROGATE_HI + 1, hi));
+        } else if lo < SURROGATE_LO && hi > SURROGATE_HI {
+            out.push((lo, SURROGATE_LO - 1));
+            out.push((SURROGATE_HI + 1, hi));
+        }
+        // else: range entirely within surrogates — drop.
+    }
+    out
+}
+
+/// Complement of `ranges` over `[U+0000, U+10FFFF]` minus surrogates.
+/// Assumes `ranges` is sorted and gap-separated.
+fn complement_codepoints(ranges: &[(u32, u32)]) -> Vec<(u32, u32)> {
+    let mut raw: Vec<(u32, u32)> = Vec::new();
+    let mut cursor: u32 = 0;
+    for &(lo, hi) in ranges {
+        if cursor < lo {
+            raw.push((cursor, lo - 1));
+        }
+        cursor = hi.saturating_add(1);
+    }
+    if cursor <= MAX_CODEPOINT {
+        raw.push((cursor, MAX_CODEPOINT));
+    }
+    exclude_surrogates(raw)
+}
+
+/// Append the UTF-8 byte sequences that match every codepoint in
+/// `[lo, hi]` to `out`. Caller must ensure the range is surrogate-free.
+fn utf8_byte_sequences(lo: u32, hi: u32, out: &mut Vec<Vec<(u8, u8)>>) {
+    if lo > hi {
+        return;
+    }
+    debug_assert!(
+        hi < SURROGATE_LO || lo > SURROGATE_HI,
+        "utf8_byte_sequences must not see surrogate codepoints",
+    );
+
+    // Split at the boundaries where UTF-8 byte length changes.
+    let breaks = [0x7Fu32, 0x7FF, 0xFFFF, MAX_CODEPOINT];
+    let mut cursor = lo;
+    while cursor <= hi {
+        let break_at = *breaks.iter().find(|&&b| cursor <= b).unwrap();
+        let chunk_hi = hi.min(break_at);
+        emit_same_len(cursor, chunk_hi, out);
+        if break_at == MAX_CODEPOINT {
+            break;
+        }
+        cursor = break_at + 1;
     }
 }
 
-/// Complement of `ranges` over `[0, 255]`. Assumes `ranges` is sorted and
-/// gap-separated (the form [`class_ranges`] produces before negation).
-fn complement(ranges: &[(u8, u8)]) -> Vec<(u8, u8)> {
-    let mut out: Vec<(u8, u8)> = Vec::new();
-    let mut cursor: u16 = 0;
-    for &(lo, hi) in ranges {
-        if cursor < lo as u16 {
-            out.push((cursor as u8, lo - 1));
+fn emit_same_len(lo: u32, hi: u32, out: &mut Vec<Vec<(u8, u8)>>) {
+    let n = utf8_len(lo);
+    debug_assert_eq!(n, utf8_len(hi));
+    let mut lo_buf = [0u8; 4];
+    let mut hi_buf = [0u8; 4];
+    char::from_u32(lo).expect("non-surrogate scalar value").encode_utf8(&mut lo_buf);
+    char::from_u32(hi).expect("non-surrogate scalar value").encode_utf8(&mut hi_buf);
+    split_seqs(&lo_buf[..n], &hi_buf[..n], out);
+}
+
+fn utf8_len(c: u32) -> usize {
+    match c {
+        0..=0x7F => 1,
+        0x80..=0x7FF => 2,
+        0x800..=0xFFFF => 3,
+        _ => 4,
+    }
+}
+
+/// Decompose `[s, e]` (same-length UTF-8 byte sequences) into a list of
+/// alternation byte sequences matching every value between them. At each
+/// step:
+///   - if every trailing byte of `s` is `0x80` and every trailing byte of
+///     `e` is `0xBF`, the whole range collapses into a single sequence;
+///   - otherwise, peel off a "lower" piece (first byte fixed at `s[0]`,
+///     trailing bytes lifted up to `0xBF`), an optional "middle" piece
+///     (first byte ranges over the gap, trailing bytes free over
+///     `0x80..=0xBF`), and an "upper" piece (first byte fixed at `e[0]`,
+///     trailing bytes recurse from `0x80` minimum).
+fn split_seqs(s: &[u8], e: &[u8], out: &mut Vec<Vec<(u8, u8)>>) {
+    let n = s.len();
+    debug_assert_eq!(n, e.len());
+    debug_assert!(n > 0);
+
+    if s[1..].iter().all(|&b| b == 0x80) && e[1..].iter().all(|&b| b == 0xBF) {
+        let mut seq = Vec::with_capacity(n);
+        seq.push((s[0], e[0]));
+        for _ in 1..n {
+            seq.push((0x80, 0xBF));
         }
-        cursor = hi as u16 + 1;
+        out.push(seq);
+        return;
     }
-    if cursor <= 255 {
-        out.push((cursor as u8, 255));
+
+    if s[0] == e[0] {
+        let mut sub = Vec::new();
+        split_seqs(&s[1..], &e[1..], &mut sub);
+        for x in sub {
+            let mut seq = Vec::with_capacity(n);
+            seq.push((s[0], s[0]));
+            seq.extend(x);
+            out.push(seq);
+        }
+        return;
     }
-    out
+
+    let suffix_len = n - 1;
+
+    let upper_of_lower: Vec<u8> = vec![0xBFu8; suffix_len];
+    let mut lower = Vec::new();
+    split_seqs(&s[1..], &upper_of_lower, &mut lower);
+    for x in lower {
+        let mut seq = Vec::with_capacity(n);
+        seq.push((s[0], s[0]));
+        seq.extend(x);
+        out.push(seq);
+    }
+
+    if s[0] + 1 < e[0] {
+        let mut seq = Vec::with_capacity(n);
+        seq.push((s[0] + 1, e[0] - 1));
+        for _ in 0..suffix_len {
+            seq.push((0x80, 0xBF));
+        }
+        out.push(seq);
+    }
+
+    let lower_of_upper: Vec<u8> = vec![0x80u8; suffix_len];
+    let mut upper = Vec::new();
+    split_seqs(&lower_of_upper, &e[1..], &mut upper);
+    for x in upper {
+        let mut seq = Vec::with_capacity(n);
+        seq.push((e[0], e[0]));
+        seq.extend(x);
+        out.push(seq);
+    }
 }
 
 #[derive(Copy, Clone)]
@@ -634,7 +798,7 @@ mod tests {
     }
 
     #[test]
-    fn class_ranges_merges_overlapping_and_adjacent() {
+    fn class_byte_seqs_merges_overlapping_codepoint_ranges() {
         let cc = CharClass {
             negated: false,
             items: vec![
@@ -644,23 +808,83 @@ mod tests {
                 ClassItem::Char(b'z' as u32),                // disjoint
             ],
         };
-        assert_eq!(class_ranges(&cc), vec![(b'a', b'f'), (b'z', b'z')]);
+        assert_eq!(
+            class_byte_seqs(&cc),
+            vec![vec![(b'a', b'f')], vec![(b'z', b'z')]],
+        );
     }
 
     #[test]
-    fn class_ranges_negation_matches_complement_over_all_bytes() {
+    fn class_byte_seqs_expands_two_byte_codepoint_range() {
+        // U+00E0..U+00FF: shared lead byte 0xC3, trailing 0xA0..0xBF.
         let cc = CharClass {
-            negated: true,
-            items: vec![ClassItem::Char(b'a' as u32)],
+            negated: false,
+            items: vec![ClassItem::Range(0x00E0, 0x00FF)],
         };
-        assert_eq!(class_ranges(&cc), vec![(0, b'a' - 1), (b'a' + 1, 255)]);
+        assert_eq!(
+            class_byte_seqs(&cc),
+            vec![vec![(0xC3, 0xC3), (0xA0, 0xBF)]],
+        );
+    }
 
-        // Negated empty class = all bytes.
-        let any = CharClass {
-            negated: true,
-            items: vec![],
+    #[test]
+    fn class_byte_seqs_drops_nothing_for_high_unicode_range() {
+        // U+0100..U+017F (Latin Extended-A): shared lead byte 0xC4 / 0xC5.
+        let cc = CharClass {
+            negated: false,
+            items: vec![ClassItem::Range(0x0100, 0x017F)],
         };
-        assert_eq!(class_ranges(&any), vec![(0, 255)]);
+        assert_eq!(
+            class_byte_seqs(&cc),
+            vec![vec![(0xC4, 0xC5), (0x80, 0xBF)]],
+        );
+    }
+
+    #[test]
+    fn class_byte_seqs_splits_range_crossing_byte_length_boundary() {
+        // U+007E..U+0080 straddles the 1-byte → 2-byte boundary; expect a
+        // 1-byte sequence for U+007E..U+007F and a 2-byte for U+0080.
+        let cc = CharClass {
+            negated: false,
+            items: vec![ClassItem::Range(0x007E, 0x0080)],
+        };
+        let seqs = class_byte_seqs(&cc);
+        assert_eq!(
+            seqs,
+            vec![
+                vec![(0x7E, 0x7F)],
+                vec![(0xC2, 0xC2), (0x80, 0x80)],
+            ],
+        );
+    }
+
+    #[test]
+    fn negation_complements_over_unicode_excluding_surrogates() {
+        let t = toks(vec![tok(
+            "X",
+            cls(vec![ClassItem::Char(b'a' as u32)], true),
+        )]);
+        let dfa = compile(&t);
+        // ASCII byte that isn't 'a' matches as a 1-byte token.
+        assert_eq!(scan(&dfa, b"b"), Some((1, 1)));
+        assert_eq!(scan(&dfa, b"a"), None);
+        // A 2-byte UTF-8 codepoint matches in one go (longest-match=2).
+        assert_eq!(scan(&dfa, "é".as_bytes()), Some((2, 1)));
+        // A 4-byte codepoint also matches in one go.
+        assert_eq!(scan(&dfa, "🎉".as_bytes()), Some((4, 1)));
+    }
+
+    #[test]
+    fn dot_matches_any_one_codepoint() {
+        // A negated empty class = `.` per the grammar spec.
+        let t = toks(vec![tok("ANY", cls(vec![], true))]);
+        let dfa = compile(&t);
+        assert_eq!(scan(&dfa, b"a"), Some((1, 1)));
+        assert_eq!(scan(&dfa, "é".as_bytes()), Some((2, 1)));
+        assert_eq!(scan(&dfa, "中".as_bytes()), Some((3, 1)));
+        assert_eq!(scan(&dfa, "🎉".as_bytes()), Some((4, 1)));
+        // Stray UTF-8 continuation byte: not a valid codepoint start.
+        assert_eq!(scan(&dfa, &[0x80]), None);
     }
 
     #[test]
