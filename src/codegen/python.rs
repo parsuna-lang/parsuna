@@ -138,11 +138,6 @@ fn build_lib_rs(
         "    #[classattr] pub const EOF: u16 = parsuna_rt::TOKEN_EOF;"
     )
     .unwrap();
-    writeln!(
-        &mut out,
-        "    #[classattr] pub const ERROR: u16 = parsuna_rt::TOKEN_ERROR;"
-    )
-    .unwrap();
     writeln!(&mut out, "}}").unwrap();
     writeln!(&mut out).unwrap();
 
@@ -330,7 +325,7 @@ fn to_py_event(ev: Event) -> PyEvent {
         }
         parsuna_rt::Event::Token(t) => {
             let span = to_py_span(t.span);
-            PyEvent { tag: "token".into(), span, kind: Some(t.kind as i32), text: Some(t.text.into_owned()), error: None }
+            PyEvent { tag: "token".into(), span, kind: t.kind.map(|k| k as i32), text: Some(t.text.into_owned()), error: None }
         }
     }
 }

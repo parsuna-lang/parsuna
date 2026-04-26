@@ -82,16 +82,11 @@ fn emit_header(s: &mut String, st: &StateTable) {
 
 fn emit_constants(s: &mut String, st: &StateTable) {
     writeln!(s, "// TokenKind enumerates every token this grammar can emit.").unwrap();
-    writeln!(
-        s,
-        "// TkEof marks end-of-input and TkError is produced by the lexer when"
-    )
-    .unwrap();
-    writeln!(s, "// no pattern matches at the current position.").unwrap();
-    writeln!(s, "type TokenKind int16").unwrap();
+    writeln!(s, "// TkEof marks end-of-input. Lex failures (no pattern matched) come").unwrap();
+    writeln!(s, "// through as Tokens with KindOK == false, not as a separate value.").unwrap();
+    writeln!(s, "type TokenKind uint16").unwrap();
     writeln!(s, "const (").unwrap();
-    writeln!(s, "\tTkEof   TokenKind = 0").unwrap();
-    writeln!(s, "\tTkError TokenKind = -1").unwrap();
+    writeln!(s, "\tTkEof TokenKind = 0").unwrap();
     for t in &st.tokens {
         writeln!(s, "\tTk{} TokenKind = {}", pascal(&t.name), t.kind).unwrap();
     }
@@ -106,7 +101,6 @@ fn emit_constants(s: &mut String, st: &StateTable) {
     writeln!(s, "func TokenKindName(k TokenKind) string {{").unwrap();
     writeln!(s, "\tswitch k {{").unwrap();
     writeln!(s, "\tcase TkEof: return \"EOF\"").unwrap();
-    writeln!(s, "\tcase TkError: return \"ERROR\"").unwrap();
     for t in &st.tokens {
         writeln!(s, "\tcase Tk{}: return \"{}\"", pascal(&t.name), t.name).unwrap();
     }
@@ -171,22 +165,23 @@ fn emit_dfa(s: &mut String, st: &StateTable) {
     .unwrap();
     writeln!(
         s,
-        "// Returns (bestLen, bestKind, scanned). bestLen == 0 means no accept;"
+        "// Returns (bestLen, bestKind, scanned). bestLen == 0 means no accept"
     )
     .unwrap();
     writeln!(
         s,
-        "// scanned is total bytes walked past start, used to detect buffer exhaustion."
+        "// (bestKind is meaningless then). scanned is total bytes walked past start,"
     )
     .unwrap();
+    writeln!(s, "// used to detect buffer exhaustion.").unwrap();
     writeln!(
         s,
-        "func longestMatch(buf []byte, start int) (int, int16, int) {{"
+        "func longestMatch(buf []byte, start int) (int, uint16, int) {{"
     )
     .unwrap();
     writeln!(s, "\tpos := start").unwrap();
     writeln!(s, "\tbestLen := 0").unwrap();
-    writeln!(s, "\tbestKind := int16(TkError)").unwrap();
+    writeln!(s, "\tbestKind := uint16(0)").unwrap();
     writeln!(s, "\tstate := uint32({})", START).unwrap();
     writeln!(s, "\tfor {{").unwrap();
     writeln!(s, "\t\tswitch state {{").unwrap();
@@ -200,16 +195,16 @@ fn emit_dfa(s: &mut String, st: &StateTable) {
     writeln!(s, "\t}}").unwrap();
     writeln!(s, "}}").unwrap();
     writeln!(s).unwrap();
-    write!(s, "var skipKinds = map[int16]struct{{}}{{").unwrap();
+    write!(s, "var skipKinds = map[uint16]struct{{}}{{").unwrap();
     let skips: Vec<String> = st
         .tokens
         .iter()
         .filter(|t| t.skip)
-        .map(|t| format!("int16({}): {{}}", token_const(st, t.kind)))
+        .map(|t| format!("uint16({}): {{}}", token_const(st, t.kind)))
         .collect();
     s.push_str(&skips.join(", "));
     writeln!(s, "}}").unwrap();
-    writeln!(s, "func isSkip(k int16) bool {{ _, ok := skipKinds[k]; return ok }}").unwrap();
+    writeln!(s, "func isSkip(k uint16) bool {{ _, ok := skipKinds[k]; return ok }}").unwrap();
     writeln!(s).unwrap();
 }
 
@@ -246,7 +241,7 @@ fn emit_dfa_state_arm(
         if let Some(kind) = arm.target_accept {
             write!(
                 s,
-                "; bestLen = pos - start; bestKind = int16({})",
+                "; bestLen = pos - start; bestKind = uint16({})",
                 token_const(st, kind)
             )
             .unwrap();
@@ -315,22 +310,22 @@ fn emit_tables(s: &mut String, st: &StateTable) {
                 format!(
                     "{{{}}}",
                     seq.iter()
-                        .map(|t| format!("int16({})", token_const(st, *t)))
+                        .map(|t| format!("uint16({})", token_const(st, *t)))
                         .collect::<Vec<_>>()
                         .join(", ")
                 )
             })
             .collect();
-        writeln!(s, "\tfirst_{} = [][]int16{{{}}}", f.id, seqs.join(", ")).unwrap();
+        writeln!(s, "\tfirst_{} = [][]uint16{{{}}}", f.id, seqs.join(", ")).unwrap();
     }
     for f in &st.sync_sets {
         writeln!(
             s,
-            "\tsync_{} = []int16{{{}}}",
+            "\tsync_{} = []uint16{{{}}}",
             f.id,
             f.kinds
                 .iter()
-                .map(|t| format!("int16({})", token_const(st, *t)))
+                .map(|t| format!("uint16({})", token_const(st, *t)))
                 .collect::<Vec<_>>()
                 .join(", ")
         )
@@ -383,7 +378,7 @@ fn emit_op(s: &mut String, st: &StateTable, op: &Op, self_id: u32) {
         } => {
             writeln!(
                 s,
-                "\t\t\tp.TryConsume(int16({}), sync_{}, {:?})",
+                "\t\t\tp.TryConsume(uint16({}), sync_{}, {:?})",
                 token_const(st, *kind),
                 sync,
                 token_name
@@ -430,14 +425,30 @@ fn emit_dispatch_tree(
             arms,
             default,
         } => {
-            writeln!(s, "{}switch p.Look({}).Kind {{", ind, depth).unwrap();
+            // Switch on Kind; the runtime ensures the value is meaningful
+            // only when KindOK is true. Lookahead with KindOK == false
+            // falls into the default arm (recovery path).
+            writeln!(
+                s,
+                "{}_t{} := p.Look({})",
+                ind, depth, depth
+            )
+            .unwrap();
+            writeln!(
+                s,
+                "{}switch {{",
+                ind
+            )
+            .unwrap();
             let inner = format!("{}\t", ind);
             let body_ind = format!("{}\t", inner);
             for (kind, sub) in arms {
                 writeln!(
                     s,
-                    "{}case int16({}):",
+                    "{}case _t{}.KindOK && _t{}.Kind == uint16({}):",
                     inner,
+                    depth,
+                    depth,
                     token_const(st, *kind)
                 )
                 .unwrap();
@@ -481,7 +492,7 @@ fn emit_leaf_inline(s: &mut String, leaf: &DispatchLeaf, sync: u32, next: u32) {
 fn emit_public_api(s: &mut String, st: &StateTable) {
     writeln!(
         s,
-        "var parserConfig = rt.Config{{K: K, EofKind: int16(TkEof), IsSkip: isSkip, Drive: drive}}"
+        "var parserConfig = rt.Config{{K: K, EofKind: uint16(TkEof), IsSkip: isSkip, Drive: drive}}"
     )
     .unwrap();
     writeln!(s).unwrap();
@@ -501,7 +512,7 @@ fn emit_public_api(s: &mut String, st: &StateTable) {
         .unwrap();
         writeln!(
             s,
-            "\tlex := rt.NewLexer(r, longestMatch, int16(TkEof), int16(TkError))"
+            "\tlex := rt.NewLexer(r, longestMatch, uint16(TkEof))"
         )
         .unwrap();
         writeln!(

@@ -96,27 +96,31 @@ fn emit_constants(s: &mut String, st: &StateTable) {
     writeln!(s, "    /**").unwrap();
     writeln!(
         s,
-        "     * Token kinds this grammar can emit. EOF/ERROR are runtime sentinels;"
+        "     * Token kinds this grammar can emit. EOF is the runtime sentinel;"
     )
     .unwrap();
     writeln!(
         s,
-        "     * everything else is a grammar-declared token."
+        "     * everything else is a grammar-declared token. Lex failures (no"
+    )
+    .unwrap();
+    writeln!(
+        s,
+        "     * pattern matched) come through as Token instances with kindOk == false."
     )
     .unwrap();
     writeln!(s, "     */").unwrap();
     writeln!(s, "    public static enum TokenKind {{").unwrap();
-    write!(s, "        EOF(0),\n        ERROR(-1)").unwrap();
+    write!(s, "        EOF(0)").unwrap();
     for t in &st.tokens {
         write!(s, ",\n        {}({})", screaming_snake(&t.name), t.kind).unwrap();
     }
     writeln!(s, ";").unwrap();
-    writeln!(s, "        public final short id;").unwrap();
-    writeln!(s, "        TokenKind(int id) {{ this.id = (short) id; }}").unwrap();
+    writeln!(s, "        public final int id;").unwrap();
+    writeln!(s, "        TokenKind(int id) {{ this.id = id; }}").unwrap();
     writeln!(s, "        public String displayName() {{").unwrap();
     writeln!(s, "            switch (this) {{").unwrap();
     writeln!(s, "                case EOF: return \"EOF\";").unwrap();
-    writeln!(s, "                case ERROR: return \"ERROR\";").unwrap();
     for t in &st.tokens {
         writeln!(
             s,
@@ -176,7 +180,7 @@ fn emit_constants(s: &mut String, st: &StateTable) {
     writeln!(s).unwrap();
 }
 
-fn token_short(st: &StateTable, kind: u16) -> String {
+fn token_id(st: &StateTable, kind: u16) -> String {
     if kind == 0 {
         return "TokenKind.EOF.id".to_string();
     }
@@ -209,7 +213,7 @@ fn emit_dfa(s: &mut String, st: &StateTable) {
     .unwrap();
     writeln!(s, "        int pos = start;").unwrap();
     writeln!(s, "        int bestLen = 0;").unwrap();
-    writeln!(s, "        int bestKind = TokenKind.ERROR.id;").unwrap();
+    writeln!(s, "        int bestKind = 0;").unwrap();
     writeln!(s, "        int state = {};", START).unwrap();
     writeln!(s, "        outer: while (true) {{").unwrap();
     writeln!(s, "            switch (state) {{").unwrap();
@@ -228,12 +232,12 @@ fn emit_dfa(s: &mut String, st: &StateTable) {
     )
     .unwrap();
     writeln!(s).unwrap();
-    write!(s, "    private static boolean isSkip(short k) {{ return ").unwrap();
+    write!(s, "    private static boolean isSkip(int k) {{ return ").unwrap();
     let skip_list: Vec<String> = st
         .tokens
         .iter()
         .filter(|t| t.skip)
-        .map(|t| format!("k == {}", token_short(st, t.kind)))
+        .map(|t| format!("k == {}", token_id(st, t.kind)))
         .collect();
     if skip_list.is_empty() {
         writeln!(s, "false; }}").unwrap();
@@ -270,7 +274,7 @@ fn emit_dfa_state_arm(
             write!(
                 s,
                 " bestLen = pos - start; bestKind = {};",
-                token_short(st, kind)
+                token_id(st, kind)
             )
             .unwrap();
         }
@@ -314,13 +318,13 @@ fn emit_tables(s: &mut String, st: &StateTable) {
             .seqs
             .iter()
             .map(|seq| {
-                let kinds: Vec<String> = seq.iter().map(|t| token_short(st, *t)).collect();
+                let kinds: Vec<String> = seq.iter().map(|t| token_id(st, *t)).collect();
                 format!("{{{}}}", kinds.join(", "))
             })
             .collect();
         writeln!(
             s,
-            "    private static final short[][] FIRST_{} = new short[][]{{{}}};",
+            "    private static final int[][] FIRST_{} = new int[][]{{{}}};",
             f.id,
             seqs.join(", ")
         )
@@ -329,11 +333,11 @@ fn emit_tables(s: &mut String, st: &StateTable) {
     for f in &st.sync_sets {
         writeln!(
             s,
-            "    private static final short[] SYNC_{} = new short[]{{{}}};",
+            "    private static final int[] SYNC_{} = new int[]{{{}}};",
             f.id,
             f.kinds
                 .iter()
-                .map(|t| token_short(st, *t))
+                .map(|t| token_id(st, *t))
                 .collect::<Vec<_>>()
                 .join(", ")
         )
@@ -396,7 +400,7 @@ fn emit_op(s: &mut String, st: &StateTable, op: &Op, self_id: u32) {
             writeln!(
                 s,
                 "                    p.tryConsume({}, SYNC_{}, \"{}\");",
-                token_short(st, *kind),
+                token_id(st, *kind),
                 sync,
                 token_name
             )
@@ -454,27 +458,44 @@ fn emit_dispatch_tree(
             arms,
             default,
         } => {
-            writeln!(s, "{}switch (p.look({}).kind) {{", ind, depth).unwrap();
+            // Tokens with kindOk == false fall through to the default arm
+            // (recovery path); skip the switch entirely in that case.
+            writeln!(
+                s,
+                "{}{{ Token _t{} = p.look({});",
+                ind, depth, depth
+            )
+            .unwrap();
             let inner = format!("{}  ", ind);
+            writeln!(
+                s,
+                "{}if (_t{}.kindOk) {{ switch (_t{}.kind) {{",
+                inner, depth, depth
+            )
+            .unwrap();
+            let inner2 = format!("{}  ", inner);
             for (kind, sub) in arms {
-                let literal = format!("(short) {}", *kind);
+                let literal = format!("{}", *kind);
                 match sub {
                     DispatchTree::Leaf(leaf) => {
-                        write!(s, "{}case {}: {{ ", inner, literal).unwrap();
+                        write!(s, "{}case {}: {{ ", inner2, literal).unwrap();
                         emit_leaf_inline(s, leaf, sync, next);
                         writeln!(s, "break; }}").unwrap();
                     }
                     _ => {
-                        writeln!(s, "{}case {}: {{", inner, literal).unwrap();
-                        emit_dispatch_tree(s, st, sub, sync, next, &format!("{}  ", inner));
-                        writeln!(s, "{}  break;", inner).unwrap();
-                        writeln!(s, "{}}}", inner).unwrap();
+                        writeln!(s, "{}case {}: {{", inner2, literal).unwrap();
+                        emit_dispatch_tree(s, st, sub, sync, next, &format!("{}  ", inner2));
+                        writeln!(s, "{}  break;", inner2).unwrap();
+                        writeln!(s, "{}}}", inner2).unwrap();
                     }
                 }
             }
-            write!(s, "{}default: {{ ", inner).unwrap();
+            write!(s, "{}default: {{ ", inner2).unwrap();
             emit_leaf_inline(s, default, sync, next);
             writeln!(s, "break; }}").unwrap();
+            writeln!(s, "{}}} }} else {{ ", inner).unwrap();
+            emit_leaf_inline(s, default, sync, next);
+            writeln!(s, "}}").unwrap();
             writeln!(s, "{}}}", ind).unwrap();
         }
     }
@@ -507,7 +528,7 @@ fn emit_public_api(s: &mut String, st: &StateTable) {
     .unwrap();
     writeln!(
         s,
-        "        return new Parser(new Lexer(in, MATCHER, TokenKind.EOF.id, TokenKind.ERROR.id), entry, CONFIG);"
+        "        return new Parser(new Lexer(in, MATCHER, TokenKind.EOF.id), entry, CONFIG);"
     )
     .unwrap();
     writeln!(s, "    }}").unwrap();

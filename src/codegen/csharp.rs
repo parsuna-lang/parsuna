@@ -89,17 +89,22 @@ fn pascal_case(s: &str) -> String {
 fn emit_constants(s: &mut String, st: &StateTable) {
     writeln!(
         s,
-        "/// <summary>Token kinds this grammar can emit. <c>Eof</c>/<c>Error</c> are runtime"
+        "/// <summary>Token kinds this grammar can emit. <c>Eof</c> is the runtime"
     )
     .unwrap();
     writeln!(
         s,
-        "/// sentinels; the rest come from the grammar's <c>token</c> declarations.</summary>"
+        "/// sentinel; the rest come from the grammar's <c>token</c> declarations."
     )
     .unwrap();
-    writeln!(s, "public enum TokenKind : short {{").unwrap();
+    writeln!(
+        s,
+        "/// Lex failures (no pattern matched) come through as <c>Token</c>s with"
+    )
+    .unwrap();
+    writeln!(s, "/// <c>Kind == null</c> rather than an in-band error variant.</summary>").unwrap();
+    writeln!(s, "public enum TokenKind : ushort {{").unwrap();
     writeln!(s, "    Eof = 0,").unwrap();
-    writeln!(s, "    Error = -1,").unwrap();
     for t in &st.tokens {
         writeln!(
             s,
@@ -118,7 +123,6 @@ fn emit_constants(s: &mut String, st: &StateTable) {
     )
     .unwrap();
     writeln!(s, "        TokenKind.Eof => \"EOF\",").unwrap();
-    writeln!(s, "        TokenKind.Error => \"ERROR\",").unwrap();
     for t in &st.tokens {
         writeln!(
             s,
@@ -164,13 +168,13 @@ fn emit_constants(s: &mut String, st: &StateTable) {
     writeln!(s).unwrap();
 }
 
-fn token_short(st: &StateTable, kind: u16) -> String {
+fn token_ushort(st: &StateTable, kind: u16) -> String {
     if kind == 0 {
-        return "(short)TokenKind.Eof".to_string();
+        return "(ushort)TokenKind.Eof".to_string();
     }
     match st.tokens.iter().find(|t| t.kind == kind) {
         Some(t) => format!(
-            "(short)TokenKind.{}",
+            "(ushort)TokenKind.{}",
             pascal_case(&t.name.to_lowercase())
         ),
         None => panic!("unknown token id {} while emitting C# backend", kind),
@@ -201,11 +205,7 @@ fn emit_dfa(s: &mut String, st: &StateTable) {
     .unwrap();
     writeln!(s, "        int pos = start;").unwrap();
     writeln!(s, "        int bestLen = 0;").unwrap();
-    writeln!(
-        s,
-        "        int bestKind = (int)(short)TokenKind.Error;"
-    )
-    .unwrap();
+    writeln!(s, "        int bestKind = 0;").unwrap();
     writeln!(s, "        int state = {};", START).unwrap();
     writeln!(s, "        while (true) {{").unwrap();
     writeln!(s, "            switch (state) {{").unwrap();
@@ -254,7 +254,7 @@ fn emit_dfa_state_arm(
             write!(
                 s,
                 " bestLen = pos - start; bestKind = {};",
-                token_short(st, kind)
+                token_ushort(st, kind)
             )
             .unwrap();
         }
@@ -290,9 +290,9 @@ fn emit_tables(s: &mut String, st: &StateTable) {
             .iter()
             .map(|seq| {
                 format!(
-                    "new short[] {{ {} }}",
+                    "new ushort[] {{ {} }}",
                     seq.iter()
-                        .map(|t| token_short(st, *t))
+                        .map(|t| token_ushort(st, *t))
                         .collect::<Vec<_>>()
                         .join(", ")
                 )
@@ -300,7 +300,7 @@ fn emit_tables(s: &mut String, st: &StateTable) {
             .collect();
         writeln!(
             s,
-            "    public static readonly short[][] First{} = new short[][] {{ {} }};",
+            "    public static readonly ushort[][] First{} = new ushort[][] {{ {} }};",
             f.id,
             seqs.join(", ")
         )
@@ -309,11 +309,11 @@ fn emit_tables(s: &mut String, st: &StateTable) {
     for f in &st.sync_sets {
         writeln!(
             s,
-            "    public static readonly short[] Sync{} = new short[] {{ {} }};",
+            "    public static readonly ushort[] Sync{} = new ushort[] {{ {} }};",
             f.id,
             f.kinds
                 .iter()
-                .map(|t| token_short(st, *t))
+                .map(|t| token_ushort(st, *t))
                 .collect::<Vec<_>>()
                 .join(", ")
         )
@@ -324,7 +324,7 @@ fn emit_tables(s: &mut String, st: &StateTable) {
         .tokens
         .iter()
         .filter(|t| t.skip)
-        .map(|t| format!("k == {}", token_short(st, t.kind)))
+        .map(|t| format!("k == {}", token_ushort(st, t.kind)))
         .collect();
     let skip_body = if skips.is_empty() {
         "false".to_string()
@@ -333,7 +333,7 @@ fn emit_tables(s: &mut String, st: &StateTable) {
     };
     writeln!(
         s,
-        "    public static bool IsSkip(short k) => {};",
+        "    public static bool IsSkip(ushort k) => {};",
         skip_body
     )
     .unwrap();
@@ -361,7 +361,7 @@ fn emit_grammar(s: &mut String, st: &StateTable) {
     )
     .unwrap();
     writeln!(s, "        Tables.K,").unwrap();
-    writeln!(s, "        (short)TokenKind.Eof,").unwrap();
+    writeln!(s, "        (ushort)TokenKind.Eof,").unwrap();
     writeln!(s, "        Tables.IsSkip,").unwrap();
     writeln!(s, "        Drive);").unwrap();
     writeln!(s).unwrap();
@@ -369,7 +369,7 @@ fn emit_grammar(s: &mut String, st: &StateTable) {
     writeln!(s, "    private static Parser FromStream(Stream stream, int entry) =>").unwrap();
     writeln!(
         s,
-        "        new Parser(new Lexer(stream, DfaImpl.Matcher, (short)TokenKind.Eof, (short)TokenKind.Error), entry, Config);"
+        "        new Parser(new Lexer(stream, DfaImpl.Matcher, (ushort)TokenKind.Eof), entry, Config);"
     )
     .unwrap();
     writeln!(s).unwrap();
@@ -454,7 +454,7 @@ fn emit_op(s: &mut String, st: &StateTable, op: &Op, self_id: u32) {
             writeln!(
                 s,
                 "                    p.TryConsume({}, Tables.Sync{}, \"{}\");",
-                token_short(st, *kind),
+                token_ushort(st, *kind),
                 sync,
                 token_name
             )
@@ -505,7 +505,7 @@ fn emit_dispatch_tree(
             writeln!(s, "{}switch (p.Look({}).Kind) {{", ind, depth).unwrap();
             let inner = format!("{}  ", ind);
             for (kind, sub) in arms {
-                let lit = format!("(short){}", *kind);
+                let lit = format!("(ushort){}", *kind);
                 match sub {
                     DispatchTree::Leaf(leaf) => {
                         write!(s, "{}case {}: {{ ", inner, lit).unwrap();

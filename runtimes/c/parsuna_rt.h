@@ -30,13 +30,24 @@ typedef struct { Pos start, end; } Span;
 
 /* A lexed token: kind, span, and the matched text.
  *
+ * `kind_ok` is 0 only when the lexer could not match any pattern at the
+ * current position; the scanner still advances by one codepoint so the
+ * parser can recover. Read `kind` only when `kind_ok` is non-zero. EOF
+ * has its own kind value (kind_ok == 1).
+ *
  * `text` and `text_len` describe the matched bytes. In *reader* mode
  * (parser_init_from_read_fn) `text` is a fresh allocation owned by the
  * parser until the next call to parser_next, and is NUL-terminated.
  * In *string* mode (parser_init_from_string) `text` points directly into
  * the caller's source buffer — zero-copy and NOT NUL-terminated; read
  * exactly `text_len` bytes. Use `text_len` in both modes. */
-typedef struct { int kind; Span span; char *text; size_t text_len; } Token;
+typedef struct {
+    uint16_t kind;
+    int      kind_ok;
+    Span     span;
+    char    *text;
+    size_t   text_len;
+} Token;
 
 /* A recoverable parse or lex error. `message` is owned by the parser
  * until the next call to parser_next. */
@@ -64,10 +75,10 @@ typedef struct {
  * bytes written (0 for EOF, negative to signal an error). */
 typedef int (*ReadFn)(void *ctx, char *out, int max);
 
-/* Sentinel value that marks end of `sync` / FIRST sequence arrays.
- * Using -2 avoids colliding with any real token-kind id (EOF = 0,
- * ERROR = -1, grammar tokens >= 1). */
-#define SENTINEL (-2)
+/* Sentinel value that marks end of `sync` / FIRST sequence arrays. We
+ * use UINT16_MAX (0xFFFF) since grammar token-kind ids start at 1 and
+ * a grammar with 65535+ tokens is implausible. */
+#define SENTINEL ((uint16_t)0xFFFF)
 
 /* State id meaning "the parser has terminated". Reserved: real states
  * start at 1, so 0 is unambiguous. */
@@ -75,19 +86,18 @@ typedef int (*ReadFn)(void *ctx, char *out, int max);
 
 /* ---------- monomorphization hooks ----------
  * The including translation unit (the generated `<stem>.c`) must supply
- * four things BEFORE including this header so the runtime can call them
+ * three things BEFORE including this header so the runtime can call them
  * directly instead of going through a Config vtable:
  *
  *   #define PARSUNA_K            <lookahead depth>
  *   #define PARSUNA_EOF_KIND     <token-kind id for EOF>
- *   #define PARSUNA_ERROR_KIND   <token-kind id for lexer ERROR>
  *
  * plus file-scope definitions of:
  *
- *   static int  is_skip(int kind);
+ *   static int  is_skip(uint16_t kind);
  *   static void drive(Parser *p);
  *   static void longest_match_impl(const char *buf, size_t buf_len,
- *                                  size_t start, int *best_kind,
+ *                                  size_t start, uint16_t *best_kind,
  *                                  size_t *best_len, size_t *scanned);
  *
  * The generated .c provides all of these. `is_skip`, `drive`, and
@@ -100,20 +110,18 @@ typedef int (*ReadFn)(void *ctx, char *out, int max);
 #ifndef PARSUNA_EOF_KIND
 #  error "define PARSUNA_EOF_KIND before including parsuna_rt.h"
 #endif
-#ifndef PARSUNA_ERROR_KIND
-#  error "define PARSUNA_ERROR_KIND before including parsuna_rt.h"
-#endif
 
 struct Parser;  /* fwd decl */
-static int  is_skip(int kind);
+static int  is_skip(uint16_t kind);
 static void drive(struct Parser *p);
 /* Compiled DFA: scans buf[start..buf_len] for the longest token. On return,
  * *best_kind/*best_len hold the longest match (best_len == 0 means no
- * accept), and *scanned is the total bytes walked past start. The runtime
- * uses `scanned == buf_len - start` to detect that the scan ran out of
- * buffer rather than hitting a real dead transition. */
+ * accept; *best_kind is meaningless in that case), and *scanned is the
+ * total bytes walked past start. The runtime uses
+ * `scanned == buf_len - start` to detect that the scan ran out of buffer
+ * rather than hitting a real dead transition. */
 static void longest_match_impl(const char *buf, size_t buf_len, size_t start,
-                               int *best_kind, size_t *best_len, size_t *scanned);
+                               uint16_t *best_kind, size_t *best_len, size_t *scanned);
 
 /* Internal queue element; matches Event layout. */
 typedef Event EvQueued;
@@ -173,7 +181,7 @@ static inline size_t utf8_decode(const char *src, size_t at, size_t end, uint32_
     return 4;
 }
 
-static inline int set_contains(const int *set, int k) {
+static inline int set_contains(const uint16_t *set, uint16_t k) {
     for (; *set != SENTINEL; set++) if (*set == k) return 1;
     return 0;
 }
@@ -232,9 +240,9 @@ static inline void lex_advance(Parser *p, size_t n) {
     }
 }
 
-static inline void longest_match(Parser *p, int *best_kind, int *best_len) {
+static inline void longest_match(Parser *p, uint16_t *best_kind, int *best_len) {
     for (;;) {
-        int bk;
+        uint16_t bk;
         size_t bl, scanned;
         longest_match_impl(p->buf, p->buf_len, p->buf_pos, &bk, &bl, &scanned);
         size_t view_len = p->buf_len - p->buf_pos;
@@ -260,10 +268,11 @@ static inline Token lex_next(Parser *p) {
     lex_ensure(p, CHUNK);
     if (p->buf_len - p->buf_pos == 0) {
         Pos pos = { p->offset, p->line, p->col };
-        Token t = { PARSUNA_EOF_KIND, { pos, pos }, NULL, 0 };
+        Token t = { (uint16_t)PARSUNA_EOF_KIND, 1, { pos, pos }, NULL, 0 };
         return t;
     }
-    int best_kind, best_len;
+    uint16_t best_kind;
+    int best_len;
     longest_match(p, &best_kind, &best_len);
     Pos start = { p->offset, p->line, p->col };
     if (best_len == 0) {
@@ -272,13 +281,13 @@ static inline Token lex_next(Parser *p) {
         char *text = make_text(p, n);
         lex_advance(p, n);
         Pos end = { p->offset, p->line, p->col };
-        Token t = { PARSUNA_ERROR_KIND, { start, end }, text, n };
+        Token t = { 0, 0, { start, end }, text, n };
         return t;
     }
     char *text = make_text(p, (size_t)best_len);
     lex_advance(p, (size_t)best_len);
     Pos end = { p->offset, p->line, p->col };
-    Token t = { best_kind, { start, end }, text, (size_t)best_len };
+    Token t = { best_kind, 1, { start, end }, text, (size_t)best_len };
     return t;
 }
 
@@ -328,7 +337,7 @@ static inline void flush_skips_before(Parser *p, uint32_t off) {
 static inline Token pump_token(Parser *p) {
     for (;;) {
         Token t = lex_next(p);
-        if (is_skip(t.kind)) { pending_push(p, t); continue; }
+        if (t.kind_ok && is_skip(t.kind)) { pending_push(p, t); continue; }
         return t;
     }
 }
@@ -364,12 +373,13 @@ static inline int pop_ret(Parser *p) {
 static inline int queue_empty(const Parser *p) { return p->queue_len == 0; }
 static inline Token look(const Parser *p, int i) { return p->look_buf[i]; }
 
-static inline int matches_first(const Parser *p, const int *const *set) {
-    for (const int *const *seq_p = set; *seq_p != NULL; seq_p++) {
-        const int *seq = *seq_p;
+static inline int matches_first(const Parser *p, const uint16_t *const *set) {
+    for (const uint16_t *const *seq_p = set; *seq_p != NULL; seq_p++) {
+        const uint16_t *seq = *seq_p;
         int ok = 1;
         for (int i = 0; seq[i] != SENTINEL; i++) {
-            if (p->look_buf[i].kind != seq[i]) { ok = 0; break; }
+            const Token *lt = &p->look_buf[i];
+            if (!lt->kind_ok || lt->kind != seq[i]) { ok = 0; break; }
         }
         if (ok) return 1;
     }
@@ -403,8 +413,14 @@ static inline void consume(Parser *p) {
     advance_look(p);
 }
 
-static inline void recover_to(Parser *p, const int *sync) {
-    while (p->look_buf[0].kind != PARSUNA_EOF_KIND && !set_contains(sync, p->look_buf[0].kind)) {
+static inline int look_is_eof(const Parser *p) {
+    return p->look_buf[0].kind_ok && p->look_buf[0].kind == (uint16_t)PARSUNA_EOF_KIND;
+}
+
+static inline void recover_to(Parser *p, const uint16_t *sync) {
+    for (;;) {
+        if (look_is_eof(p)) return;
+        if (p->look_buf[0].kind_ok && set_contains(sync, p->look_buf[0].kind)) return;
         EvQueued e = {0};
         e.tag = EV_TOKEN;
         e.token = p->look_buf[0];
@@ -422,15 +438,15 @@ static inline void error_here(Parser *p, const char *msg) {
     emit(p, e);
 }
 
-static inline void try_consume(Parser *p, int kind, const int *sync, const char *name) {
-    if (p->look_buf[0].kind == kind) { consume(p); return; }
+static inline void try_consume(Parser *p, uint16_t kind, const uint16_t *sync, const char *name) {
+    if (p->look_buf[0].kind_ok && p->look_buf[0].kind == kind) { consume(p); return; }
     size_t nlen = strlen(name) + 16;
     char *msg = (char*)malloc(nlen);
     snprintf(msg, nlen, "expected %s", name);
     error_here(p, msg);
     free(msg);
     recover_to(p, sync);
-    if (p->look_buf[0].kind == kind) consume(p);
+    if (p->look_buf[0].kind_ok && p->look_buf[0].kind == kind) consume(p);
 }
 
 /* ---------- lifecycle ---------- */
@@ -500,9 +516,9 @@ static inline int parser_next(Parser *p, Event *out) {
         if (p->state == TERMINATED) {
             if (!p->eof_checked) {
                 p->eof_checked = 1;
-                if (p->look_buf[0].kind != PARSUNA_EOF_KIND) {
+                if (!look_is_eof(p)) {
                     error_here(p, "expected end of input");
-                    while (p->look_buf[0].kind != PARSUNA_EOF_KIND) {
+                    while (!look_is_eof(p)) {
                         EvQueued e = {0};
                         e.tag = EV_TOKEN;
                         e.token = p->look_buf[0];

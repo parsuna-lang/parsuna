@@ -74,18 +74,23 @@ fn emit_constants(s: &mut String, st: &StateTable) {
     writeln!(s, "/**").unwrap();
     writeln!(
         s,
-        " * Token kinds this grammar can emit. `Eof`/`Error` are runtime sentinels;"
+        " * Token kinds this grammar can emit. `Eof` is a runtime sentinel; every"
     )
     .unwrap();
     writeln!(
         s,
-        " * every other variant corresponds to a `token` declaration in the grammar."
+        " * other variant corresponds to a `token` declaration in the grammar."
     )
     .unwrap();
+    writeln!(
+        s,
+        " * Lex failures (no pattern matched) come through as `Token {{ kind: null }}`"
+    )
+    .unwrap();
+    writeln!(s, " * rather than an in-band error variant.").unwrap();
     writeln!(s, " */").unwrap();
     writeln!(s, "export enum TokenKind {{").unwrap();
     writeln!(s, "  Eof = 0,").unwrap();
-    writeln!(s, "  Error = -1,").unwrap();
     for t in &st.tokens {
         writeln!(s, "  {} = {},", pascal(&t.name), t.kind).unwrap();
     }
@@ -99,7 +104,6 @@ fn emit_constants(s: &mut String, st: &StateTable) {
     writeln!(s, "export function tokenKindName(k: TokenKind): string {{").unwrap();
     writeln!(s, "  switch (k) {{").unwrap();
     writeln!(s, "    case TokenKind.Eof: return \"EOF\";").unwrap();
-    writeln!(s, "    case TokenKind.Error: return \"ERROR\";").unwrap();
     for t in &st.tokens {
         writeln!(
             s,
@@ -194,7 +198,7 @@ fn emit_dfa(s: &mut String, st: &StateTable) {
     .unwrap();
     writeln!(s, "  let pos = start;").unwrap();
     writeln!(s, "  let bestLen = 0;").unwrap();
-    writeln!(s, "  let bestKind: TokenKind = TokenKind.Error;").unwrap();
+    writeln!(s, "  let bestKind: TokenKind | null = null;").unwrap();
     writeln!(s, "  let state = {};", START).unwrap();
     writeln!(s, "  for (;;) {{").unwrap();
     writeln!(s, "    switch (state) {{").unwrap();
@@ -501,7 +505,7 @@ fn emit_public_api(s: &mut String, st: &StateTable) {
         .unwrap();
         writeln!(
             s,
-            "  const lex = new Lexer<TokenKind>(src, longestMatch, TokenKind.Eof, TokenKind.Error);"
+            "  const lex = new Lexer<TokenKind>(src, longestMatch, TokenKind.Eof);"
         )
         .unwrap();
         writeln!(

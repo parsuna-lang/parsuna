@@ -25,9 +25,15 @@ export function pointSpan(p: Pos): Span {
   return { start: p, end: p };
 }
 
-/** A lexed token: kind, source span, and the matched text. */
+/**
+ * A lexed token: kind, source span, and the matched text.
+ *
+ * `kind` is `null` only when the lexer could not match any pattern at the
+ * current position; the scanner still advances by one codepoint so parsing
+ * can recover. EOF is its own kind value.
+ */
 export interface Token<TK = number> {
-  kind: TK;
+  kind: TK | null;
   span: Span;
   text: string;
 }
@@ -64,14 +70,15 @@ export type Event<TK = number, RK = number> =
 /**
  * Result of running the grammar-specific compiled DFA over a byte slice.
  *
- * `bestLen`/`bestKind` are the longest match found. `scanned` is how many
+ * `bestLen`/`bestKind` are the longest match found; `bestKind` is `null`
+ * when the scan never reached an accept state. `scanned` is how many
  * bytes the scan actually walked past `start` before it died — equals
  * `buf.length - start` when the scan stopped at end of input rather than
  * at a dead transition.
  */
 export interface DfaMatch<TK> {
   bestLen: number;
-  bestKind: TK;
+  bestKind: TK | null;
   scanned: number;
 }
 
@@ -91,8 +98,8 @@ function decodeBytes(buf: Uint8Array, start: number, end: number): string {
  * Byte-level lexer over a UTF-8 encoded string, driven by a compiled DFA
  * supplied via [`MatcherFunc`].
  *
- * `eofKind` / `errorKind` are the sentinel kinds the runtime emits at
- * end-of-input and on no-match respectively.
+ * `eofKind` is the sentinel kind the runtime emits at end-of-input. Lex
+ * failures (no DFA pattern matched) come through as `Token { kind: null }`.
  */
 export class Lexer<TK extends number> {
   private bytes: Uint8Array;
@@ -104,7 +111,6 @@ export class Lexer<TK extends number> {
     src: string,
     private readonly matcher: MatcherFunc<TK>,
     private readonly eofKind: TK,
-    private readonly errorKind: TK,
   ) {
     this.bytes = new TextEncoder().encode(src);
   }
@@ -152,14 +158,14 @@ export class Lexer<TK extends number> {
 
     const start = this.pos();
     if (bestLen === 0) {
-      // No token pattern matched — emit a single-codepoint error token so
-      // the parser can flag it and keep going.
+      // No token pattern matched — emit a single-codepoint token with
+      // kind = null so the parser can flag it and keep going.
       const b = this.bytes[this.i];
       const cpLen = b < 0x80 ? 1 : b < 0xe0 ? 2 : b < 0xf0 ? 3 : 4;
       const n = Math.min(cpLen, this.bytes.length - this.i);
       const text = decodeBytes(this.bytes, this.i, this.i + n);
       this.advance(n);
-      return { kind: this.errorKind, span: { start, end: this.pos() }, text };
+      return { kind: null, span: { start, end: this.pos() }, text };
     }
     const text = decodeBytes(this.bytes, this.i, this.i + bestLen);
     this.advance(bestLen);
@@ -294,10 +300,10 @@ export class Parser<
 
   /** Consume tokens until lookahead matches `sync` (or EOF). */
   recoverTo(sync: readonly TK[]): void {
-    while (
-      this.lookBuf[0].kind !== this.cfg.eofKind &&
-      sync.indexOf(this.lookBuf[0].kind) < 0
-    ) {
+    for (;;) {
+      const k = this.lookBuf[0].kind;
+      if (k === this.cfg.eofKind) return;
+      if (k !== null && sync.indexOf(k) >= 0) return;
       this.emit({ tag: "token", token: this.lookBuf[0] });
       this.advanceLook();
     }
@@ -347,7 +353,7 @@ export class Parser<
   private pumpToken(): Token<TK> {
     for (;;) {
       const t = this.lex.nextToken();
-      if (this.cfg.isSkip(t.kind)) {
+      if (t.kind !== null && this.cfg.isSkip(t.kind)) {
         this.pendingSkips.push(t);
         continue;
       }

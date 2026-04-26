@@ -142,7 +142,7 @@ fn emit_header(h: &mut String, st: &StateTable, stem: &str, upper: &str) {
     .unwrap();
     writeln!(
         h,
-        "typedef struct {{ int kind; {stem}_Span span; char *text; size_t text_len; }} {stem}_Token;"
+        "typedef struct {{ uint16_t kind; int kind_ok; {stem}_Span span; char *text; size_t text_len; }} {stem}_Token;"
     )
     .unwrap();
     writeln!(h).unwrap();
@@ -219,17 +219,22 @@ fn emit_header(h: &mut String, st: &StateTable, stem: &str, upper: &str) {
 
     writeln!(
         h,
-        "/* Token kinds this grammar can emit. TK_EOF/TK_ERROR are runtime"
+        "/* Token kinds this grammar can emit. TK_EOF is the runtime sentinel;"
     )
     .unwrap();
     writeln!(
         h,
-        " * sentinels; the rest come from the grammar's `token` declarations. */"
+        " * the rest come from the grammar's `token` declarations. Lex failures"
     )
     .unwrap();
+    writeln!(
+        h,
+        " * (no pattern matched) are surfaced via Token.kind_ok == 0 rather than"
+    )
+    .unwrap();
+    writeln!(h, " * an in-band error variant. */").unwrap();
     writeln!(h, "typedef enum {{").unwrap();
     writeln!(h, "  {upper}_TK_EOF = 0,").unwrap();
-    writeln!(h, "  {upper}_TK_ERROR = -1,").unwrap();
     for t in &st.tokens {
         writeln!(h, "  {upper}_TK_{} = {},", t.name, t.kind).unwrap();
     }
@@ -357,12 +362,10 @@ fn emit_impl(c: &mut String, st: &StateTable, stem: &str, upper: &str) {
     writeln!(c, "#include <string.h>").unwrap();
     writeln!(c).unwrap();
     /* Monomorphize the runtime: these #defines are consumed inside
-     * parsuna_rt.h so `look_buf`, is_skip, drive, eof_kind, and
-     * error_kind are baked in at compile time rather than dispatched
-     * through a Config vtable. */
+     * parsuna_rt.h so `look_buf`, is_skip, drive, and eof_kind are baked
+     * in at compile time rather than dispatched through a Config vtable. */
     writeln!(c, "#define PARSUNA_K {}", st.k).unwrap();
     writeln!(c, "#define PARSUNA_EOF_KIND   {upper}_TK_EOF").unwrap();
-    writeln!(c, "#define PARSUNA_ERROR_KIND {upper}_TK_ERROR").unwrap();
     writeln!(c, "#include \"parsuna_rt.h\"").unwrap();
     writeln!(c).unwrap();
     /* ABI compatibility between the public `<stem>_*` types exposed in
@@ -411,7 +414,6 @@ fn emit_name_tables(c: &mut String, st: &StateTable, stem: &str, upper: &str) {
     for t in &st.tokens {
         writeln!(c, "    case {upper}_TK_{}: return \"{}\";", t.name, t.name).unwrap();
     }
-    writeln!(c, "    case {upper}_TK_ERROR: return \"ERROR\";").unwrap();
     writeln!(c, "    case {upper}_TK_EOF: return \"EOF\";").unwrap();
     writeln!(c, "    default: return \"?\";").unwrap();
     writeln!(c, "  }}").unwrap();
@@ -445,12 +447,13 @@ fn emit_dfa(c: &mut String, st: &StateTable, upper: &str) {
     .unwrap();
     writeln!(
         c,
-        "                               int *best_kind, size_t *best_len, size_t *scanned) {{"
+        "                               uint16_t *best_kind, size_t *best_len, size_t *scanned) {{"
     )
     .unwrap();
+    writeln!(c, "  (void){upper}_TK_EOF;").unwrap();
     writeln!(c, "  size_t pos = start;").unwrap();
     writeln!(c, "  size_t bl = 0;").unwrap();
-    writeln!(c, "  int bk = {}_TK_ERROR;", upper).unwrap();
+    writeln!(c, "  uint16_t bk = 0;").unwrap();
     writeln!(c, "  uint32_t state = {}u;", START).unwrap();
     writeln!(c, "  for (;;) {{").unwrap();
     writeln!(c, "    switch (state) {{").unwrap();
@@ -493,7 +496,7 @@ fn emit_dfa_state_arm(
         if let Some(kind) = arm.target_accept {
             write!(
                 c,
-                " bl = pos - start; bk = {};",
+                " bl = pos - start; bk = (uint16_t){};",
                 c_token_name(st, upper, kind)
             )
             .unwrap();
@@ -547,11 +550,11 @@ fn emit_tables(c: &mut String, st: &StateTable, upper: &str) {
             let sep = if parts.is_empty() { "" } else { ", " };
             writeln!(
                 c,
-                "static const int FIRST_{i}_{j}[] = {{ {joined}{sep}SENTINEL }};"
+                "static const uint16_t FIRST_{i}_{j}[] = {{ {joined}{sep}SENTINEL }};"
             )
             .unwrap();
         }
-        write!(c, "static const int *const FIRST_{i}[] = {{").unwrap();
+        write!(c, "static const uint16_t *const FIRST_{i}[] = {{").unwrap();
         for j in 0..f.seqs.len() {
             write!(c, " FIRST_{i}_{j},").unwrap();
         }
@@ -564,7 +567,7 @@ fn emit_tables(c: &mut String, st: &StateTable, upper: &str) {
         let sep = if s.is_empty() { "" } else { ", " };
         writeln!(
             c,
-            "static const int SYNC_{i}[] = {{ {joined}{sep}SENTINEL }};"
+            "static const uint16_t SYNC_{i}[] = {{ {joined}{sep}SENTINEL }};"
         )
         .unwrap();
     }
@@ -572,7 +575,7 @@ fn emit_tables(c: &mut String, st: &StateTable, upper: &str) {
 }
 
 fn emit_skip(c: &mut String, st: &StateTable, upper: &str) {
-    writeln!(c, "static int is_skip(int kind) {{").unwrap();
+    writeln!(c, "static int is_skip(uint16_t kind) {{").unwrap();
     let skips: Vec<String> = st
         .tokens
         .iter()
@@ -654,7 +657,7 @@ fn emit_op(c: &mut String, st: &StateTable, upper: &str, op: &Op, self_id: u32) 
             let name = c_token_name(st, upper, *kind);
             writeln!(
                 c,
-                "      try_consume(p, {name}, SYNC_{sync}, \"{token_name}\");"
+                "      try_consume(p, (uint16_t){name}, SYNC_{sync}, \"{token_name}\");"
             )
             .unwrap()
         }
@@ -703,27 +706,39 @@ fn emit_dispatch_tree(
             arms,
             default,
         } => {
-            writeln!(c, "{}switch (look(p, {}).kind) {{", ind, depth).unwrap();
+            // Tokens with kind_ok == 0 fall through to the default arm
+            // (recovery path); skip the switch entirely in that case.
+            writeln!(
+                c,
+                "{}{{ Token _t{} = look(p, {});",
+                ind, depth, depth
+            )
+            .unwrap();
             let inner = format!("{}  ", ind);
+            writeln!(c, "{}if (_t{}.kind_ok) {{ switch (_t{}.kind) {{", inner, depth, depth).unwrap();
+            let inner2 = format!("{}  ", inner);
             for (kind, sub) in arms {
                 let name = c_token_name(st, upper, *kind);
                 match sub {
                     DispatchTree::Leaf(leaf) => {
-                        write!(c, "{}case {}: {{ ", inner, name).unwrap();
+                        write!(c, "{}case {}: {{ ", inner2, name).unwrap();
                         emit_leaf_inline(c, leaf, sync, next);
                         writeln!(c, "}} break;").unwrap();
                     }
                     _ => {
-                        writeln!(c, "{}case {}: {{", inner, name).unwrap();
-                        emit_dispatch_tree(c, st, upper, sub, sync, next, &format!("{}  ", inner));
-                        writeln!(c, "{}}} break;", inner).unwrap();
+                        writeln!(c, "{}case {}: {{", inner2, name).unwrap();
+                        emit_dispatch_tree(c, st, upper, sub, sync, next, &format!("{}  ", inner2));
+                        writeln!(c, "{}}} break;", inner2).unwrap();
                     }
                 }
             }
-            write!(c, "{}default: {{ ", inner).unwrap();
+            write!(c, "{}default: {{ ", inner2).unwrap();
             emit_leaf_inline(c, default, sync, next);
             writeln!(c, "}} break;").unwrap();
-            writeln!(c, "{}}}", ind).unwrap();
+            writeln!(c, "{}}} }} else {{ ", inner).unwrap();
+            write!(c, "{}", inner2).unwrap();
+            emit_leaf_inline(c, default, sync, next);
+            writeln!(c, "}} }}", ).unwrap();
         }
     }
 }
