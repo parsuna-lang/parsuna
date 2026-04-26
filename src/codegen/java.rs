@@ -333,9 +333,8 @@ fn emit_tables(s: &mut String, st: &StateTable) {
         .unwrap();
     }
 
-    let referenced_first = st.referenced_first_ids();
     for f in &st.first_sets {
-        if !referenced_first.contains(&f.id) {
+        if !f.has_references {
             continue;
         }
         let seqs: Vec<String> = f

@@ -283,7 +283,11 @@ impl Builder<'_> {
         }
         let id = self.first_sets.len() as FirstSetId;
         self.first_intern.insert(seqs.clone(), id);
-        self.first_sets.push(FirstSet { id, seqs });
+        self.first_sets.push(FirstSet {
+            id,
+            seqs,
+            has_references: false,
+        });
         id
     }
 

@@ -563,9 +563,8 @@ fn byte_literal(b: u8) -> String {
 fn emit_tables(c: &mut String, st: &StateTable, upper: &str) {
     /* Lookahead width is baked in via PARSUNA_K at the top of the file. */
 
-    let referenced_first = st.referenced_first_ids();
     for f in &st.first_sets {
-        if !referenced_first.contains(&f.id) {
+        if !f.has_references {
             continue;
         }
         let i = f.id;

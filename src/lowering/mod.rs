@@ -48,6 +48,15 @@ pub struct FirstSet {
     pub id: FirstSetId,
     /// The lookahead sequences that comprise this FIRST set.
     pub seqs: Vec<LookaheadSeq>,
+    /// True if the generated code references this FIRST set at runtime —
+    /// i.e. some `Op::Star` or `Op::Opt` site points at it AND the
+    /// grammar's `k > 1` (LL(1) sites inline the FIRST set into a
+    /// `match` arm pattern at codegen time, so the constant is never
+    /// loaded). `Op::Dispatch` arms also point at FIRST sets but
+    /// consume them at lowering time only — the resulting nested switch
+    /// arms carry concrete token kinds, not pool ids. Backends emit a
+    /// `FIRST_n` constant only when this flag is set.
+    pub has_references: bool,
 }
 
 /// Pool of interned FIRST sets, indexed by [`FirstSetId`].
@@ -310,37 +319,29 @@ pub fn lower(ag: &AnalyzedGrammar) -> StateTable {
     let program = build::build(ag);
     let mut table = layout::layout(program, ag);
     fuse::fuse(&mut table);
+    mark_first_set_references(&mut table);
     table
 }
 
-impl StateTable {
-    /// FIRST-set ids that the generated runtime actually references.
-    ///
-    /// For LL(1) grammars this is empty: code generators inline
-    /// FIRST sets directly into a `match` arm pattern (one alternative
-    /// per token kind) and never look at the FIRST pool at runtime.
-    /// For LL(k>1) grammars only `Op::Star` and `Op::Opt` consult the
-    /// pool — `Op::Dispatch` builds its decision tree from FIRST sets
-    /// at lowering time and emits nested switch arms with concrete
-    /// token kinds, so the original FIRST set id is unreferenced after
-    /// lowering. Backends use this set to skip emitting unreferenced
-    /// FIRST tables.
-    pub fn referenced_first_ids(&self) -> std::collections::BTreeSet<FirstSetId> {
-        let mut ids = std::collections::BTreeSet::new();
-        if self.k == 1 {
-            return ids;
-        }
-        for state in self.states.values() {
-            for op in &state.ops {
-                match op {
-                    Op::Star { first, .. } | Op::Opt { first, .. } => {
-                        ids.insert(*first);
-                    }
-                    _ => {}
+/// Set [`FirstSet::has_references`] on every entry the runtime will
+/// actually consult. See the field's doc comment for the precise rule.
+fn mark_first_set_references(table: &mut StateTable) {
+    if table.k == 1 {
+        return;
+    }
+    let mut referenced = std::collections::BTreeSet::new();
+    for state in table.states.values() {
+        for op in &state.ops {
+            match op {
+                Op::Star { first, .. } | Op::Opt { first, .. } => {
+                    referenced.insert(*first);
                 }
+                _ => {}
             }
         }
-        ids
+    }
+    for f in table.first_sets.iter_mut() {
+        f.has_references = referenced.contains(&f.id);
     }
 }
 
