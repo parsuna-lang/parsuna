@@ -20,20 +20,23 @@ pub enum TokenKind {
     Error = -1,
     Lparen = 1,
     Rparen = 2,
-    Eq = 3,
-    Semi = 4,
-    Pipe = 5,
-    Question = 6,
-    Star = 7,
-    Plus = 8,
-    Dotdot = 9,
-    Dot = 10,
-    Bang = 11,
-    String = 12,
-    Char = 13,
-    Ident = 14,
-    Ws = 15,
-    Comment = 16,
+    Lbrack = 3,
+    Rbrack = 4,
+    Comma = 5,
+    Eq = 6,
+    Semi = 7,
+    Pipe = 8,
+    Question = 9,
+    Star = 10,
+    Plus = 11,
+    Dotdot = 12,
+    Dot = 13,
+    Bang = 14,
+    String = 15,
+    Char = 16,
+    Ident = 17,
+    Ws = 18,
+    Comment = 19,
 }
 
 impl TokenKind {
@@ -48,6 +51,9 @@ impl parsuna_rt::TokenKindEnum for TokenKind {
             TokenKind::Error => "ERROR",
             TokenKind::Lparen => "LPAREN",
             TokenKind::Rparen => "RPAREN",
+            TokenKind::Lbrack => "LBRACK",
+            TokenKind::Rbrack => "RBRACK",
+            TokenKind::Comma => "COMMA",
             TokenKind::Eq => "EQ",
             TokenKind::Semi => "SEMI",
             TokenKind::Pipe => "PIPE",
@@ -76,13 +82,15 @@ impl parsuna_rt::TokenKindEnum for TokenKind {
 #[repr(u16)]
 pub enum RuleKind {
     AltExpr = 0,
-    Atom = 1,
-    CharPrimary = 2,
-    Decl = 3,
-    File = 4,
-    Group = 5,
-    NegClass = 6,
-    SeqExpr = 7,
+    Annot = 1,
+    Annots = 2,
+    Atom = 3,
+    CharPrimary = 4,
+    Decl = 5,
+    File = 6,
+    Group = 7,
+    NegClass = 8,
+    SeqExpr = 9,
 }
 
 impl RuleKind {
@@ -94,6 +102,8 @@ impl parsuna_rt::RuleKindEnum for RuleKind {
     fn name(self) -> &'static str {
         match self {
             RuleKind::AltExpr => "alt_expr",
+            RuleKind::Annot => "annot",
+            RuleKind::Annots => "annots",
             RuleKind::Atom => "atom",
             RuleKind::CharPrimary => "char_primary",
             RuleKind::Decl => "decl",
@@ -143,375 +153,381 @@ impl DfaMatcher<TokenKind> for LexerDfa {
                     Some(&b')') => { pos += 1; state = 10; best_len = pos - start; best_kind = TokenKind::Rparen; }
                     Some(&b'*') => { pos += 1; state = 11; best_len = pos - start; best_kind = TokenKind::Star; }
                     Some(&b'+') => { pos += 1; state = 12; best_len = pos - start; best_kind = TokenKind::Plus; }
-                    Some(&b'.') => { pos += 1; state = 13; best_len = pos - start; best_kind = TokenKind::Dot; }
-                    Some(&b'/') => { pos += 1; state = 14; }
-                    Some(&b';') => { pos += 1; state = 15; best_len = pos - start; best_kind = TokenKind::Semi; }
-                    Some(&b'=') => { pos += 1; state = 16; best_len = pos - start; best_kind = TokenKind::Eq; }
-                    Some(&b'?') => { pos += 1; state = 17; best_len = pos - start; best_kind = TokenKind::Question; }
-                    Some(&(b'A'..=b'Z')) => { pos += 1; state = 18; best_len = pos - start; best_kind = TokenKind::Ident; }
-                    Some(&b'_') => { pos += 1; state = 19; best_len = pos - start; best_kind = TokenKind::Ident; }
-                    Some(&(b'a'..=b'z')) => { pos += 1; state = 20; best_len = pos - start; best_kind = TokenKind::Ident; }
-                    Some(&b'|') => { pos += 1; state = 21; best_len = pos - start; best_kind = TokenKind::Pipe; }
+                    Some(&b',') => { pos += 1; state = 13; best_len = pos - start; best_kind = TokenKind::Comma; }
+                    Some(&b'.') => { pos += 1; state = 14; best_len = pos - start; best_kind = TokenKind::Dot; }
+                    Some(&b'/') => { pos += 1; state = 15; }
+                    Some(&b';') => { pos += 1; state = 16; best_len = pos - start; best_kind = TokenKind::Semi; }
+                    Some(&b'=') => { pos += 1; state = 17; best_len = pos - start; best_kind = TokenKind::Eq; }
+                    Some(&b'?') => { pos += 1; state = 18; best_len = pos - start; best_kind = TokenKind::Question; }
+                    Some(&(b'A'..=b'Z')) => { pos += 1; state = 19; best_len = pos - start; best_kind = TokenKind::Ident; }
+                    Some(&b'[') => { pos += 1; state = 20; best_len = pos - start; best_kind = TokenKind::Lbrack; }
+                    Some(&b']') => { pos += 1; state = 21; best_len = pos - start; best_kind = TokenKind::Rbrack; }
+                    Some(&b'_') => { pos += 1; state = 22; best_len = pos - start; best_kind = TokenKind::Ident; }
+                    Some(&(b'a'..=b'z')) => { pos += 1; state = 23; best_len = pos - start; best_kind = TokenKind::Ident; }
+                    Some(&b'|') => { pos += 1; state = 24; best_len = pos - start; best_kind = TokenKind::Pipe; }
                     _ => break,
                 },
                 2 => match buf.get(pos) {
-                    Some(&b'\t') => { pos += 1; state = 22; best_len = pos - start; best_kind = TokenKind::Ws; }
-                    Some(&b'\n') => { pos += 1; state = 23; best_len = pos - start; best_kind = TokenKind::Ws; }
-                    Some(&b'\r') => { pos += 1; state = 24; best_len = pos - start; best_kind = TokenKind::Ws; }
-                    Some(&b' ') => { pos += 1; state = 25; best_len = pos - start; best_kind = TokenKind::Ws; }
+                    Some(&b'\t') => { pos += 1; state = 25; best_len = pos - start; best_kind = TokenKind::Ws; }
+                    Some(&b'\n') => { pos += 1; state = 26; best_len = pos - start; best_kind = TokenKind::Ws; }
+                    Some(&b'\r') => { pos += 1; state = 27; best_len = pos - start; best_kind = TokenKind::Ws; }
+                    Some(&b' ') => { pos += 1; state = 28; best_len = pos - start; best_kind = TokenKind::Ws; }
                     _ => break,
                 },
                 3 => match buf.get(pos) {
-                    Some(&b'\t') => { pos += 1; state = 22; best_len = pos - start; best_kind = TokenKind::Ws; }
-                    Some(&b'\n') => { pos += 1; state = 23; best_len = pos - start; best_kind = TokenKind::Ws; }
-                    Some(&b'\r') => { pos += 1; state = 24; best_len = pos - start; best_kind = TokenKind::Ws; }
-                    Some(&b' ') => { pos += 1; state = 25; best_len = pos - start; best_kind = TokenKind::Ws; }
+                    Some(&b'\t') => { pos += 1; state = 25; best_len = pos - start; best_kind = TokenKind::Ws; }
+                    Some(&b'\n') => { pos += 1; state = 26; best_len = pos - start; best_kind = TokenKind::Ws; }
+                    Some(&b'\r') => { pos += 1; state = 27; best_len = pos - start; best_kind = TokenKind::Ws; }
+                    Some(&b' ') => { pos += 1; state = 28; best_len = pos - start; best_kind = TokenKind::Ws; }
                     _ => break,
                 },
                 4 => match buf.get(pos) {
-                    Some(&b'\t') => { pos += 1; state = 22; best_len = pos - start; best_kind = TokenKind::Ws; }
-                    Some(&b'\n') => { pos += 1; state = 23; best_len = pos - start; best_kind = TokenKind::Ws; }
-                    Some(&b'\r') => { pos += 1; state = 24; best_len = pos - start; best_kind = TokenKind::Ws; }
-                    Some(&b' ') => { pos += 1; state = 25; best_len = pos - start; best_kind = TokenKind::Ws; }
+                    Some(&b'\t') => { pos += 1; state = 25; best_len = pos - start; best_kind = TokenKind::Ws; }
+                    Some(&b'\n') => { pos += 1; state = 26; best_len = pos - start; best_kind = TokenKind::Ws; }
+                    Some(&b'\r') => { pos += 1; state = 27; best_len = pos - start; best_kind = TokenKind::Ws; }
+                    Some(&b' ') => { pos += 1; state = 28; best_len = pos - start; best_kind = TokenKind::Ws; }
                     _ => break,
                 },
                 5 => match buf.get(pos) {
-                    Some(&b'\t') => { pos += 1; state = 22; best_len = pos - start; best_kind = TokenKind::Ws; }
-                    Some(&b'\n') => { pos += 1; state = 23; best_len = pos - start; best_kind = TokenKind::Ws; }
-                    Some(&b'\r') => { pos += 1; state = 24; best_len = pos - start; best_kind = TokenKind::Ws; }
-                    Some(&b' ') => { pos += 1; state = 25; best_len = pos - start; best_kind = TokenKind::Ws; }
+                    Some(&b'\t') => { pos += 1; state = 25; best_len = pos - start; best_kind = TokenKind::Ws; }
+                    Some(&b'\n') => { pos += 1; state = 26; best_len = pos - start; best_kind = TokenKind::Ws; }
+                    Some(&b'\r') => { pos += 1; state = 27; best_len = pos - start; best_kind = TokenKind::Ws; }
+                    Some(&b' ') => { pos += 1; state = 28; best_len = pos - start; best_kind = TokenKind::Ws; }
                     _ => break,
                 },
                 6 => break,
                 7 => match buf.get(pos) {
-                    Some(&(0x00..=b'\t' | 0x0b..=b'!' | b'#'..=b'[' | b']'..=0xff)) => { pos += 1; state = 26; }
-                    Some(&b'"') => { pos += 1; state = 27; best_len = pos - start; best_kind = TokenKind::String; }
-                    Some(&b'\\') => { pos += 1; state = 28; }
+                    Some(&(0x00..=b'\t' | 0x0b..=b'!' | b'#'..=b'[' | b']'..=0xff)) => { pos += 1; state = 29; }
+                    Some(&b'"') => { pos += 1; state = 30; best_len = pos - start; best_kind = TokenKind::String; }
+                    Some(&b'\\') => { pos += 1; state = 31; }
                     _ => break,
                 },
                 8 => match buf.get(pos) {
-                    Some(&(0x00..=b'\t' | 0x0b..=b'&' | b'('..=b'[' | b']'..=0xff)) => { pos += 1; state = 29; }
-                    Some(&b'\\') => { pos += 1; state = 30; }
+                    Some(&(0x00..=b'\t' | 0x0b..=b'&' | b'('..=b'[' | b']'..=0xff)) => { pos += 1; state = 32; }
+                    Some(&b'\\') => { pos += 1; state = 33; }
                     _ => break,
                 },
                 9 => break,
                 10 => break,
                 11 => break,
                 12 => break,
-                13 => match buf.get(pos) {
-                    Some(&b'.') => { pos += 1; state = 31; best_len = pos - start; best_kind = TokenKind::Dotdot; }
-                    _ => break,
-                },
+                13 => break,
                 14 => match buf.get(pos) {
-                    Some(&b'/') => { pos += 1; state = 32; best_len = pos - start; best_kind = TokenKind::Comment; }
+                    Some(&b'.') => { pos += 1; state = 34; best_len = pos - start; best_kind = TokenKind::Dotdot; }
                     _ => break,
                 },
-                15 => break,
+                15 => match buf.get(pos) {
+                    Some(&b'/') => { pos += 1; state = 35; best_len = pos - start; best_kind = TokenKind::Comment; }
+                    _ => break,
+                },
                 16 => break,
                 17 => break,
-                18 => match buf.get(pos) {
-                    Some(&(b'0'..=b'9')) => { pos += 1; state = 33; best_len = pos - start; best_kind = TokenKind::Ident; }
-                    Some(&(b'A'..=b'Z')) => { pos += 1; state = 34; best_len = pos - start; best_kind = TokenKind::Ident; }
-                    Some(&b'_') => { pos += 1; state = 35; best_len = pos - start; best_kind = TokenKind::Ident; }
-                    Some(&(b'a'..=b'z')) => { pos += 1; state = 36; best_len = pos - start; best_kind = TokenKind::Ident; }
-                    _ => break,
-                },
+                18 => break,
                 19 => match buf.get(pos) {
-                    Some(&(b'0'..=b'9')) => { pos += 1; state = 33; best_len = pos - start; best_kind = TokenKind::Ident; }
-                    Some(&(b'A'..=b'Z')) => { pos += 1; state = 34; best_len = pos - start; best_kind = TokenKind::Ident; }
-                    Some(&b'_') => { pos += 1; state = 35; best_len = pos - start; best_kind = TokenKind::Ident; }
-                    Some(&(b'a'..=b'z')) => { pos += 1; state = 36; best_len = pos - start; best_kind = TokenKind::Ident; }
+                    Some(&(b'0'..=b'9')) => { pos += 1; state = 36; best_len = pos - start; best_kind = TokenKind::Ident; }
+                    Some(&(b'A'..=b'Z')) => { pos += 1; state = 37; best_len = pos - start; best_kind = TokenKind::Ident; }
+                    Some(&b'_') => { pos += 1; state = 38; best_len = pos - start; best_kind = TokenKind::Ident; }
+                    Some(&(b'a'..=b'z')) => { pos += 1; state = 39; best_len = pos - start; best_kind = TokenKind::Ident; }
                     _ => break,
                 },
-                20 => match buf.get(pos) {
-                    Some(&(b'0'..=b'9')) => { pos += 1; state = 33; best_len = pos - start; best_kind = TokenKind::Ident; }
-                    Some(&(b'A'..=b'Z')) => { pos += 1; state = 34; best_len = pos - start; best_kind = TokenKind::Ident; }
-                    Some(&b'_') => { pos += 1; state = 35; best_len = pos - start; best_kind = TokenKind::Ident; }
-                    Some(&(b'a'..=b'z')) => { pos += 1; state = 36; best_len = pos - start; best_kind = TokenKind::Ident; }
-                    _ => break,
-                },
+                20 => break,
                 21 => break,
                 22 => match buf.get(pos) {
-                    Some(&b'\t') => { pos += 1; state = 22; best_len = pos - start; best_kind = TokenKind::Ws; }
-                    Some(&b'\n') => { pos += 1; state = 23; best_len = pos - start; best_kind = TokenKind::Ws; }
-                    Some(&b'\r') => { pos += 1; state = 24; best_len = pos - start; best_kind = TokenKind::Ws; }
-                    Some(&b' ') => { pos += 1; state = 25; best_len = pos - start; best_kind = TokenKind::Ws; }
+                    Some(&(b'0'..=b'9')) => { pos += 1; state = 36; best_len = pos - start; best_kind = TokenKind::Ident; }
+                    Some(&(b'A'..=b'Z')) => { pos += 1; state = 37; best_len = pos - start; best_kind = TokenKind::Ident; }
+                    Some(&b'_') => { pos += 1; state = 38; best_len = pos - start; best_kind = TokenKind::Ident; }
+                    Some(&(b'a'..=b'z')) => { pos += 1; state = 39; best_len = pos - start; best_kind = TokenKind::Ident; }
                     _ => break,
                 },
                 23 => match buf.get(pos) {
-                    Some(&b'\t') => { pos += 1; state = 22; best_len = pos - start; best_kind = TokenKind::Ws; }
-                    Some(&b'\n') => { pos += 1; state = 23; best_len = pos - start; best_kind = TokenKind::Ws; }
-                    Some(&b'\r') => { pos += 1; state = 24; best_len = pos - start; best_kind = TokenKind::Ws; }
-                    Some(&b' ') => { pos += 1; state = 25; best_len = pos - start; best_kind = TokenKind::Ws; }
+                    Some(&(b'0'..=b'9')) => { pos += 1; state = 36; best_len = pos - start; best_kind = TokenKind::Ident; }
+                    Some(&(b'A'..=b'Z')) => { pos += 1; state = 37; best_len = pos - start; best_kind = TokenKind::Ident; }
+                    Some(&b'_') => { pos += 1; state = 38; best_len = pos - start; best_kind = TokenKind::Ident; }
+                    Some(&(b'a'..=b'z')) => { pos += 1; state = 39; best_len = pos - start; best_kind = TokenKind::Ident; }
                     _ => break,
                 },
-                24 => match buf.get(pos) {
-                    Some(&b'\t') => { pos += 1; state = 22; best_len = pos - start; best_kind = TokenKind::Ws; }
-                    Some(&b'\n') => { pos += 1; state = 23; best_len = pos - start; best_kind = TokenKind::Ws; }
-                    Some(&b'\r') => { pos += 1; state = 24; best_len = pos - start; best_kind = TokenKind::Ws; }
-                    Some(&b' ') => { pos += 1; state = 25; best_len = pos - start; best_kind = TokenKind::Ws; }
-                    _ => break,
-                },
+                24 => break,
                 25 => match buf.get(pos) {
-                    Some(&b'\t') => { pos += 1; state = 22; best_len = pos - start; best_kind = TokenKind::Ws; }
-                    Some(&b'\n') => { pos += 1; state = 23; best_len = pos - start; best_kind = TokenKind::Ws; }
-                    Some(&b'\r') => { pos += 1; state = 24; best_len = pos - start; best_kind = TokenKind::Ws; }
-                    Some(&b' ') => { pos += 1; state = 25; best_len = pos - start; best_kind = TokenKind::Ws; }
+                    Some(&b'\t') => { pos += 1; state = 25; best_len = pos - start; best_kind = TokenKind::Ws; }
+                    Some(&b'\n') => { pos += 1; state = 26; best_len = pos - start; best_kind = TokenKind::Ws; }
+                    Some(&b'\r') => { pos += 1; state = 27; best_len = pos - start; best_kind = TokenKind::Ws; }
+                    Some(&b' ') => { pos += 1; state = 28; best_len = pos - start; best_kind = TokenKind::Ws; }
                     _ => break,
                 },
                 26 => match buf.get(pos) {
-                    Some(&(0x00..=b'\t' | 0x0b..=b'!' | b'#'..=b'[' | b']'..=0xff)) => { pos += 1; state = 26; }
-                    Some(&b'"') => { pos += 1; state = 27; best_len = pos - start; best_kind = TokenKind::String; }
-                    Some(&b'\\') => { pos += 1; state = 28; }
+                    Some(&b'\t') => { pos += 1; state = 25; best_len = pos - start; best_kind = TokenKind::Ws; }
+                    Some(&b'\n') => { pos += 1; state = 26; best_len = pos - start; best_kind = TokenKind::Ws; }
+                    Some(&b'\r') => { pos += 1; state = 27; best_len = pos - start; best_kind = TokenKind::Ws; }
+                    Some(&b' ') => { pos += 1; state = 28; best_len = pos - start; best_kind = TokenKind::Ws; }
                     _ => break,
                 },
-                27 => break,
+                27 => match buf.get(pos) {
+                    Some(&b'\t') => { pos += 1; state = 25; best_len = pos - start; best_kind = TokenKind::Ws; }
+                    Some(&b'\n') => { pos += 1; state = 26; best_len = pos - start; best_kind = TokenKind::Ws; }
+                    Some(&b'\r') => { pos += 1; state = 27; best_len = pos - start; best_kind = TokenKind::Ws; }
+                    Some(&b' ') => { pos += 1; state = 28; best_len = pos - start; best_kind = TokenKind::Ws; }
+                    _ => break,
+                },
                 28 => match buf.get(pos) {
-                    Some(&b'"') => { pos += 1; state = 37; }
-                    Some(&b'\'') => { pos += 1; state = 38; }
-                    Some(&b'0') => { pos += 1; state = 39; }
-                    Some(&b'\\') => { pos += 1; state = 40; }
-                    Some(&b'n') => { pos += 1; state = 41; }
-                    Some(&b'r') => { pos += 1; state = 42; }
-                    Some(&b't') => { pos += 1; state = 43; }
-                    Some(&b'u') => { pos += 1; state = 44; }
+                    Some(&b'\t') => { pos += 1; state = 25; best_len = pos - start; best_kind = TokenKind::Ws; }
+                    Some(&b'\n') => { pos += 1; state = 26; best_len = pos - start; best_kind = TokenKind::Ws; }
+                    Some(&b'\r') => { pos += 1; state = 27; best_len = pos - start; best_kind = TokenKind::Ws; }
+                    Some(&b' ') => { pos += 1; state = 28; best_len = pos - start; best_kind = TokenKind::Ws; }
                     _ => break,
                 },
                 29 => match buf.get(pos) {
-                    Some(&b'\'') => { pos += 1; state = 45; best_len = pos - start; best_kind = TokenKind::Char; }
+                    Some(&(0x00..=b'\t' | 0x0b..=b'!' | b'#'..=b'[' | b']'..=0xff)) => { pos += 1; state = 29; }
+                    Some(&b'"') => { pos += 1; state = 30; best_len = pos - start; best_kind = TokenKind::String; }
+                    Some(&b'\\') => { pos += 1; state = 31; }
                     _ => break,
                 },
-                30 => match buf.get(pos) {
-                    Some(&b'"') => { pos += 1; state = 46; }
-                    Some(&b'\'') => { pos += 1; state = 47; }
-                    Some(&b'0') => { pos += 1; state = 48; }
-                    Some(&b'\\') => { pos += 1; state = 49; }
-                    Some(&b'n') => { pos += 1; state = 50; }
-                    Some(&b'r') => { pos += 1; state = 51; }
-                    Some(&b't') => { pos += 1; state = 52; }
-                    Some(&b'u') => { pos += 1; state = 53; }
+                30 => break,
+                31 => match buf.get(pos) {
+                    Some(&b'"') => { pos += 1; state = 40; }
+                    Some(&b'\'') => { pos += 1; state = 41; }
+                    Some(&b'0') => { pos += 1; state = 42; }
+                    Some(&b'\\') => { pos += 1; state = 43; }
+                    Some(&b'n') => { pos += 1; state = 44; }
+                    Some(&b'r') => { pos += 1; state = 45; }
+                    Some(&b't') => { pos += 1; state = 46; }
+                    Some(&b'u') => { pos += 1; state = 47; }
                     _ => break,
                 },
-                31 => break,
                 32 => match buf.get(pos) {
-                    Some(&(0x00..=b'\t' | 0x0b..=0xff)) => { pos += 1; state = 54; best_len = pos - start; best_kind = TokenKind::Comment; }
+                    Some(&b'\'') => { pos += 1; state = 48; best_len = pos - start; best_kind = TokenKind::Char; }
                     _ => break,
                 },
                 33 => match buf.get(pos) {
-                    Some(&(b'0'..=b'9')) => { pos += 1; state = 33; best_len = pos - start; best_kind = TokenKind::Ident; }
-                    Some(&(b'A'..=b'Z')) => { pos += 1; state = 34; best_len = pos - start; best_kind = TokenKind::Ident; }
-                    Some(&b'_') => { pos += 1; state = 35; best_len = pos - start; best_kind = TokenKind::Ident; }
-                    Some(&(b'a'..=b'z')) => { pos += 1; state = 36; best_len = pos - start; best_kind = TokenKind::Ident; }
+                    Some(&b'"') => { pos += 1; state = 49; }
+                    Some(&b'\'') => { pos += 1; state = 50; }
+                    Some(&b'0') => { pos += 1; state = 51; }
+                    Some(&b'\\') => { pos += 1; state = 52; }
+                    Some(&b'n') => { pos += 1; state = 53; }
+                    Some(&b'r') => { pos += 1; state = 54; }
+                    Some(&b't') => { pos += 1; state = 55; }
+                    Some(&b'u') => { pos += 1; state = 56; }
                     _ => break,
                 },
-                34 => match buf.get(pos) {
-                    Some(&(b'0'..=b'9')) => { pos += 1; state = 33; best_len = pos - start; best_kind = TokenKind::Ident; }
-                    Some(&(b'A'..=b'Z')) => { pos += 1; state = 34; best_len = pos - start; best_kind = TokenKind::Ident; }
-                    Some(&b'_') => { pos += 1; state = 35; best_len = pos - start; best_kind = TokenKind::Ident; }
-                    Some(&(b'a'..=b'z')) => { pos += 1; state = 36; best_len = pos - start; best_kind = TokenKind::Ident; }
-                    _ => break,
-                },
+                34 => break,
                 35 => match buf.get(pos) {
-                    Some(&(b'0'..=b'9')) => { pos += 1; state = 33; best_len = pos - start; best_kind = TokenKind::Ident; }
-                    Some(&(b'A'..=b'Z')) => { pos += 1; state = 34; best_len = pos - start; best_kind = TokenKind::Ident; }
-                    Some(&b'_') => { pos += 1; state = 35; best_len = pos - start; best_kind = TokenKind::Ident; }
-                    Some(&(b'a'..=b'z')) => { pos += 1; state = 36; best_len = pos - start; best_kind = TokenKind::Ident; }
+                    Some(&(0x00..=b'\t' | 0x0b..=0xff)) => { pos += 1; state = 57; best_len = pos - start; best_kind = TokenKind::Comment; }
                     _ => break,
                 },
                 36 => match buf.get(pos) {
-                    Some(&(b'0'..=b'9')) => { pos += 1; state = 33; best_len = pos - start; best_kind = TokenKind::Ident; }
-                    Some(&(b'A'..=b'Z')) => { pos += 1; state = 34; best_len = pos - start; best_kind = TokenKind::Ident; }
-                    Some(&b'_') => { pos += 1; state = 35; best_len = pos - start; best_kind = TokenKind::Ident; }
-                    Some(&(b'a'..=b'z')) => { pos += 1; state = 36; best_len = pos - start; best_kind = TokenKind::Ident; }
+                    Some(&(b'0'..=b'9')) => { pos += 1; state = 36; best_len = pos - start; best_kind = TokenKind::Ident; }
+                    Some(&(b'A'..=b'Z')) => { pos += 1; state = 37; best_len = pos - start; best_kind = TokenKind::Ident; }
+                    Some(&b'_') => { pos += 1; state = 38; best_len = pos - start; best_kind = TokenKind::Ident; }
+                    Some(&(b'a'..=b'z')) => { pos += 1; state = 39; best_len = pos - start; best_kind = TokenKind::Ident; }
                     _ => break,
                 },
                 37 => match buf.get(pos) {
-                    Some(&(0x00..=b'\t' | 0x0b..=b'!' | b'#'..=b'[' | b']'..=0xff)) => { pos += 1; state = 26; }
-                    Some(&b'"') => { pos += 1; state = 27; best_len = pos - start; best_kind = TokenKind::String; }
-                    Some(&b'\\') => { pos += 1; state = 28; }
+                    Some(&(b'0'..=b'9')) => { pos += 1; state = 36; best_len = pos - start; best_kind = TokenKind::Ident; }
+                    Some(&(b'A'..=b'Z')) => { pos += 1; state = 37; best_len = pos - start; best_kind = TokenKind::Ident; }
+                    Some(&b'_') => { pos += 1; state = 38; best_len = pos - start; best_kind = TokenKind::Ident; }
+                    Some(&(b'a'..=b'z')) => { pos += 1; state = 39; best_len = pos - start; best_kind = TokenKind::Ident; }
                     _ => break,
                 },
                 38 => match buf.get(pos) {
-                    Some(&(0x00..=b'\t' | 0x0b..=b'!' | b'#'..=b'[' | b']'..=0xff)) => { pos += 1; state = 26; }
-                    Some(&b'"') => { pos += 1; state = 27; best_len = pos - start; best_kind = TokenKind::String; }
-                    Some(&b'\\') => { pos += 1; state = 28; }
+                    Some(&(b'0'..=b'9')) => { pos += 1; state = 36; best_len = pos - start; best_kind = TokenKind::Ident; }
+                    Some(&(b'A'..=b'Z')) => { pos += 1; state = 37; best_len = pos - start; best_kind = TokenKind::Ident; }
+                    Some(&b'_') => { pos += 1; state = 38; best_len = pos - start; best_kind = TokenKind::Ident; }
+                    Some(&(b'a'..=b'z')) => { pos += 1; state = 39; best_len = pos - start; best_kind = TokenKind::Ident; }
                     _ => break,
                 },
                 39 => match buf.get(pos) {
-                    Some(&(0x00..=b'\t' | 0x0b..=b'!' | b'#'..=b'[' | b']'..=0xff)) => { pos += 1; state = 26; }
-                    Some(&b'"') => { pos += 1; state = 27; best_len = pos - start; best_kind = TokenKind::String; }
-                    Some(&b'\\') => { pos += 1; state = 28; }
+                    Some(&(b'0'..=b'9')) => { pos += 1; state = 36; best_len = pos - start; best_kind = TokenKind::Ident; }
+                    Some(&(b'A'..=b'Z')) => { pos += 1; state = 37; best_len = pos - start; best_kind = TokenKind::Ident; }
+                    Some(&b'_') => { pos += 1; state = 38; best_len = pos - start; best_kind = TokenKind::Ident; }
+                    Some(&(b'a'..=b'z')) => { pos += 1; state = 39; best_len = pos - start; best_kind = TokenKind::Ident; }
                     _ => break,
                 },
                 40 => match buf.get(pos) {
-                    Some(&(0x00..=b'\t' | 0x0b..=b'!' | b'#'..=b'[' | b']'..=0xff)) => { pos += 1; state = 26; }
-                    Some(&b'"') => { pos += 1; state = 27; best_len = pos - start; best_kind = TokenKind::String; }
-                    Some(&b'\\') => { pos += 1; state = 28; }
+                    Some(&(0x00..=b'\t' | 0x0b..=b'!' | b'#'..=b'[' | b']'..=0xff)) => { pos += 1; state = 29; }
+                    Some(&b'"') => { pos += 1; state = 30; best_len = pos - start; best_kind = TokenKind::String; }
+                    Some(&b'\\') => { pos += 1; state = 31; }
                     _ => break,
                 },
                 41 => match buf.get(pos) {
-                    Some(&(0x00..=b'\t' | 0x0b..=b'!' | b'#'..=b'[' | b']'..=0xff)) => { pos += 1; state = 26; }
-                    Some(&b'"') => { pos += 1; state = 27; best_len = pos - start; best_kind = TokenKind::String; }
-                    Some(&b'\\') => { pos += 1; state = 28; }
+                    Some(&(0x00..=b'\t' | 0x0b..=b'!' | b'#'..=b'[' | b']'..=0xff)) => { pos += 1; state = 29; }
+                    Some(&b'"') => { pos += 1; state = 30; best_len = pos - start; best_kind = TokenKind::String; }
+                    Some(&b'\\') => { pos += 1; state = 31; }
                     _ => break,
                 },
                 42 => match buf.get(pos) {
-                    Some(&(0x00..=b'\t' | 0x0b..=b'!' | b'#'..=b'[' | b']'..=0xff)) => { pos += 1; state = 26; }
-                    Some(&b'"') => { pos += 1; state = 27; best_len = pos - start; best_kind = TokenKind::String; }
-                    Some(&b'\\') => { pos += 1; state = 28; }
+                    Some(&(0x00..=b'\t' | 0x0b..=b'!' | b'#'..=b'[' | b']'..=0xff)) => { pos += 1; state = 29; }
+                    Some(&b'"') => { pos += 1; state = 30; best_len = pos - start; best_kind = TokenKind::String; }
+                    Some(&b'\\') => { pos += 1; state = 31; }
                     _ => break,
                 },
                 43 => match buf.get(pos) {
-                    Some(&(0x00..=b'\t' | 0x0b..=b'!' | b'#'..=b'[' | b']'..=0xff)) => { pos += 1; state = 26; }
-                    Some(&b'"') => { pos += 1; state = 27; best_len = pos - start; best_kind = TokenKind::String; }
-                    Some(&b'\\') => { pos += 1; state = 28; }
+                    Some(&(0x00..=b'\t' | 0x0b..=b'!' | b'#'..=b'[' | b']'..=0xff)) => { pos += 1; state = 29; }
+                    Some(&b'"') => { pos += 1; state = 30; best_len = pos - start; best_kind = TokenKind::String; }
+                    Some(&b'\\') => { pos += 1; state = 31; }
                     _ => break,
                 },
                 44 => match buf.get(pos) {
-                    Some(&b'{') => { pos += 1; state = 55; }
+                    Some(&(0x00..=b'\t' | 0x0b..=b'!' | b'#'..=b'[' | b']'..=0xff)) => { pos += 1; state = 29; }
+                    Some(&b'"') => { pos += 1; state = 30; best_len = pos - start; best_kind = TokenKind::String; }
+                    Some(&b'\\') => { pos += 1; state = 31; }
                     _ => break,
                 },
-                45 => break,
+                45 => match buf.get(pos) {
+                    Some(&(0x00..=b'\t' | 0x0b..=b'!' | b'#'..=b'[' | b']'..=0xff)) => { pos += 1; state = 29; }
+                    Some(&b'"') => { pos += 1; state = 30; best_len = pos - start; best_kind = TokenKind::String; }
+                    Some(&b'\\') => { pos += 1; state = 31; }
+                    _ => break,
+                },
                 46 => match buf.get(pos) {
-                    Some(&b'\'') => { pos += 1; state = 45; best_len = pos - start; best_kind = TokenKind::Char; }
+                    Some(&(0x00..=b'\t' | 0x0b..=b'!' | b'#'..=b'[' | b']'..=0xff)) => { pos += 1; state = 29; }
+                    Some(&b'"') => { pos += 1; state = 30; best_len = pos - start; best_kind = TokenKind::String; }
+                    Some(&b'\\') => { pos += 1; state = 31; }
                     _ => break,
                 },
                 47 => match buf.get(pos) {
-                    Some(&b'\'') => { pos += 1; state = 45; best_len = pos - start; best_kind = TokenKind::Char; }
+                    Some(&b'{') => { pos += 1; state = 58; }
                     _ => break,
                 },
-                48 => match buf.get(pos) {
-                    Some(&b'\'') => { pos += 1; state = 45; best_len = pos - start; best_kind = TokenKind::Char; }
-                    _ => break,
-                },
+                48 => break,
                 49 => match buf.get(pos) {
-                    Some(&b'\'') => { pos += 1; state = 45; best_len = pos - start; best_kind = TokenKind::Char; }
+                    Some(&b'\'') => { pos += 1; state = 48; best_len = pos - start; best_kind = TokenKind::Char; }
                     _ => break,
                 },
                 50 => match buf.get(pos) {
-                    Some(&b'\'') => { pos += 1; state = 45; best_len = pos - start; best_kind = TokenKind::Char; }
+                    Some(&b'\'') => { pos += 1; state = 48; best_len = pos - start; best_kind = TokenKind::Char; }
                     _ => break,
                 },
                 51 => match buf.get(pos) {
-                    Some(&b'\'') => { pos += 1; state = 45; best_len = pos - start; best_kind = TokenKind::Char; }
+                    Some(&b'\'') => { pos += 1; state = 48; best_len = pos - start; best_kind = TokenKind::Char; }
                     _ => break,
                 },
                 52 => match buf.get(pos) {
-                    Some(&b'\'') => { pos += 1; state = 45; best_len = pos - start; best_kind = TokenKind::Char; }
+                    Some(&b'\'') => { pos += 1; state = 48; best_len = pos - start; best_kind = TokenKind::Char; }
                     _ => break,
                 },
                 53 => match buf.get(pos) {
-                    Some(&b'{') => { pos += 1; state = 56; }
+                    Some(&b'\'') => { pos += 1; state = 48; best_len = pos - start; best_kind = TokenKind::Char; }
                     _ => break,
                 },
                 54 => match buf.get(pos) {
-                    Some(&(0x00..=b'\t' | 0x0b..=0xff)) => { pos += 1; state = 54; best_len = pos - start; best_kind = TokenKind::Comment; }
+                    Some(&b'\'') => { pos += 1; state = 48; best_len = pos - start; best_kind = TokenKind::Char; }
                     _ => break,
                 },
                 55 => match buf.get(pos) {
-                    Some(&(b'0'..=b'9')) => { pos += 1; state = 57; }
-                    Some(&(b'A'..=b'F')) => { pos += 1; state = 58; }
-                    Some(&(b'a'..=b'f')) => { pos += 1; state = 59; }
+                    Some(&b'\'') => { pos += 1; state = 48; best_len = pos - start; best_kind = TokenKind::Char; }
                     _ => break,
                 },
                 56 => match buf.get(pos) {
-                    Some(&(b'0'..=b'9')) => { pos += 1; state = 60; }
-                    Some(&(b'A'..=b'F')) => { pos += 1; state = 61; }
-                    Some(&(b'a'..=b'f')) => { pos += 1; state = 62; }
+                    Some(&b'{') => { pos += 1; state = 59; }
                     _ => break,
                 },
                 57 => match buf.get(pos) {
-                    Some(&(b'0'..=b'9')) => { pos += 1; state = 63; }
-                    Some(&(b'A'..=b'F')) => { pos += 1; state = 64; }
-                    Some(&(b'a'..=b'f')) => { pos += 1; state = 65; }
-                    Some(&b'}') => { pos += 1; state = 66; }
+                    Some(&(0x00..=b'\t' | 0x0b..=0xff)) => { pos += 1; state = 57; best_len = pos - start; best_kind = TokenKind::Comment; }
                     _ => break,
                 },
                 58 => match buf.get(pos) {
-                    Some(&(b'0'..=b'9')) => { pos += 1; state = 63; }
-                    Some(&(b'A'..=b'F')) => { pos += 1; state = 64; }
-                    Some(&(b'a'..=b'f')) => { pos += 1; state = 65; }
-                    Some(&b'}') => { pos += 1; state = 66; }
+                    Some(&(b'0'..=b'9')) => { pos += 1; state = 60; }
+                    Some(&(b'A'..=b'F')) => { pos += 1; state = 61; }
+                    Some(&(b'a'..=b'f')) => { pos += 1; state = 62; }
                     _ => break,
                 },
                 59 => match buf.get(pos) {
                     Some(&(b'0'..=b'9')) => { pos += 1; state = 63; }
                     Some(&(b'A'..=b'F')) => { pos += 1; state = 64; }
                     Some(&(b'a'..=b'f')) => { pos += 1; state = 65; }
-                    Some(&b'}') => { pos += 1; state = 66; }
                     _ => break,
                 },
                 60 => match buf.get(pos) {
-                    Some(&(b'0'..=b'9')) => { pos += 1; state = 67; }
-                    Some(&(b'A'..=b'F')) => { pos += 1; state = 68; }
-                    Some(&(b'a'..=b'f')) => { pos += 1; state = 69; }
-                    Some(&b'}') => { pos += 1; state = 70; }
+                    Some(&(b'0'..=b'9')) => { pos += 1; state = 66; }
+                    Some(&(b'A'..=b'F')) => { pos += 1; state = 67; }
+                    Some(&(b'a'..=b'f')) => { pos += 1; state = 68; }
+                    Some(&b'}') => { pos += 1; state = 69; }
                     _ => break,
                 },
                 61 => match buf.get(pos) {
-                    Some(&(b'0'..=b'9')) => { pos += 1; state = 67; }
-                    Some(&(b'A'..=b'F')) => { pos += 1; state = 68; }
-                    Some(&(b'a'..=b'f')) => { pos += 1; state = 69; }
-                    Some(&b'}') => { pos += 1; state = 70; }
+                    Some(&(b'0'..=b'9')) => { pos += 1; state = 66; }
+                    Some(&(b'A'..=b'F')) => { pos += 1; state = 67; }
+                    Some(&(b'a'..=b'f')) => { pos += 1; state = 68; }
+                    Some(&b'}') => { pos += 1; state = 69; }
                     _ => break,
                 },
                 62 => match buf.get(pos) {
-                    Some(&(b'0'..=b'9')) => { pos += 1; state = 67; }
-                    Some(&(b'A'..=b'F')) => { pos += 1; state = 68; }
-                    Some(&(b'a'..=b'f')) => { pos += 1; state = 69; }
-                    Some(&b'}') => { pos += 1; state = 70; }
+                    Some(&(b'0'..=b'9')) => { pos += 1; state = 66; }
+                    Some(&(b'A'..=b'F')) => { pos += 1; state = 67; }
+                    Some(&(b'a'..=b'f')) => { pos += 1; state = 68; }
+                    Some(&b'}') => { pos += 1; state = 69; }
                     _ => break,
                 },
                 63 => match buf.get(pos) {
-                    Some(&(b'0'..=b'9')) => { pos += 1; state = 63; }
-                    Some(&(b'A'..=b'F')) => { pos += 1; state = 64; }
-                    Some(&(b'a'..=b'f')) => { pos += 1; state = 65; }
-                    Some(&b'}') => { pos += 1; state = 66; }
+                    Some(&(b'0'..=b'9')) => { pos += 1; state = 70; }
+                    Some(&(b'A'..=b'F')) => { pos += 1; state = 71; }
+                    Some(&(b'a'..=b'f')) => { pos += 1; state = 72; }
+                    Some(&b'}') => { pos += 1; state = 73; }
                     _ => break,
                 },
                 64 => match buf.get(pos) {
-                    Some(&(b'0'..=b'9')) => { pos += 1; state = 63; }
-                    Some(&(b'A'..=b'F')) => { pos += 1; state = 64; }
-                    Some(&(b'a'..=b'f')) => { pos += 1; state = 65; }
-                    Some(&b'}') => { pos += 1; state = 66; }
+                    Some(&(b'0'..=b'9')) => { pos += 1; state = 70; }
+                    Some(&(b'A'..=b'F')) => { pos += 1; state = 71; }
+                    Some(&(b'a'..=b'f')) => { pos += 1; state = 72; }
+                    Some(&b'}') => { pos += 1; state = 73; }
                     _ => break,
                 },
                 65 => match buf.get(pos) {
-                    Some(&(b'0'..=b'9')) => { pos += 1; state = 63; }
-                    Some(&(b'A'..=b'F')) => { pos += 1; state = 64; }
-                    Some(&(b'a'..=b'f')) => { pos += 1; state = 65; }
-                    Some(&b'}') => { pos += 1; state = 66; }
+                    Some(&(b'0'..=b'9')) => { pos += 1; state = 70; }
+                    Some(&(b'A'..=b'F')) => { pos += 1; state = 71; }
+                    Some(&(b'a'..=b'f')) => { pos += 1; state = 72; }
+                    Some(&b'}') => { pos += 1; state = 73; }
                     _ => break,
                 },
                 66 => match buf.get(pos) {
-                    Some(&(0x00..=b'\t' | 0x0b..=b'!' | b'#'..=b'[' | b']'..=0xff)) => { pos += 1; state = 26; }
-                    Some(&b'"') => { pos += 1; state = 27; best_len = pos - start; best_kind = TokenKind::String; }
-                    Some(&b'\\') => { pos += 1; state = 28; }
+                    Some(&(b'0'..=b'9')) => { pos += 1; state = 66; }
+                    Some(&(b'A'..=b'F')) => { pos += 1; state = 67; }
+                    Some(&(b'a'..=b'f')) => { pos += 1; state = 68; }
+                    Some(&b'}') => { pos += 1; state = 69; }
                     _ => break,
                 },
                 67 => match buf.get(pos) {
-                    Some(&(b'0'..=b'9')) => { pos += 1; state = 67; }
-                    Some(&(b'A'..=b'F')) => { pos += 1; state = 68; }
-                    Some(&(b'a'..=b'f')) => { pos += 1; state = 69; }
-                    Some(&b'}') => { pos += 1; state = 70; }
+                    Some(&(b'0'..=b'9')) => { pos += 1; state = 66; }
+                    Some(&(b'A'..=b'F')) => { pos += 1; state = 67; }
+                    Some(&(b'a'..=b'f')) => { pos += 1; state = 68; }
+                    Some(&b'}') => { pos += 1; state = 69; }
                     _ => break,
                 },
                 68 => match buf.get(pos) {
-                    Some(&(b'0'..=b'9')) => { pos += 1; state = 67; }
-                    Some(&(b'A'..=b'F')) => { pos += 1; state = 68; }
-                    Some(&(b'a'..=b'f')) => { pos += 1; state = 69; }
-                    Some(&b'}') => { pos += 1; state = 70; }
+                    Some(&(b'0'..=b'9')) => { pos += 1; state = 66; }
+                    Some(&(b'A'..=b'F')) => { pos += 1; state = 67; }
+                    Some(&(b'a'..=b'f')) => { pos += 1; state = 68; }
+                    Some(&b'}') => { pos += 1; state = 69; }
                     _ => break,
                 },
                 69 => match buf.get(pos) {
-                    Some(&(b'0'..=b'9')) => { pos += 1; state = 67; }
-                    Some(&(b'A'..=b'F')) => { pos += 1; state = 68; }
-                    Some(&(b'a'..=b'f')) => { pos += 1; state = 69; }
-                    Some(&b'}') => { pos += 1; state = 70; }
+                    Some(&(0x00..=b'\t' | 0x0b..=b'!' | b'#'..=b'[' | b']'..=0xff)) => { pos += 1; state = 29; }
+                    Some(&b'"') => { pos += 1; state = 30; best_len = pos - start; best_kind = TokenKind::String; }
+                    Some(&b'\\') => { pos += 1; state = 31; }
                     _ => break,
                 },
                 70 => match buf.get(pos) {
-                    Some(&b'\'') => { pos += 1; state = 45; best_len = pos - start; best_kind = TokenKind::Char; }
+                    Some(&(b'0'..=b'9')) => { pos += 1; state = 70; }
+                    Some(&(b'A'..=b'F')) => { pos += 1; state = 71; }
+                    Some(&(b'a'..=b'f')) => { pos += 1; state = 72; }
+                    Some(&b'}') => { pos += 1; state = 73; }
+                    _ => break,
+                },
+                71 => match buf.get(pos) {
+                    Some(&(b'0'..=b'9')) => { pos += 1; state = 70; }
+                    Some(&(b'A'..=b'F')) => { pos += 1; state = 71; }
+                    Some(&(b'a'..=b'f')) => { pos += 1; state = 72; }
+                    Some(&b'}') => { pos += 1; state = 73; }
+                    _ => break,
+                },
+                72 => match buf.get(pos) {
+                    Some(&(b'0'..=b'9')) => { pos += 1; state = 70; }
+                    Some(&(b'A'..=b'F')) => { pos += 1; state = 71; }
+                    Some(&(b'a'..=b'f')) => { pos += 1; state = 72; }
+                    Some(&b'}') => { pos += 1; state = 73; }
+                    _ => break,
+                },
+                73 => match buf.get(pos) {
+                    Some(&b'\'') => { pos += 1; state = 48; best_len = pos - start; best_kind = TokenKind::Char; }
                     _ => break,
                 },
                 _ => break,
@@ -526,33 +542,37 @@ impl DfaMatcher<TokenKind> for LexerDfa {
 pub const K: usize = 1;
 const ENTRY_FILE: u32 = 1;
 const ENTRY_DECL: u32 = 7;
-const ENTRY_ALT_EXPR: u32 = 17;
-const ENTRY_SEQ_EXPR: u32 = 25;
-const ENTRY_GROUP: u32 = 50;
-const ENTRY_ATOM: u32 = 56;
-const ENTRY_CHAR_PRIMARY: u32 = 68;
-const ENTRY_NEG_CLASS: u32 = 80;
+const ENTRY_ANNOTS: u32 = 17;
+const ENTRY_ANNOT: u32 = 27;
+const ENTRY_ALT_EXPR: u32 = 31;
+const ENTRY_SEQ_EXPR: u32 = 39;
+const ENTRY_GROUP: u32 = 64;
+const ENTRY_ATOM: u32 = 70;
+const ENTRY_CHAR_PRIMARY: u32 = 82;
+const ENTRY_NEG_CLASS: u32 = 94;
 
-static FIRST_0: &[&[TokenKind]] = &[&[TokenKind::Question], &[TokenKind::Ident]];
-static FIRST_1: &[&[TokenKind]] = &[&[TokenKind::Question]];
-static FIRST_2: &[&[TokenKind]] = &[&[TokenKind::Pipe]];
-static FIRST_3: &[&[TokenKind]] = &[&[TokenKind::Lparen], &[TokenKind::Dot], &[TokenKind::Bang], &[TokenKind::String], &[TokenKind::Char], &[TokenKind::Ident]];
-static FIRST_4: &[&[TokenKind]] = &[&[TokenKind::Question], &[TokenKind::Star], &[TokenKind::Plus]];
-static FIRST_5: &[&[TokenKind]] = &[&[TokenKind::Star]];
-static FIRST_6: &[&[TokenKind]] = &[&[TokenKind::Plus]];
-static FIRST_7: &[&[TokenKind]] = &[&[TokenKind::Lparen]];
-static FIRST_8: &[&[TokenKind]] = &[&[TokenKind::Dot], &[TokenKind::Bang], &[TokenKind::String], &[TokenKind::Char], &[TokenKind::Ident]];
-static FIRST_9: &[&[TokenKind]] = &[&[TokenKind::Ident]];
-static FIRST_10: &[&[TokenKind]] = &[&[TokenKind::String]];
-static FIRST_11: &[&[TokenKind]] = &[&[TokenKind::Dot], &[TokenKind::Char]];
-static FIRST_12: &[&[TokenKind]] = &[&[TokenKind::Bang]];
-static FIRST_13: &[&[TokenKind]] = &[&[TokenKind::Char]];
-static FIRST_14: &[&[TokenKind]] = &[&[TokenKind::Dotdot]];
-static FIRST_15: &[&[TokenKind]] = &[&[TokenKind::Dot]];
+static FIRST_0: &[&[TokenKind]] = &[&[TokenKind::Ident]];
+static FIRST_1: &[&[TokenKind]] = &[&[TokenKind::Lbrack]];
+static FIRST_2: &[&[TokenKind]] = &[&[TokenKind::Comma]];
+static FIRST_3: &[&[TokenKind]] = &[&[TokenKind::Pipe]];
+static FIRST_4: &[&[TokenKind]] = &[&[TokenKind::Lparen], &[TokenKind::Dot], &[TokenKind::Bang], &[TokenKind::String], &[TokenKind::Char], &[TokenKind::Ident]];
+static FIRST_5: &[&[TokenKind]] = &[&[TokenKind::Question], &[TokenKind::Star], &[TokenKind::Plus]];
+static FIRST_6: &[&[TokenKind]] = &[&[TokenKind::Question]];
+static FIRST_7: &[&[TokenKind]] = &[&[TokenKind::Star]];
+static FIRST_8: &[&[TokenKind]] = &[&[TokenKind::Plus]];
+static FIRST_9: &[&[TokenKind]] = &[&[TokenKind::Lparen]];
+static FIRST_10: &[&[TokenKind]] = &[&[TokenKind::Dot], &[TokenKind::Bang], &[TokenKind::String], &[TokenKind::Char], &[TokenKind::Ident]];
+static FIRST_11: &[&[TokenKind]] = &[&[TokenKind::String]];
+static FIRST_12: &[&[TokenKind]] = &[&[TokenKind::Dot], &[TokenKind::Char]];
+static FIRST_13: &[&[TokenKind]] = &[&[TokenKind::Bang]];
+static FIRST_14: &[&[TokenKind]] = &[&[TokenKind::Char]];
+static FIRST_15: &[&[TokenKind]] = &[&[TokenKind::Dotdot]];
+static FIRST_16: &[&[TokenKind]] = &[&[TokenKind::Dot]];
 
 static SYNC_0: &[TokenKind] = &[TokenKind::Eof];
-static SYNC_1: &[TokenKind] = &[TokenKind::Eof, TokenKind::Question, TokenKind::Ident];
-static SYNC_2: &[TokenKind] = &[TokenKind::Eof, TokenKind::Lparen, TokenKind::Rparen, TokenKind::Semi, TokenKind::Pipe, TokenKind::Question, TokenKind::Star, TokenKind::Plus, TokenKind::Dot, TokenKind::Bang, TokenKind::String, TokenKind::Char, TokenKind::Ident];
+static SYNC_1: &[TokenKind] = &[TokenKind::Eof, TokenKind::Ident];
+static SYNC_2: &[TokenKind] = &[TokenKind::Eof, TokenKind::Rbrack, TokenKind::Comma, TokenKind::Ident];
+static SYNC_3: &[TokenKind] = &[TokenKind::Eof, TokenKind::Lparen, TokenKind::Rparen, TokenKind::Lbrack, TokenKind::Semi, TokenKind::Pipe, TokenKind::Question, TokenKind::Star, TokenKind::Plus, TokenKind::Dot, TokenKind::Bang, TokenKind::String, TokenKind::Char, TokenKind::Ident];
 
 
 /// Zero-sized marker type that carries the generated dispatch logic via
@@ -585,7 +605,7 @@ impl parsuna_rt::Drive<K> for Grammar {
                 }
                 2 => { // file:star
                     match p.look(0).kind {
-                        TokenKind::Question | TokenKind::Ident => {
+                        TokenKind::Ident => {
                             p.push_ret(2); cur = 5;
                         }
                         _ => {
@@ -600,326 +620,381 @@ impl parsuna_rt::Drive<K> for Grammar {
                 5 => { // file:star-body:call:decl
                     p.push_ret(6);
                     p.enter(RuleKind::Decl);
-                    cur = 8;
+                    p.expect(TokenKind::Ident, SYNC_1, "expected IDENT");
+                    p.expect(TokenKind::Eq, SYNC_1, "expected EQ");
+                    p.push_ret(11);
+                    p.enter(RuleKind::AltExpr);
+                    p.push_ret(33);
+                    cur = 39;
                 }
                 6 => { // file:star-body:ret
                     cur = p.ret();
                 }
                 7 => { // decl:enter
                     p.enter(RuleKind::Decl);
-                    cur = 8;
-                }
-                8 => { // decl:opt
-                    match p.look(0).kind {
-                        TokenKind::Question => {
-                            p.push_ret(9); cur = 15;
-                        }
-                        _ => {
-                            cur = 9;
-                        }
-                    }
-                }
-                9 => { // decl:expect:IDENT
                     p.expect(TokenKind::Ident, SYNC_1, "expected IDENT");
                     p.expect(TokenKind::Eq, SYNC_1, "expected EQ");
-                    p.push_ret(12);
+                    p.push_ret(11);
                     p.enter(RuleKind::AltExpr);
-                    p.push_ret(19);
+                    p.push_ret(33);
                     p.enter(RuleKind::SeqExpr);
-                    cur = 26;
+                    cur = 40;
+                }
+                11 => { // decl:opt
+                    match p.look(0).kind {
+                        TokenKind::Lbrack => {
+                            p.push_ret(12); cur = 15;
+                        }
+                        _ => {
+                            cur = 12;
+                        }
+                    }
                 }
                 12 => { // decl:expect:SEMI
                     p.expect(TokenKind::Semi, SYNC_1, "expected SEMI");
                     p.exit(RuleKind::Decl);
                     cur = p.ret();
                 }
-                15 => { // decl:opt-body:expect:QUESTION
-                    p.expect(TokenKind::Question, SYNC_1, "expected QUESTION");
+                15 => { // decl:opt-body:call:annots
+                    p.push_ret(16);
+                    p.enter(RuleKind::Annots);
+                    p.expect(TokenKind::Lbrack, SYNC_1, "expected LBRACK");
+                    p.push_ret(20);
+                    p.enter(RuleKind::Annot);
+                    p.expect(TokenKind::Ident, SYNC_2, "expected IDENT");
+                    p.exit(RuleKind::Annot);
+                    cur = 30;
+                }
+                16 => { // decl:opt-body:ret
                     cur = p.ret();
                 }
-                17 => { // alt_expr:enter
-                    p.enter(RuleKind::AltExpr);
-                    p.push_ret(19);
-                    p.enter(RuleKind::SeqExpr);
-                    cur = 26;
+                17 => { // annots:enter
+                    p.enter(RuleKind::Annots);
+                    p.expect(TokenKind::Lbrack, SYNC_1, "expected LBRACK");
+                    p.push_ret(20);
+                    p.enter(RuleKind::Annot);
+                    p.expect(TokenKind::Ident, SYNC_2, "expected IDENT");
+                    p.exit(RuleKind::Annot);
+                    cur = p.ret();
                 }
-                19 => { // alt_expr:star
+                20 => { // annots:star
                     match p.look(0).kind {
-                        TokenKind::Pipe => {
-                            p.push_ret(19); cur = 22;
+                        TokenKind::Comma => {
+                            p.push_ret(20); cur = 24;
                         }
                         _ => {
-                            cur = 20;
+                            cur = 21;
                         }
                     }
                 }
-                20 => { // alt_expr:exit
+                21 => { // annots:expect:RBRACK
+                    p.expect(TokenKind::Rbrack, SYNC_1, "expected RBRACK");
+                    p.exit(RuleKind::Annots);
+                    cur = p.ret();
+                }
+                24 => { // annots:star-body:expect:COMMA
+                    p.expect(TokenKind::Comma, SYNC_1, "expected COMMA");
+                    p.push_ret(26);
+                    p.enter(RuleKind::Annot);
+                    p.expect(TokenKind::Ident, SYNC_2, "expected IDENT");
+                    p.exit(RuleKind::Annot);
+                    cur = p.ret();
+                }
+                26 => { // annots:star-body:ret
+                    cur = p.ret();
+                }
+                27 => { // annot:enter
+                    p.enter(RuleKind::Annot);
+                    p.expect(TokenKind::Ident, SYNC_2, "expected IDENT");
+                    p.exit(RuleKind::Annot);
+                    cur = p.ret();
+                }
+                30 => { // annot:ret
+                    cur = p.ret();
+                }
+                31 => { // alt_expr:enter
+                    p.enter(RuleKind::AltExpr);
+                    p.push_ret(33);
+                    p.enter(RuleKind::SeqExpr);
+                    cur = 40;
+                }
+                33 => { // alt_expr:star
+                    match p.look(0).kind {
+                        TokenKind::Pipe => {
+                            p.push_ret(33); cur = 36;
+                        }
+                        _ => {
+                            cur = 34;
+                        }
+                    }
+                }
+                34 => { // alt_expr:exit
                     p.exit(RuleKind::AltExpr);
                     cur = p.ret();
                 }
-                22 => { // alt_expr:star-body:expect:PIPE
-                    p.expect(TokenKind::Pipe, SYNC_2, "expected PIPE");
-                    p.push_ret(24);
+                36 => { // alt_expr:star-body:expect:PIPE
+                    p.expect(TokenKind::Pipe, SYNC_3, "expected PIPE");
+                    p.push_ret(38);
                     p.enter(RuleKind::SeqExpr);
-                    cur = 26;
+                    cur = 40;
                 }
-                24 => { // alt_expr:star-body:ret
+                38 => { // alt_expr:star-body:ret
                     cur = p.ret();
                 }
-                25 => { // seq_expr:enter
+                39 => { // seq_expr:enter
                     p.enter(RuleKind::SeqExpr);
-                    cur = 26;
+                    cur = 40;
                 }
-                26 => { // seq_expr:star
+                40 => { // seq_expr:star
                     match p.look(0).kind {
                         TokenKind::Lparen | TokenKind::Dot | TokenKind::Bang | TokenKind::String | TokenKind::Char | TokenKind::Ident => {
-                            p.push_ret(26); cur = 29;
+                            p.push_ret(40); cur = 43;
                         }
                         _ => {
-                            cur = 27;
+                            cur = 41;
                         }
                     }
                 }
-                27 => { // seq_expr:exit
+                41 => { // seq_expr:exit
                     p.exit(RuleKind::SeqExpr);
                     cur = p.ret();
                 }
-                29 => { // seq_expr:star-body:call:_postfix_expr
-                    p.push_ret(30);
-                    p.push_ret(32);
-                    cur = 44;
+                43 => { // seq_expr:star-body:call:_postfix_expr
+                    p.push_ret(44);
+                    p.push_ret(46);
+                    cur = 58;
                 }
-                30 => { // seq_expr:star-body:ret
+                44 => { // seq_expr:star-body:ret
                     cur = p.ret();
                 }
-                32 => { // _postfix_expr:star
+                46 => { // _postfix_expr:star
                     match p.look(0).kind {
                         TokenKind::Question | TokenKind::Star | TokenKind::Plus => {
-                            p.push_ret(32); cur = 34;
+                            p.push_ret(46); cur = 48;
                         }
                         _ => {
-                            cur = 33;
+                            cur = 47;
                         }
                     }
                 }
-                33 => { // _postfix_expr:ret
+                47 => { // _postfix_expr:ret
                     cur = p.ret();
                 }
-                34 => { // _postfix_expr:star-body:call:_quant_op
-                    p.push_ret(35);
-                    cur = 36;
-                }
-                35 => { // _postfix_expr:star-body:ret
-                    cur = p.ret();
-                }
-                36 => { // _quant_op:dispatch
-                    match p.look(0).kind {
-                        TokenKind::Question => { p.push_ret(37); cur = 38; }
-                        TokenKind::Star => { p.push_ret(37); cur = 40; }
-                        TokenKind::Plus => { p.push_ret(37); cur = 42; }
-                        _ => { cur = 37; p.error_here("unexpected token"); p.recover_to(SYNC_2); }
-                    }
-                }
-                37 => { // _quant_op:ret
-                    cur = p.ret();
-                }
-                38 => { // _quant_op:alt0:expect:QUESTION
-                    p.expect(TokenKind::Question, SYNC_2, "expected QUESTION");
-                    cur = p.ret();
-                }
-                40 => { // _quant_op:alt1:expect:STAR
-                    p.expect(TokenKind::Star, SYNC_2, "expected STAR");
-                    cur = p.ret();
-                }
-                42 => { // _quant_op:alt2:expect:PLUS
-                    p.expect(TokenKind::Plus, SYNC_2, "expected PLUS");
-                    cur = p.ret();
-                }
-                44 => { // _primary_expr:dispatch
-                    match p.look(0).kind {
-                        TokenKind::Lparen => { p.push_ret(45); cur = 46; }
-                        TokenKind::Dot => { p.push_ret(45); cur = 48; }
-                        TokenKind::Bang => { p.push_ret(45); cur = 48; }
-                        TokenKind::String => { p.push_ret(45); cur = 48; }
-                        TokenKind::Char => { p.push_ret(45); cur = 48; }
-                        TokenKind::Ident => { p.push_ret(45); cur = 48; }
-                        _ => { cur = 45; p.error_here("unexpected token"); p.recover_to(SYNC_2); }
-                    }
-                }
-                45 => { // _primary_expr:ret
-                    cur = p.ret();
-                }
-                46 => { // _primary_expr:alt0:call:group
-                    p.push_ret(47);
-                    p.enter(RuleKind::Group);
-                    p.expect(TokenKind::Lparen, SYNC_2, "expected LPAREN");
-                    p.push_ret(53);
-                    p.enter(RuleKind::AltExpr);
-                    p.push_ret(19);
-                    p.enter(RuleKind::SeqExpr);
-                    cur = 26;
-                }
-                47 => { // _primary_expr:alt0:ret
-                    cur = p.ret();
-                }
-                48 => { // _primary_expr:alt1:call:atom
+                48 => { // _postfix_expr:star-body:call:_quant_op
                     p.push_ret(49);
-                    p.enter(RuleKind::Atom);
-                    cur = 57;
+                    cur = 50;
                 }
-                49 => { // _primary_expr:alt1:ret
+                49 => { // _postfix_expr:star-body:ret
                     cur = p.ret();
                 }
-                50 => { // group:enter
-                    p.enter(RuleKind::Group);
-                    p.expect(TokenKind::Lparen, SYNC_2, "expected LPAREN");
-                    p.push_ret(53);
-                    p.enter(RuleKind::AltExpr);
-                    p.push_ret(19);
-                    p.enter(RuleKind::SeqExpr);
-                    cur = 26;
+                50 => { // _quant_op:dispatch
+                    match p.look(0).kind {
+                        TokenKind::Question => { p.push_ret(51); cur = 52; }
+                        TokenKind::Star => { p.push_ret(51); cur = 54; }
+                        TokenKind::Plus => { p.push_ret(51); cur = 56; }
+                        _ => { cur = 51; p.error_here("unexpected token"); p.recover_to(SYNC_3); }
+                    }
                 }
-                53 => { // group:expect:RPAREN
-                    p.expect(TokenKind::Rparen, SYNC_2, "expected RPAREN");
+                51 => { // _quant_op:ret
+                    cur = p.ret();
+                }
+                52 => { // _quant_op:alt0:expect:QUESTION
+                    p.expect(TokenKind::Question, SYNC_3, "expected QUESTION");
+                    cur = p.ret();
+                }
+                54 => { // _quant_op:alt1:expect:STAR
+                    p.expect(TokenKind::Star, SYNC_3, "expected STAR");
+                    cur = p.ret();
+                }
+                56 => { // _quant_op:alt2:expect:PLUS
+                    p.expect(TokenKind::Plus, SYNC_3, "expected PLUS");
+                    cur = p.ret();
+                }
+                58 => { // _primary_expr:dispatch
+                    match p.look(0).kind {
+                        TokenKind::Lparen => { p.push_ret(59); cur = 60; }
+                        TokenKind::Dot => { p.push_ret(59); cur = 62; }
+                        TokenKind::Bang => { p.push_ret(59); cur = 62; }
+                        TokenKind::String => { p.push_ret(59); cur = 62; }
+                        TokenKind::Char => { p.push_ret(59); cur = 62; }
+                        TokenKind::Ident => { p.push_ret(59); cur = 62; }
+                        _ => { cur = 59; p.error_here("unexpected token"); p.recover_to(SYNC_3); }
+                    }
+                }
+                59 => { // _primary_expr:ret
+                    cur = p.ret();
+                }
+                60 => { // _primary_expr:alt0:call:group
+                    p.push_ret(61);
+                    p.enter(RuleKind::Group);
+                    p.expect(TokenKind::Lparen, SYNC_3, "expected LPAREN");
+                    p.push_ret(67);
+                    p.enter(RuleKind::AltExpr);
+                    p.push_ret(33);
+                    p.enter(RuleKind::SeqExpr);
+                    cur = 40;
+                }
+                61 => { // _primary_expr:alt0:ret
+                    cur = p.ret();
+                }
+                62 => { // _primary_expr:alt1:call:atom
+                    p.push_ret(63);
+                    p.enter(RuleKind::Atom);
+                    cur = 71;
+                }
+                63 => { // _primary_expr:alt1:ret
+                    cur = p.ret();
+                }
+                64 => { // group:enter
+                    p.enter(RuleKind::Group);
+                    p.expect(TokenKind::Lparen, SYNC_3, "expected LPAREN");
+                    p.push_ret(67);
+                    p.enter(RuleKind::AltExpr);
+                    p.push_ret(33);
+                    p.enter(RuleKind::SeqExpr);
+                    cur = 40;
+                }
+                67 => { // group:expect:RPAREN
+                    p.expect(TokenKind::Rparen, SYNC_3, "expected RPAREN");
                     p.exit(RuleKind::Group);
                     cur = p.ret();
                 }
-                56 => { // atom:enter
+                70 => { // atom:enter
                     p.enter(RuleKind::Atom);
-                    cur = 57;
+                    cur = 71;
                 }
-                57 => { // atom:dispatch
+                71 => { // atom:dispatch
                     match p.look(0).kind {
-                        TokenKind::Dot => { p.push_ret(58); cur = 64; }
-                        TokenKind::Bang => { p.push_ret(58); cur = 66; }
-                        TokenKind::String => { p.push_ret(58); cur = 62; }
-                        TokenKind::Char => { p.push_ret(58); cur = 64; }
-                        TokenKind::Ident => { p.push_ret(58); cur = 60; }
-                        _ => { cur = 58; p.error_here("unexpected token"); p.recover_to(SYNC_2); }
+                        TokenKind::Dot => { p.push_ret(72); cur = 78; }
+                        TokenKind::Bang => { p.push_ret(72); cur = 80; }
+                        TokenKind::String => { p.push_ret(72); cur = 76; }
+                        TokenKind::Char => { p.push_ret(72); cur = 78; }
+                        TokenKind::Ident => { p.push_ret(72); cur = 74; }
+                        _ => { cur = 72; p.error_here("unexpected token"); p.recover_to(SYNC_3); }
                     }
                 }
-                58 => { // atom:exit
+                72 => { // atom:exit
                     p.exit(RuleKind::Atom);
                     cur = p.ret();
                 }
-                60 => { // atom:alt0:expect:IDENT
-                    p.expect(TokenKind::Ident, SYNC_2, "expected IDENT");
+                74 => { // atom:alt0:expect:IDENT
+                    p.expect(TokenKind::Ident, SYNC_3, "expected IDENT");
                     cur = p.ret();
                 }
-                62 => { // atom:alt1:expect:STRING
-                    p.expect(TokenKind::String, SYNC_2, "expected STRING");
+                76 => { // atom:alt1:expect:STRING
+                    p.expect(TokenKind::String, SYNC_3, "expected STRING");
                     cur = p.ret();
                 }
-                64 => { // atom:alt2:call:char_primary
-                    p.push_ret(65);
+                78 => { // atom:alt2:call:char_primary
+                    p.push_ret(79);
                     p.enter(RuleKind::CharPrimary);
-                    cur = 69;
+                    cur = 83;
                 }
-                65 => { // atom:alt2:ret
+                79 => { // atom:alt2:ret
                     cur = p.ret();
                 }
-                66 => { // atom:alt3:call:neg_class
-                    p.push_ret(67);
+                80 => { // atom:alt3:call:neg_class
+                    p.push_ret(81);
                     p.enter(RuleKind::NegClass);
-                    p.expect(TokenKind::Bang, SYNC_2, "expected BANG");
-                    cur = 82;
+                    p.expect(TokenKind::Bang, SYNC_3, "expected BANG");
+                    cur = 96;
                 }
-                67 => { // atom:alt3:ret
+                81 => { // atom:alt3:ret
                     cur = p.ret();
                 }
-                68 => { // char_primary:enter
+                82 => { // char_primary:enter
                     p.enter(RuleKind::CharPrimary);
-                    cur = 69;
+                    cur = 83;
                 }
-                69 => { // char_primary:dispatch
+                83 => { // char_primary:dispatch
                     match p.look(0).kind {
-                        TokenKind::Dot => { p.push_ret(70); cur = 75; }
-                        TokenKind::Char => { p.push_ret(70); cur = 72; }
-                        _ => { cur = 70; p.error_here("unexpected token"); p.recover_to(SYNC_2); }
+                        TokenKind::Dot => { p.push_ret(84); cur = 89; }
+                        TokenKind::Char => { p.push_ret(84); cur = 86; }
+                        _ => { cur = 84; p.error_here("unexpected token"); p.recover_to(SYNC_3); }
                     }
                 }
-                70 => { // char_primary:exit
+                84 => { // char_primary:exit
                     p.exit(RuleKind::CharPrimary);
                     cur = p.ret();
                 }
-                72 => { // char_primary:alt0:expect:CHAR
-                    p.expect(TokenKind::Char, SYNC_2, "expected CHAR");
-                    cur = 73;
+                86 => { // char_primary:alt0:expect:CHAR
+                    p.expect(TokenKind::Char, SYNC_3, "expected CHAR");
+                    cur = 87;
                 }
-                73 => { // char_primary:alt0:opt
+                87 => { // char_primary:alt0:opt
                     match p.look(0).kind {
                         TokenKind::Dotdot => {
-                            p.push_ret(74); cur = 77;
+                            p.push_ret(88); cur = 91;
                         }
                         _ => {
-                            cur = 74;
+                            cur = 88;
                         }
                     }
                 }
-                74 => { // char_primary:alt0:ret
+                88 => { // char_primary:alt0:ret
                     cur = p.ret();
                 }
-                75 => { // char_primary:alt1:expect:DOT
-                    p.expect(TokenKind::Dot, SYNC_2, "expected DOT");
+                89 => { // char_primary:alt1:expect:DOT
+                    p.expect(TokenKind::Dot, SYNC_3, "expected DOT");
                     cur = p.ret();
                 }
-                77 => { // char_primary:alt0:opt-body:expect:DOTDOT
-                    p.expect(TokenKind::Dotdot, SYNC_2, "expected DOTDOT");
-                    p.expect(TokenKind::Char, SYNC_2, "expected CHAR");
+                91 => { // char_primary:alt0:opt-body:expect:DOTDOT
+                    p.expect(TokenKind::Dotdot, SYNC_3, "expected DOTDOT");
+                    p.expect(TokenKind::Char, SYNC_3, "expected CHAR");
                     cur = p.ret();
                 }
-                80 => { // neg_class:enter
+                94 => { // neg_class:enter
                     p.enter(RuleKind::NegClass);
-                    p.expect(TokenKind::Bang, SYNC_2, "expected BANG");
-                    cur = 82;
+                    p.expect(TokenKind::Bang, SYNC_3, "expected BANG");
+                    cur = 96;
                 }
-                82 => { // neg_class:dispatch
+                96 => { // neg_class:dispatch
                     match p.look(0).kind {
-                        TokenKind::Lparen => { p.push_ret(83); cur = 87; }
-                        TokenKind::Dot => { p.push_ret(83); cur = 85; }
-                        TokenKind::Char => { p.push_ret(83); cur = 85; }
-                        _ => { cur = 83; p.error_here("unexpected token"); p.recover_to(SYNC_2); }
+                        TokenKind::Lparen => { p.push_ret(97); cur = 101; }
+                        TokenKind::Dot => { p.push_ret(97); cur = 99; }
+                        TokenKind::Char => { p.push_ret(97); cur = 99; }
+                        _ => { cur = 97; p.error_here("unexpected token"); p.recover_to(SYNC_3); }
                     }
                 }
-                83 => { // neg_class:exit
+                97 => { // neg_class:exit
                     p.exit(RuleKind::NegClass);
                     cur = p.ret();
                 }
-                85 => { // neg_class:alt0:call:char_primary
-                    p.push_ret(86);
+                99 => { // neg_class:alt0:call:char_primary
+                    p.push_ret(100);
                     p.enter(RuleKind::CharPrimary);
-                    cur = 69;
+                    cur = 83;
                 }
-                86 => { // neg_class:alt0:ret
+                100 => { // neg_class:alt0:ret
                     cur = p.ret();
                 }
-                87 => { // neg_class:alt1:expect:LPAREN
-                    p.expect(TokenKind::Lparen, SYNC_2, "expected LPAREN");
-                    p.push_ret(89);
+                101 => { // neg_class:alt1:expect:LPAREN
+                    p.expect(TokenKind::Lparen, SYNC_3, "expected LPAREN");
+                    p.push_ret(103);
                     p.enter(RuleKind::CharPrimary);
-                    cur = 69;
+                    cur = 83;
                 }
-                89 => { // neg_class:alt1:star
+                103 => { // neg_class:alt1:star
                     match p.look(0).kind {
                         TokenKind::Pipe => {
-                            p.push_ret(89); cur = 92;
+                            p.push_ret(103); cur = 106;
                         }
                         _ => {
-                            cur = 90;
+                            cur = 104;
                         }
                     }
                 }
-                90 => { // neg_class:alt1:expect:RPAREN
-                    p.expect(TokenKind::Rparen, SYNC_2, "expected RPAREN");
+                104 => { // neg_class:alt1:expect:RPAREN
+                    p.expect(TokenKind::Rparen, SYNC_3, "expected RPAREN");
                     cur = p.ret();
                 }
-                92 => { // neg_class:alt1:star-body:expect:PIPE
-                    p.expect(TokenKind::Pipe, SYNC_2, "expected PIPE");
-                    p.push_ret(94);
+                106 => { // neg_class:alt1:star-body:expect:PIPE
+                    p.expect(TokenKind::Pipe, SYNC_3, "expected PIPE");
+                    p.push_ret(108);
                     p.enter(RuleKind::CharPrimary);
-                    cur = 69;
+                    cur = 83;
                 }
-                94 => { // neg_class:alt1:star-body:ret
+                108 => { // neg_class:alt1:star-body:ret
                     cur = p.ret();
                 }
                 _ => unreachable!("unknown state"),
@@ -959,6 +1034,36 @@ pub fn parse_decl_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind
 /// input size.
 pub fn parse_decl_from_reader<R: Read>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>> {
     Parser::new(StreamingLexer::new(reader), ENTRY_DECL)
+}
+
+/// Parse the `annots` rule from an in-memory string.
+///
+/// Zero-copy: tokens borrow their text from `src`.
+pub fn parse_annots_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>> {
+    Parser::new(Scanner::new(src), ENTRY_ANNOTS)
+}
+
+/// Parse the `annots` rule from any [`Read`] source.
+///
+/// Streaming: tokens own their text; memory use stays bounded regardless of
+/// input size.
+pub fn parse_annots_from_reader<R: Read>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>> {
+    Parser::new(StreamingLexer::new(reader), ENTRY_ANNOTS)
+}
+
+/// Parse the `annot` rule from an in-memory string.
+///
+/// Zero-copy: tokens borrow their text from `src`.
+pub fn parse_annot_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>> {
+    Parser::new(Scanner::new(src), ENTRY_ANNOT)
+}
+
+/// Parse the `annot` rule from any [`Read`] source.
+///
+/// Streaming: tokens own their text; memory use stays bounded regardless of
+/// input size.
+pub fn parse_annot_from_reader<R: Read>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>> {
+    Parser::new(StreamingLexer::new(reader), ENTRY_ANNOT)
 }
 
 /// Parse the `alt_expr` rule from an in-memory string.

@@ -181,7 +181,7 @@ export interface ParserConfig<TK extends number, RK extends number> {
   k: number;
   /** EOF kind sentinel (matches the one passed to the `Lexer`). */
   eofKind: TK;
-  /** Whether a given token kind is a `?`-prefixed skip. */
+  /** Whether a given token kind is a `[skip]`-annotated skip. */
   isSkip: (kind: TK) => boolean;
   /** Grammar-specific state-machine step. Called when the queue is empty. */
   drive: (p: Parser<TK, RK>) => void;

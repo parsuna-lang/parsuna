@@ -256,7 +256,7 @@ mod tests {
     #[test]
     fn emit_includes_extras_for_skip_tokens_and_rule_names() {
         let ag = analyze_src(
-            "?WS = \" \"+; T = \"t\"; main = T;",
+            "WS = \" \"+ [skip]; T = \"t\"; main = T;",
             "demo",
         );
         let js = emit(&ag);

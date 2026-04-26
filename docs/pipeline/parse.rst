@@ -36,7 +36,7 @@ The parse produces a flat ``Grammar``:
   from the input file's stem (or from ``--name`` when given).
 * ``tokens: Vec<TokenDef>`` — every token declaration in source
   order. Each ``TokenDef`` records the name, the body
-  (``TokenPattern``), the ``skip`` flag (``?`` prefix), the
+  (``TokenPattern``), the ``skip`` flag (``[skip]`` annotation), the
   ``is_fragment`` flag (``_`` prefix), and a source span.
 * ``rules: Vec<RuleDef>`` — every rule declaration in source order.
   Each ``RuleDef`` records the name, the body (``Expr``), the

@@ -136,11 +136,12 @@ never drift from the grammar.
 Tokens, skips, and whitespace
 -----------------------------
 
-Skip tokens (``?WS``, ``?COMMENT``) are re-attached to the event
-stream just before the next structural event that follows them in
-source order. Consumers who only care about structure can filter by
-event tag; consumers building a formatter or a highlighter see the
-skips in the correct positions.
+Skip tokens (those declared with the ``[skip]`` annotation, such as
+``WS`` and ``COMMENT``) are re-attached to the event stream just
+before the next structural event that follows them in source order.
+Consumers who only care about structure can filter by event tag;
+consumers building a formatter or a highlighter see the skips in the
+correct positions.
 
 ``Error`` events do not consume the token they attach to — the parser
 still either consumes it (if recovery synchronizes on it) or skips it

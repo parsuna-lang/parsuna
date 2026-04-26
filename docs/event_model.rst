@@ -94,8 +94,8 @@ the right node type, and switch on ``ev.token.kind`` inside
 Skip tokens
 -----------
 
-Tokens declared with the ``?`` prefix (whitespace, comments) are
-**skips**. The parser's state machine does not see them — they are
+Tokens declared with the ``[skip]`` annotation (whitespace, comments)
+are **skips**. The parser's state machine does not see them — they are
 never consumed by ``Expect`` or examined by lookahead. The runtime
 re-inserts them into the event stream just before the next structural
 event, so consumers that want trivia (formatters, highlighters) see

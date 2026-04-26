@@ -1,6 +1,8 @@
-
 LPAREN   = "(";
 RPAREN   = ")";
+LBRACK   = "[";
+RBRACK   = "]";
+COMMA    = ",";
 EQ       = "=";
 SEMI     = ";";
 PIPE     = "|";
@@ -18,12 +20,15 @@ STRING = "\"" ( !('"' | '\\' | '\n') | _ESCAPE )* "\"";
 CHAR   = "'"  ( !('\'' | '\\' | '\n') | _ESCAPE ) "'";
 IDENT  = ('A'..'Z' | 'a'..'z' | '_') ('A'..'Z' | 'a'..'z' | '_' | '0'..'9')*;
 
-?WS      = (' ' | '\t' | '\r' | '\n')+;
-?COMMENT = "//" (!'\n')*;
+WS      = (' ' | '\t' | '\r' | '\n')+  [skip];
+COMMENT = "//" (!'\n')*                [skip];
 
 file = decl*;
 
-decl = QUESTION? IDENT EQ alt_expr SEMI;
+decl = IDENT EQ alt_expr annots? SEMI;
+
+annots = LBRACK annot (COMMA annot)* RBRACK;
+annot  = IDENT;
 
 alt_expr = seq_expr (PIPE seq_expr)*;
 seq_expr = _postfix_expr*;

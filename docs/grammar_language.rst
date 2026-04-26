@@ -12,7 +12,9 @@ Declarations
 
 Every declaration has the form::
 
-    [?] name = body ;
+    name = body [annot, ...] ;
+
+The annotation block is optional.
 
 Whether the declaration is a token or a rule is determined by the case
 of the first letter of ``name`` (skipping a leading ``_``):
@@ -22,21 +24,21 @@ of the first letter of ``name`` (skipping a leading ``_``):
 * A **lowercase** initial makes it a rule: ``expr``, ``statement``,
   ``_parenthesized``.
 
-Two optional prefixes modify the meaning:
+A trailing ``[name, ...]`` block attaches **annotations** to the
+declaration. The only annotation recognised today is ``skip``, which
+marks a token as a **skip token**: the lexer still matches it, but the
+parser drops it from the structural event stream. Skip tokens are
+still delivered to consumers as events — they just appear outside any
+``Enter``/``Exit`` scope, interleaved with structure in source order.
+``skip`` only applies to tokens; ``[skip]`` on a rule is an error, and
+unknown annotation names are rejected.
 
-* ``?`` marks a **skip token**. The lexer still matches it, but the
-  parser drops it from the structural event stream. Skip tokens are
-  still delivered to consumers as events — they just appear outside
-  any ``Enter``/``Exit`` scope, interleaved with structure in source
-  order. Only tokens can be skip-tokens; ``?`` on a rule is an error.
-* ``_`` marks a **fragment**. Fragment tokens can be referenced from
-  other token bodies but are not themselves produced at runtime; they
-  are inlined into their callers before the lexer DFA is built.
-  Fragment rules are inlined the same way — a fragment rule emits no
-  ``Enter``/``Exit`` event and is not part of the public parser API.
-
-The two markers can be combined only meaningfully on tokens — ``?_`` or
-``_?`` are rejected.
+A leading ``_`` marks a **fragment**. Fragment tokens can be referenced
+from other token bodies but are not themselves produced at runtime;
+they are inlined into their callers before the lexer DFA is built.
+Fragment rules are inlined the same way — a fragment rule emits no
+``Enter``/``Exit`` event and is not part of the public parser API.
+Combining ``_`` with ``[skip]`` on the same token is rejected.
 
 Token patterns
 --------------
@@ -71,7 +73,7 @@ Example: declaring identifier, integer, and whitespace tokens::
 
     IDENT  = ('A'..'Z' | 'a'..'z' | '_') ('A'..'Z' | 'a'..'z' | '_' | '0'..'9')*;
     INT    = ('0'..'9')+;
-    ?WS    = (' ' | '\t' | '\r' | '\n')+;
+    WS     = (' ' | '\t' | '\r' | '\n')+ [skip];
 
 The names ``EOF`` and ``ERROR`` are reserved; the runtime emits them as
 sentinels for end-of-input and no-match respectively.

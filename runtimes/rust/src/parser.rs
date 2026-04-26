@@ -22,8 +22,8 @@ pub const TERMINATED: u32 = 0;
 pub trait Drive<const K: usize>: Sized {
     type TokenKind: TokenKindEnum;
     type RuleKind: RuleKindEnum;
-    /// True iff the grammar has any `?`-prefixed skip tokens. Lets the
-    /// runtime skip the pending-skip bookkeeping when no skips exist.
+    /// True iff the grammar declares any `[skip]`-annotated tokens. Lets
+    /// the runtime skip the pending-skip bookkeeping when no skips exist.
     const HAS_SKIPS: bool;
     /// Does `kind` denote a skip token (dropped from the structural stream
     /// and re-attached around structural events)?
@@ -39,8 +39,8 @@ pub trait Drive<const K: usize>: Sized {
 /// LL(k)), a return stack, and a queue of events waiting to be emitted.
 /// Each call to [`next_event`](Self::next_event) either drains a pending
 /// event from the queue or asks the generated code to execute states until
-/// one is produced. Skip tokens (`?`-prefixed in the grammar) are held in a
-/// side queue and flushed into the output stream just before the next
+/// one is produced. Skip tokens (`[skip]`-annotated in the grammar) are
+/// held in a side queue and flushed into the output stream just before the next
 /// structural event, so consumers see whitespace and comments in the
 /// correct positions without the state machine needing to handle them.
 pub struct Parser<'a, L: LexerBackend<'a, G::TokenKind>, const K: usize, G: Drive<K>> {

@@ -114,7 +114,7 @@ pub struct TokenInfo {
     pub name: String,
     /// Token body with every `Ref` inlined, ready for the DFA builder.
     pub pattern: TokenPattern,
-    /// True if the token is `?`-prefixed (skip): matched but dropped from
+    /// True if the token is `[skip]`-annotated: matched but dropped from
     /// the structural stream.
     pub skip: bool,
     /// Dense, 1-based numeric id. `0` and `-1` are reserved for EOF and
@@ -428,7 +428,7 @@ mod tests {
 
     #[test]
     fn skip_tokens_get_kind_but_arent_referenced_by_rules() {
-        let ag = analyze_src("?WS = \" \"+; T = \"t\"; main = T;");
+        let ag = analyze_src("WS = \" \"+ [skip]; T = \"t\"; main = T;");
         let st = lower(&ag);
         let ws = st.tokens.iter().find(|t| t.name == "WS").expect("WS");
         assert!(ws.skip);

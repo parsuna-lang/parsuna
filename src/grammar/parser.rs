@@ -154,9 +154,9 @@ fn read_decl<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>, g: &mut G
 
     // Case conventions disambiguate tokens from rules: the first letter
     // (skipping any leading `_` fragment marker) must be uppercase for a
-    // token and lowercase for a rule. The `?` prefix, when present, marks
-    // a skip token and must therefore only be applied to tokens.
-    let skip = r.eat_token(TokenKind::Question).is_some();
+    // token and lowercase for a rule. A trailing `[skip, ...]` block
+    // attaches per-declaration annotations; the only one currently
+    // recognized is `skip`, which marks a token as a skip-token.
     let name_tok = r.next_token();
     let name: String = name_tok.text.clone().into_owned();
     let is_fragment = name.starts_with('_');
@@ -170,16 +170,36 @@ fn read_decl<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>, g: &mut G
     } else {
         (Some(read_alt(r)), None)
     };
+    let annots = read_annots(r);
     let semi = r.next_token();
     r.expect_exit(RuleKind::Decl);
 
     let decl_span = Span::join(name_tok.span, semi.span);
 
+    let mut skip_span: Option<Span> = None;
+    for (aname, aspan) in &annots {
+        match aname.as_str() {
+            "skip" => {
+                skip_span = Some(*aspan);
+            }
+            other => {
+                r.issues.push(
+                    Error::new(format!(
+                        "unknown annotation `{}`; supported annotations: skip",
+                        other
+                    ))
+                    .at(*aspan),
+                );
+            }
+        }
+    }
+    let skip = skip_span.is_some();
+
     if is_token {
         if skip && is_fragment {
             r.issues.push(
                 Error::new(format!(
-                    "token `{}` is both `?`-prefixed (skip) and `_`-prefixed (fragment); pick one",
+                    "token `{}` is both marked `skip` and `_`-prefixed (fragment); pick one",
                     name
                 ))
                 .at(name_tok.span),
@@ -197,13 +217,13 @@ fn read_decl<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>, g: &mut G
             span: decl_span,
         });
     } else if initial.is_some() {
-        if skip {
+        if let Some(span) = skip_span {
             r.issues.push(
                 Error::new(format!(
-                    "`?` marks a skip token and only applies to tokens, not rules; drop it on `{}`",
+                    "annotation `skip` only applies to tokens, not rules; drop it on `{}`",
                     name
                 ))
-                .at(name_tok.span),
+                .at(span),
             );
         }
         if g.rules.contains_key(&name) {
@@ -225,6 +245,29 @@ fn read_decl<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>, g: &mut G
             .at(name_tok.span),
         );
     }
+}
+
+fn read_annots<'a, I: Iterator<Item = Event<'a>>>(
+    r: &mut Reader<'a, I>,
+) -> Vec<(String, Span)> {
+    if r.peek_enter() != Some(RuleKind::Annots) {
+        return Vec::new();
+    }
+    r.expect_enter(RuleKind::Annots);
+    let _lbrack = r.next_token();
+    let mut out = Vec::new();
+    while r.peek_enter() == Some(RuleKind::Annot) {
+        r.expect_enter(RuleKind::Annot);
+        let name_tok = r.next_token();
+        r.expect_exit(RuleKind::Annot);
+        out.push((name_tok.text.into_owned(), name_tok.span));
+        if r.eat_token(TokenKind::Comma).is_none() {
+            break;
+        }
+    }
+    let _rbrack = r.next_token();
+    r.expect_exit(RuleKind::Annots);
+    out
 }
 
 fn initial_letter(name: &str) -> Option<char> {
@@ -652,11 +695,22 @@ mod tests {
     }
 
     #[test]
-    fn skip_prefix_marks_token_as_skip() {
-        let g = parse_grammar("?WS = \" \"+; T = \"t\"; main = T;").expect("ok");
+    fn skip_annotation_marks_token_as_skip() {
+        let g = parse_grammar("WS = \" \"+ [skip]; T = \"t\"; main = T;").expect("ok");
         let ws = g.tokens.get("WS").expect("WS");
         assert!(ws.skip);
         assert!(!ws.is_fragment);
+    }
+
+    #[test]
+    fn multiple_annotations_in_brackets() {
+        // Only `skip` is recognized today; unknown names should error.
+        let errs = parse_grammar("WS = \" \"+ [skip, foo]; T = \"t\"; main = T;")
+            .err()
+            .expect("err");
+        assert!(errs
+            .iter()
+            .any(|e| e.message.contains("unknown annotation `foo`")));
     }
 
     #[test]
@@ -672,8 +726,10 @@ mod tests {
 
     #[test]
     fn skip_and_fragment_combo_rejected() {
-        // `?_X` is both skip and fragment — should produce an error.
-        let errs = parse_grammar("?_X = \"x\"; T = \"t\"; main = T;").err().expect("err");
+        // `_X` (fragment) marked `[skip]` should produce an error.
+        let errs = parse_grammar("_X = \"x\" [skip]; T = \"t\"; main = T;")
+            .err()
+            .expect("err");
         assert!(errs
             .iter()
             .any(|e| e.message.contains("skip") && e.message.contains("fragment")));
@@ -681,8 +737,8 @@ mod tests {
 
     #[test]
     fn skip_on_rule_is_rejected() {
-        // `?` is only valid on tokens, not rules.
-        let errs = parse_grammar("T = \"t\"; ?main = T;").err().expect("err");
+        // `[skip]` is only valid on tokens, not rules.
+        let errs = parse_grammar("T = \"t\"; main = T [skip];").err().expect("err");
         assert!(errs.iter().any(|e| e.message.contains("only applies to tokens")));
     }
 

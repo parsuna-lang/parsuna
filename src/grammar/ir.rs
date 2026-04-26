@@ -49,7 +49,7 @@ impl Grammar {
 
 /// A single token declaration.
 ///
-/// `skip` comes from a `?`-prefix in the grammar and causes the runtime to
+/// `skip` comes from a `[skip]` annotation in the grammar and causes the runtime to
 /// drop the token from the structural event stream (while still surfacing
 /// it alongside neighbouring events). `is_fragment` comes from a `_`-prefix
 /// and means "usable in other token patterns but not itself a token kind".
@@ -59,7 +59,7 @@ pub struct TokenDef {
     pub name: String,
     /// Regular-expression-style body that matches this token.
     pub pattern: TokenPattern,
-    /// Marked `?TOKEN`: matched but dropped from the structural event
+    /// Marked `[skip]`: matched but dropped from the structural event
     /// stream (whitespace, comments, etc.).
     pub skip: bool,
     /// Marked `_TOKEN`: usable inside other token patterns but not itself
