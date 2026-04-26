@@ -136,6 +136,7 @@ mod tests {
             id: 0,
             arms: vec![],
             accept: None,
+            self_loop: vec![],
         }]
     }
 

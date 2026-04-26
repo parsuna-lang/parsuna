@@ -41,6 +41,12 @@ pub struct DfaState {
     /// accept state. Filled by taking the minimum (= highest priority) of
     /// the NFA states collapsed into this DFA state.
     pub accept: Option<u16>,
+    /// Byte ranges in this state's transition table that loop back to the
+    /// state itself. Empty when the state has no self-loop. Backends can
+    /// use this to emit a "scan past every byte in this set" prologue
+    /// before the per-byte switch — turns the byte-by-byte hot loop on
+    /// `[a-z]+`-like states into one bulk scan.
+    pub self_loop: Vec<(u8, u8)>,
 }
 
 /// One `match`/`switch` arm in a generated DFA state: every byte that
@@ -69,7 +75,10 @@ pub struct ByteArm {
 /// is constant.
 pub fn compile(tokens: &[TokenInfo]) -> Vec<DfaState> {
     let nfa = build_nfa(tokens);
-    subset_construct(&nfa)
+    let dfa = subset_construct(&nfa);
+    let mut dfa = minimize(dfa);
+    detect_self_loops(&mut dfa);
+    dfa
 }
 
 type NfaStateId = usize;
@@ -586,6 +595,168 @@ fn new_dfa_state(id: u32, nfa: &Nfa, set: &BTreeSet<NfaStateId>) -> DfaState {
         id,
         arms: Vec::new(),
         accept,
+        self_loop: Vec::new(),
+    }
+}
+
+// =====================
+// DFA minimization (partition refinement)
+// =====================
+
+/// Hopcroft-style partition refinement: merge DFA states that recognise
+/// the same language. Two states are equivalent when they have the same
+/// `accept` value and every byte transitions both states into the same
+/// equivalence class. The output preserves longest-match semantics, which
+/// is what the lexer cares about — accept visits along any input trace
+/// stay on the same input position.
+///
+/// Without this pass subset construction over a UTF-8 NFA produces many
+/// nearly-identical states (e.g. four separate "I'm scanning whitespace"
+/// states because each entry byte arrives at a fresh DFA state). After
+/// minimisation those merge into one, which makes the self-loop pass
+/// below much more effective.
+fn minimize(states: Vec<DfaState>) -> Vec<DfaState> {
+    if states.len() <= 1 {
+        return states;
+    }
+
+    let n = states.len();
+    let id_to_idx: HashMap<u32, usize> = states
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.id, i))
+        .collect();
+
+    // Initial partition: states with the same accept (or both none) start
+    // out together. Refinement is monotone — partitions only get finer —
+    // so this initial split is the upper bound on how many merges we keep.
+    let mut by_accept: BTreeMap<Option<u16>, Vec<usize>> = BTreeMap::new();
+    for (i, s) in states.iter().enumerate() {
+        by_accept.entry(s.accept).or_default().push(i);
+    }
+    let mut blocks: Vec<Vec<usize>> = by_accept.into_values().collect();
+    let mut block_of: Vec<u32> = vec![0; n];
+    set_block_of(&blocks, &mut block_of);
+
+    // Repeatedly split each block by transition signature. A signature is
+    // the 256-byte vector of "for byte b, which block does the target
+    // belong to?". Using `u32::MAX` as the dead/no-transition entry keeps
+    // states with missing transitions distinguishable from states that
+    // transition into block 0.
+    loop {
+        let mut next: Vec<Vec<usize>> = Vec::new();
+        for block in &blocks {
+            let mut by_sig: BTreeMap<Vec<u32>, Vec<usize>> = BTreeMap::new();
+            for &si in block {
+                let sig = signature(&states[si], &id_to_idx, &block_of);
+                by_sig.entry(sig).or_default().push(si);
+            }
+            for (_, sub) in by_sig {
+                next.push(sub);
+            }
+        }
+        if next.len() == blocks.len() {
+            break;
+        }
+        blocks = next;
+        set_block_of(&blocks, &mut block_of);
+    }
+
+    // Assign new state ids. The block holding the original START gets
+    // [`START`] so the entry point is stable; everyone else takes the
+    // next sequential id in block-iteration order.
+    let start_idx = id_to_idx[&START];
+    let start_block = block_of[start_idx] as usize;
+    let mut new_id_of_block: Vec<u32> = vec![0; blocks.len()];
+    new_id_of_block[start_block] = START;
+    let mut next_id: u32 = START + 1;
+    for b_idx in 0..blocks.len() {
+        if b_idx == start_block {
+            continue;
+        }
+        new_id_of_block[b_idx] = next_id;
+        next_id += 1;
+    }
+
+    // Build the minimized DFA. Pick a representative state per block,
+    // remap its arms to point at the block's new id, and merge the
+    // (now-possibly-overlapping) per-target byte ranges.
+    let mut out: Vec<DfaState> = Vec::with_capacity(blocks.len());
+    for (b_idx, block) in blocks.iter().enumerate() {
+        let new_id = new_id_of_block[b_idx];
+        let rep = &states[block[0]];
+        let mut by_target: BTreeMap<u32, (Option<u16>, Vec<(u8, u8)>)> = BTreeMap::new();
+        for arm in &rep.arms {
+            let target_block = block_of[id_to_idx[&arm.target]] as usize;
+            let new_target = new_id_of_block[target_block];
+            let target_accept = states[blocks[target_block][0]].accept;
+            by_target
+                .entry(new_target)
+                .or_insert_with(|| (target_accept, Vec::new()))
+                .1
+                .extend(arm.ranges.iter().copied());
+        }
+        let arms: Vec<ByteArm> = by_target
+            .into_iter()
+            .map(|(target, (target_accept, mut ranges))| {
+                ranges.sort();
+                ByteArm {
+                    target,
+                    target_accept,
+                    ranges: merge_adjacent(ranges),
+                }
+            })
+            .collect();
+        out.push(DfaState {
+            id: new_id,
+            arms,
+            accept: rep.accept,
+            self_loop: Vec::new(),
+        });
+    }
+    out.sort_by_key(|s| s.id);
+    out
+}
+
+fn signature(state: &DfaState, id_to_idx: &HashMap<u32, usize>, block_of: &[u32]) -> Vec<u32> {
+    let mut sig = vec![u32::MAX; 256];
+    for arm in &state.arms {
+        let target_block = block_of[id_to_idx[&arm.target]];
+        for &(lo, hi) in &arm.ranges {
+            for b in lo..=hi {
+                sig[b as usize] = target_block;
+            }
+        }
+    }
+    sig
+}
+
+fn set_block_of(blocks: &[Vec<usize>], block_of: &mut [u32]) {
+    for (b_idx, block) in blocks.iter().enumerate() {
+        for &si in block {
+            block_of[si] = b_idx as u32;
+        }
+    }
+}
+
+// =====================
+// Self-loop detection
+// =====================
+
+/// For each state, compute the set of bytes whose transition loops back
+/// to that same state. Backends can use this to emit a bulk scan-until-
+/// break loop instead of a byte-by-byte switch dispatch on bytes that
+/// don't change the state.
+fn detect_self_loops(states: &mut [DfaState]) {
+    for state in states {
+        let mut ranges: Vec<(u8, u8)> = state
+            .arms
+            .iter()
+            .filter(|arm| arm.target == state.id)
+            .flat_map(|arm| arm.ranges.iter().copied())
+            .collect();
+        ranges.sort();
+        state.self_loop = merge_adjacent(ranges);
     }
 }
 

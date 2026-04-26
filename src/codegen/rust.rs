@@ -213,17 +213,48 @@ fn emit_compiled_dfa(s: &mut String, st: &StateTable) {
     writeln!(s).unwrap();
 }
 
-fn emit_dfa_state_arm(
-    s: &mut String,
-    st: &StateTable,
-        ds: &DfaState,
-    ind: &str,
-) {
+fn emit_dfa_state_arm(s: &mut String, st: &StateTable, ds: &DfaState, ind: &str) {
     if ds.arms.is_empty() {
         writeln!(s, "{}{} => break,", ind, ds.id).unwrap();
         return;
     }
-    writeln!(s, "{}{} => match buf.get(pos) {{", ind, ds.id).unwrap();
+
+    // Fast path for states with a self-loop on a contiguous byte set:
+    // peel the loop into a single `while` that advances `pos` past every
+    // byte in the set in one go. Saves an outer-loop iteration per
+    // looped byte — this is most of a typical lexer's hot path
+    // (whitespace runs, identifier bodies, comment / string contents).
+    // The byte that breaks the inner loop falls through to the regular
+    // dispatch below, so non-self-loop transitions are unchanged.
+    let inner_ind = if ds.self_loop.is_empty() {
+        ind.to_string()
+    } else {
+        let pat = format_byte_pattern(&ds.self_loop);
+        writeln!(s, "{}{} => {{", ind, ds.id).unwrap();
+        writeln!(s, "{}    while let Some(&b) = buf.get(pos) {{", ind).unwrap();
+        writeln!(s, "{}        if !matches!(b, {}) {{ break; }}", ind, pat).unwrap();
+        writeln!(s, "{}        pos += 1;", ind).unwrap();
+        writeln!(s, "{}    }}", ind).unwrap();
+        if let Some(kind) = ds.accept {
+            writeln!(s, "{}    best_len = pos - start;", ind).unwrap();
+            writeln!(
+                s,
+                "{}    best_kind = Some({});",
+                ind,
+                token_variant(st, kind)
+            )
+            .unwrap();
+        }
+        format!("{}    ", ind)
+    };
+
+    let prefix = if ds.self_loop.is_empty() {
+        format!("{}{} => ", ind, ds.id)
+    } else {
+        inner_ind.clone()
+    };
+
+    writeln!(s, "{}match buf.get(pos) {{", prefix).unwrap();
     for arm in &ds.arms {
         let pat = format_byte_pattern(&arm.ranges);
         let is_single_byte = arm.ranges.len() == 1 && arm.ranges[0].0 == arm.ranges[0].1;
@@ -235,7 +266,7 @@ fn emit_dfa_state_arm(
         write!(
             s,
             "{}    Some(&{}) => {{ pos += 1; state = {};",
-            ind, wrapped, arm.target
+            inner_ind, wrapped, arm.target
         )
         .unwrap();
         if let Some(kind) = arm.target_accept {
@@ -248,8 +279,13 @@ fn emit_dfa_state_arm(
         }
         writeln!(s, " }}").unwrap();
     }
-    writeln!(s, "{}    _ => break,", ind).unwrap();
-    writeln!(s, "{}}},", ind).unwrap();
+    writeln!(s, "{}    _ => break,", inner_ind).unwrap();
+    if ds.self_loop.is_empty() {
+        writeln!(s, "{}}},", ind).unwrap();
+    } else {
+        writeln!(s, "{}}}", inner_ind).unwrap();
+        writeln!(s, "{}}},", ind).unwrap();
+    }
 }
 
 
