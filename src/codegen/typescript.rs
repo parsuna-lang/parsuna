@@ -362,7 +362,11 @@ fn emit_tables(s: &mut String, st: &StateTable) {
         writeln!(s, "const ENTRY_{} = {};", name.to_uppercase(), id).unwrap();
     }
 
+    let referenced_first = st.referenced_first_ids();
     for f in &st.first_sets {
+        if !referenced_first.contains(&f.id) {
+            continue;
+        }
         let seqs: Vec<String> = f
             .seqs
             .iter()

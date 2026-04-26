@@ -313,6 +313,37 @@ pub fn lower(ag: &AnalyzedGrammar) -> StateTable {
     table
 }
 
+impl StateTable {
+    /// FIRST-set ids that the generated runtime actually references.
+    ///
+    /// For LL(1) grammars this is empty: code generators inline
+    /// FIRST sets directly into a `match` arm pattern (one alternative
+    /// per token kind) and never look at the FIRST pool at runtime.
+    /// For LL(k>1) grammars only `Op::Star` and `Op::Opt` consult the
+    /// pool — `Op::Dispatch` builds its decision tree from FIRST sets
+    /// at lowering time and emits nested switch arms with concrete
+    /// token kinds, so the original FIRST set id is unreferenced after
+    /// lowering. Backends use this set to skip emitting unreferenced
+    /// FIRST tables.
+    pub fn referenced_first_ids(&self) -> std::collections::BTreeSet<FirstSetId> {
+        let mut ids = std::collections::BTreeSet::new();
+        if self.k == 1 {
+            return ids;
+        }
+        for state in self.states.values() {
+            for op in &state.ops {
+                match op {
+                    Op::Star { first, .. } | Op::Opt { first, .. } => {
+                        ids.insert(*first);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        ids
+    }
+}
+
 impl State {
     /// Render the state as a single comment line: label plus the ops
     /// joined with `;`. Used by the debug dumper and by some backends when

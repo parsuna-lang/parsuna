@@ -563,7 +563,11 @@ fn byte_literal(b: u8) -> String {
 fn emit_tables(c: &mut String, st: &StateTable, upper: &str) {
     /* Lookahead width is baked in via PARSUNA_K at the top of the file. */
 
+    let referenced_first = st.referenced_first_ids();
     for f in &st.first_sets {
+        if !referenced_first.contains(&f.id) {
+            continue;
+        }
         let i = f.id;
         for (j, seq) in f.seqs.iter().enumerate() {
             let parts: Vec<String> = seq.iter().map(|t| c_token_name(st, upper, *t)).collect();

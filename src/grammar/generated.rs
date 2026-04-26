@@ -413,23 +413,6 @@ const ENTRY_ATOM: u32 = 70;
 const ENTRY_CHAR_PRIMARY: u32 = 82;
 const ENTRY_NEG_CLASS: u32 = 94;
 
-static FIRST_0: &[&[TokenKind]] = &[&[TokenKind::Ident]];
-static FIRST_1: &[&[TokenKind]] = &[&[TokenKind::Lbrack]];
-static FIRST_2: &[&[TokenKind]] = &[&[TokenKind::Comma]];
-static FIRST_3: &[&[TokenKind]] = &[&[TokenKind::Pipe]];
-static FIRST_4: &[&[TokenKind]] = &[&[TokenKind::Lparen], &[TokenKind::Dot], &[TokenKind::Bang], &[TokenKind::String], &[TokenKind::Char], &[TokenKind::Ident]];
-static FIRST_5: &[&[TokenKind]] = &[&[TokenKind::Question], &[TokenKind::Star], &[TokenKind::Plus]];
-static FIRST_6: &[&[TokenKind]] = &[&[TokenKind::Question]];
-static FIRST_7: &[&[TokenKind]] = &[&[TokenKind::Star]];
-static FIRST_8: &[&[TokenKind]] = &[&[TokenKind::Plus]];
-static FIRST_9: &[&[TokenKind]] = &[&[TokenKind::Lparen]];
-static FIRST_10: &[&[TokenKind]] = &[&[TokenKind::Dot], &[TokenKind::Bang], &[TokenKind::String], &[TokenKind::Char], &[TokenKind::Ident]];
-static FIRST_11: &[&[TokenKind]] = &[&[TokenKind::String]];
-static FIRST_12: &[&[TokenKind]] = &[&[TokenKind::Dot], &[TokenKind::Char]];
-static FIRST_13: &[&[TokenKind]] = &[&[TokenKind::Bang]];
-static FIRST_14: &[&[TokenKind]] = &[&[TokenKind::Char]];
-static FIRST_15: &[&[TokenKind]] = &[&[TokenKind::Dotdot]];
-static FIRST_16: &[&[TokenKind]] = &[&[TokenKind::Dot]];
 
 static SYNC_0: &[TokenKind] = &[TokenKind::Eof];
 static SYNC_1: &[TokenKind] = &[TokenKind::Eof, TokenKind::Ident];

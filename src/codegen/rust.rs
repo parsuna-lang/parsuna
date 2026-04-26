@@ -326,7 +326,11 @@ fn emit_tables(s: &mut String, st: &StateTable) {
     }
     writeln!(s).unwrap();
 
+    let referenced_first = st.referenced_first_ids();
     for f in &st.first_sets {
+        if !referenced_first.contains(&f.id) {
+            continue;
+        }
         write!(s, "static FIRST_{}: &[&[TokenKind]] = &[", f.id).unwrap();
         for (j, seq) in f.seqs.iter().enumerate() {
             if j > 0 {
