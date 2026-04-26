@@ -86,10 +86,17 @@ export interface DfaMatch<TK> {
  * Grammar-specific compiled DFA. Generated code supplies one of these:
  * a per-state `switch` that avoids the data-dependent table load a
  * table-driven DFA pays on every byte.
+ *
+ * `buf` is a Latin-1 string where each char's code unit is the
+ * underlying UTF-8 byte (0–255). The runtime constructs it once at
+ * Lexer construction so the hot-path matcher can read bytes via
+ * `buf.charCodeAt(pos)` — V8's one-byte-string representation makes
+ * that a single load with no bounds-check or typed-array dispatch.
  */
-export type MatcherFunc<TK> = (buf: Uint8Array, start: number) => DfaMatch<TK>;
+export type MatcherFunc<TK> = (buf: string, start: number) => DfaMatch<TK>;
 
 const _TEXT_DECODER = new TextDecoder();
+const _LATIN1_DECODER = new TextDecoder("latin1");
 function decodeBytes(buf: Uint8Array, start: number, end: number): string {
   return _TEXT_DECODER.decode(buf.subarray(start, end));
 }
@@ -100,9 +107,18 @@ function decodeBytes(buf: Uint8Array, start: number, end: number): string {
  *
  * `eofKind` is the sentinel kind the runtime emits at end-of-input. Lex
  * failures (no DFA pattern matched) come through as `Token { kind: null }`.
+ *
+ * Internally we keep two views of the same bytes:
+ * - `bytes` (Uint8Array) — used to count lines/columns and to UTF-8-decode
+ *   each token's text payload. The byte view is what the public Span
+ *   offsets refer to.
+ * - `buf` (Latin-1 string) — fed to the generated matcher so byte reads
+ *   compile to `String.charCodeAt`, which V8 specialises hard for one-byte
+ *   strings.
  */
 export class Lexer<TK extends number> {
   private bytes: Uint8Array;
+  private buf: string;
   private i = 0;
   private line = 1;
   private col = 1;
@@ -113,6 +129,7 @@ export class Lexer<TK extends number> {
     private readonly eofKind: TK,
   ) {
     this.bytes = new TextEncoder().encode(src);
+    this.buf = _LATIN1_DECODER.decode(this.bytes);
   }
 
   private pos(): Pos {
@@ -154,7 +171,7 @@ export class Lexer<TK extends number> {
       return { kind: this.eofKind, span: pointSpan(p), text: "" };
     }
 
-    const { bestLen, bestKind } = this.matcher(this.bytes, this.i);
+    const { bestLen, bestKind } = this.matcher(this.buf, this.i);
 
     const start = this.pos();
     if (bestLen === 0) {

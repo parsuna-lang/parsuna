@@ -193,7 +193,7 @@ fn emit_dfa(s: &mut String, st: &StateTable) {
     writeln!(s, " */").unwrap();
     writeln!(
         s,
-        "function longestMatch(buf: Uint8Array, start: number): DfaMatch<TokenKind> {{"
+        "function longestMatch(buf: string, start: number): DfaMatch<TokenKind> {{"
     )
     .unwrap();
     writeln!(s, "  let pos = start;").unwrap();
@@ -252,7 +252,7 @@ fn emit_dfa_state_arm(
         "        if (pos >= buf.length) return {{ bestLen, bestKind, scanned: pos - start }};"
     )
     .unwrap();
-    writeln!(s, "        const b = buf[pos];").unwrap();
+    writeln!(s, "        const b = buf.charCodeAt(pos);").unwrap();
     let mut first = true;
     for arm in &ds.arms {
         let cond = byte_cond(&arm.ranges);
