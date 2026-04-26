@@ -406,7 +406,6 @@ fn emit_op(s: &mut String, table: &StateTable, self_id: u32, op: &Op, ind: &str)
                 |s, ind| {
                     writeln!(s, "{}cur = {};", ind, next).unwrap();
                 },
-                None,
             );
         }
         Op::Opt { first, body, next } => {
@@ -421,7 +420,6 @@ fn emit_op(s: &mut String, table: &StateTable, self_id: u32, op: &Op, ind: &str)
                 |s, ind| {
                     writeln!(s, "{}cur = {};", ind, next).unwrap();
                 },
-                None,
             );
         }
         Op::Dispatch { tree, sync, next } => {
@@ -437,7 +435,6 @@ fn emit_lookahead_branch(
     ind: &str,
     on_match: impl FnOnce(&mut String, &str),
     on_miss: impl FnOnce(&mut String, &str),
-    _unused: Option<()>,
 ) {
     if table.k == 1 {
         let pat = kind_pattern(table, &table.first_sets[first as usize].seqs);
