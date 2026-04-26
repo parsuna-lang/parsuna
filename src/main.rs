@@ -208,7 +208,12 @@ fn dbg_load_lowered(
 }
 
 fn print_stats(ag: &parsuna::AnalyzedGrammar, st: &StateTable) {
-    let pub_tokens = ag.grammar.tokens.values().filter(|t| !t.is_fragment).count();
+    let pub_tokens = ag
+        .grammar
+        .tokens
+        .values()
+        .filter(|t| !t.is_fragment)
+        .count();
     let frag_tokens = ag.grammar.tokens.len() - pub_tokens;
     let pub_rules = ag.grammar.rules.values().filter(|r| !r.is_fragment).count();
     let frag_rules = ag.grammar.rules.len() - pub_rules;
@@ -970,28 +975,15 @@ fn load_and_analyze(
             .unwrap_or("parser")
             .to_string(),
     };
-    let outcome = analyze(g);
-    let promote = warnings_policy == WarningPolicy::Error;
-    let mut had_warning = false;
-    for d in &outcome.diagnostics {
-        if d.is_error() {
-            eprintln!("{}", d);
-        } else {
-            had_warning = true;
-            // Promote at print time so the user sees the right severity
-            // label and the build fails below.
-            if promote {
-                let mut promoted = d.clone();
-                promoted.severity = parsuna::Severity::Error;
-                eprintln!("{}", promoted);
-            } else {
-                eprintln!("{}", d);
-            }
+    let mut outcome = analyze(g);
+    for d in &mut outcome.diagnostics {
+        if !d.is_error() && warnings_policy == WarningPolicy::Error {
+            d.severity = parsuna::Severity::Error;
         }
+        eprintln!("{}", d);
     }
-    let fail = outcome.has_errors() || (promote && had_warning);
     match outcome.grammar {
-        Some(ag) if !fail => Ok(ag),
+        Some(ag) if !outcome.has_errors() => Ok(ag),
         _ => Err(ExitCode::FAILURE),
     }
 }
