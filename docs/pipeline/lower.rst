@@ -9,9 +9,11 @@ Lowering produces two things: the **lexer DFA** (what the runtime
 consults to turn bytes into tokens) and the parser **state machine**
 (what consumes those tokens). The DFA is the simpler of the two and
 runs first at parse time, so this chapter covers it first. The state
-machine is then built by three sub-passes — **build**, **layout**,
-and **fuse** — the last of which also triggers DFA compilation as
-part of laying out the final ``StateTable``.
+machine is then built by four sub-passes — **build**, **layout**,
+**fuse**, and a small **mark-references** post-pass that flags which
+FIRST tables backends actually need to emit. The layout sub-pass also
+triggers DFA compilation as part of laying out the final
+``StateTable``.
 
 The StateTable
 --------------
@@ -28,9 +30,13 @@ The artifact handed to code generation holds:
 * ``rule_kinds: Vec<String>`` — names of the non-fragment rules in
   declaration order. A rule's ``RuleKind`` id is its index here.
 * ``first_sets: Vec<FirstSet>`` — the interned FIRST-set pool. Each
-  entry is a ``Vec<Vec<u16>>``: a set of token-id sequences.
-* ``sync_sets: Vec<Vec<u16>>`` — the interned SYNC-set pool. Each
-  entry is a flat list of token ids.
+  entry is ``{ id, seqs: Vec<Vec<u16>>, has_references: bool }``: a
+  set of token-id sequences plus a flag set during a post-fuse pass
+  to mark the entries the generated runtime will actually reference
+  (see *Sub-pass 3d* below). Backends emit a constant for an entry
+  only when the flag is set.
+* ``sync_sets: Vec<SyncSet>`` — the interned SYNC-set pool. Each
+  entry is ``{ id, kinds: Vec<u16> }``: a flat list of token ids.
 * ``states: BTreeMap<StateId, State>`` — every parser state, keyed
   by id. Each ``State`` holds a label and a short straight-line
   program of ``Op``\ s.
@@ -246,7 +252,7 @@ Steps:
    (see the `The lexer DFA`_ section above). The resulting
    ``Vec<DfaState>`` is stored on the state table.
 
-Output: a ``StateTable`` — complete but not yet optimised.
+Output: a ``StateTable`` — complete but not yet optimized.
 
 Sub-pass 3c — Fuse
 ------------------
@@ -278,6 +284,32 @@ Fuse performs two small but important clean-ups:
   following every reachable target (``Jump``, ``PushRet``,
   ``Opt.body``, ``Opt.next``, every leaf of every ``DispatchTree``).
   Any state not reached is removed from the table.
+
+Sub-pass 3d — Mark FIRST-set references
+---------------------------------------
+
+File: ``src/lowering/mod.rs`` (``mark_first_set_references``).
+
+A small post-pass that decides which FIRST sets the generated runtime
+will actually reference. The codegens use this to skip emitting
+constants for unreferenced entries.
+
+The rule, encoded as the ``FirstSet::has_references`` flag:
+
+* For LL(1) grammars, **no** FIRST set is ever referenced. The
+  ``Op::Star`` / ``Op::Opt`` codegen for ``k = 1`` inlines the FIRST
+  set into a ``match`` arm pattern (one alternative per token kind)
+  rather than calling ``matches_first(FIRST_n)``.
+* For LL(k > 1) grammars, only ``Op::Star`` and ``Op::Opt`` consult
+  the pool — ``matches_first(FIRST_n)`` is the only reference site.
+  ``Op::Dispatch`` arms also point at FIRST sets, but those are
+  consumed at lowering time when the ``DispatchTree`` is built; the
+  resulting nested switch arms carry concrete token kinds, not pool
+  ids, so the original FIRST set id is unreferenced after lowering.
+
+The pass walks every state's ops, collects the ids reached by
+``Op::Star`` / ``Op::Opt``, and sets ``has_references`` on the matching
+``FirstSet`` entries (no-op when ``k == 1``).
 
 The result is the ``StateTable`` that reaches code generation.
 

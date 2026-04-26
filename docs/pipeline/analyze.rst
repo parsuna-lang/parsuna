@@ -37,7 +37,10 @@ on a malformed input.
 Checks, in order:
 
 * **Reserved token names.** ``EOF`` and ``ERROR`` (case-insensitive)
-  are rejected — they collide with runtime sentinels.
+  are rejected. ``EOF`` is the end-of-input sentinel (kind id ``0``);
+  ``ERROR`` is reserved so user grammars can't shadow the runtime's
+  diagnostic vocabulary. Lex failures are surfaced via
+  ``Token { kind: None }`` rather than a reserved kind id.
 * **Duplicates.** Token names and rule names are checked for
   duplicates independently.
 * **Undefined references.** Every ``Expr::Token(n)`` must name a

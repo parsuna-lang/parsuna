@@ -25,7 +25,7 @@ of the first letter of ``name`` (skipping a leading ``_``):
   ``_parenthesized``.
 
 A trailing ``[name, ...]`` block attaches **annotations** to the
-declaration. The only annotation recognised today is ``skip``, which
+declaration. The only annotation recognized today is ``skip``, which
 marks a token as a **skip token**: the lexer still matches it, but the
 parser drops it from the structural event stream. Skip tokens are
 still delivered to consumers as events — they just appear outside any

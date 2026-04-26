@@ -23,7 +23,7 @@ grammar; running the generator over it produces
 
 The implication is that the first pass is a worked example of
 consuming an event stream. ``parser.rs`` reads ``Enter``/``Exit``
-pairs to recognise rule-shaped blocks, pulls tokens out of them with
+pairs to recognize rule-shaped blocks, pulls tokens out of them with
 a small ``Reader`` abstraction, and accumulates errors as it goes.
 
 The Grammar IR
@@ -90,6 +90,7 @@ but **semantically** unchecked. It may still contain:
 * Left-recursive rules.
 * Token reference cycles.
 * Duplicate declarations.
-* Names that collide with runtime sentinels (``EOF``, ``ERROR``).
+* Names that collide with reserved runtime identifiers (``EOF``,
+  ``ERROR``).
 
 The next pass, :doc:`analyze`, is what catches those.

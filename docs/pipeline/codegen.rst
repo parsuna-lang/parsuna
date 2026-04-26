@@ -1,8 +1,12 @@
 Pass 4 — Code generation
 ========================
 
-Entry points: ``codegen::find`` (look up a backend by name) and
-``codegen::emit`` (run lowering and then the backend). Backend
+Entry point: ``codegen::GenerateTarget`` (``src/codegen/mod.rs``) — a
+clap-derived enum with one variant per backend, each wrapping that
+backend's ``Args`` struct (empty for most, carrying flags like
+``--package`` / ``--namespace`` for Java and C#). The CLI parses the
+target subcommand into a ``GenerateTarget`` and calls ``.emit(&st)``,
+which dispatches to the chosen backend's ``emit`` function. Backend
 implementations live under ``src/codegen/<target>.rs``.
 
 Inputs
@@ -10,7 +14,7 @@ Inputs
 
 A backend is a pure function::
 
-    fn(&StateTable) -> Vec<EmittedFile>
+    pub fn emit(st: &StateTable, args: &Args) -> Vec<EmittedFile>
 
 Every backend reads the same ``StateTable``. An ``EmittedFile`` is
 just a relative path plus UTF-8 contents — backends never touch the
@@ -23,13 +27,38 @@ All backends produce the same logical artifacts, encoded in the
 target language's idioms:
 
 1. **TokenKind enum.** One variant per entry in ``state_table.tokens``,
-   with ``EOF = 0`` and ``ERROR = -1``. The representation is ``i16``
-   (or the language's closest equivalent).
-2. **RuleKind enum.** One variant per entry in
-   ``state_table.rule_kinds``, representation ``u16``.
-3. **Name-lookup helpers.** ``tokenKindName`` / ``ruleKindName`` —
+   plus ``EOF = 0``. Representation per language:
+
+   * Rust / TypeScript / Python (PyO3 wraps Rust): ``u16``.
+   * Go / Java / C# / C: signed 16-bit (``int16`` / ``short`` /
+     ``short`` / ``int16_t``) with ``-1`` reserved for the lex-failure
+     sentinel discussed in the next bullet.
+
+   Lex failures are not a TokenKind variant; they ride the optional /
+   sentinel convention chosen per language.
+2. **Lex-failure representation.** Languages with a free structural
+   nullable carry the kind as that:
+
+   * Rust: ``Token<TK> { kind: Option<TK>, … }``.
+   * TypeScript: ``Token<TK> { kind: TK | null, … }``.
+   * Python: ``Optional[int]`` on the PyO3 ``Token`` wrapper.
+
+   Languages where a nullable would cost an allocation or a per
+   comparison branch use a signed 16-bit field with ``-1`` reserved
+   for "no DFA pattern matched":
+
+   * Go: ``Token { Kind int16, … }``.
+   * Java: ``Token { short kind, … }``.
+   * C#: ``Token(short Kind, …)``.
+   * C: ``{ int16_t kind; … }``; sync arrays terminate with
+     ``SENTINEL = -2`` (so ``-1`` stays available for the kind).
+
+3. **RuleKind enum.** One variant per entry in
+   ``state_table.rule_kinds``, representation ``u16`` (or the
+   language's nearest unsigned half-word).
+4. **Name-lookup helpers.** ``tokenKindName`` / ``ruleKindName`` —
    useful for diagnostics and test output.
-4. **Compiled lexer DFA.** Not a packed table — the DFA is emitted
+5. **Compiled lexer DFA.** Not a packed table — the DFA is emitted
    as code. Each state becomes one arm of a ``match``/``switch``
    that reads the current byte and dispatches on it; the whole
    machine is wrapped in a ``longest_match`` function exposed
@@ -38,21 +67,29 @@ target language's idioms:
    (so an ``[a-z]+`` token compiles to ``Some(&(b'a'..=b'z'))``
    rather than 26 individual byte arms). See
    :ref:`compiled-lexer-dfa` below for the shape and rationale.
-5. **FIRST and SYNC intern pools.** Each entry from
-   ``state_table.first_sets`` / ``state_table.sync_sets`` becomes a
-   named constant (``FIRST_N``, ``SYNC_N``). States refer to them by
-   index, so syntactically-similar grammar pieces share tables.
-6. **Entry-state constants.** One ``ENTRY_<RULE>`` per public rule.
-7. **State-dispatch function.** A single function — in most backends
+6. **SYNC intern pool.** Every entry from
+   ``state_table.sync_sets`` becomes a named constant (``SYNC_N``).
+   States refer to them by index, so rules whose FOLLOW sets
+   intern to the same set share a single table entry.
+7. **FIRST intern pool — filtered.** Only the entries whose
+   ``has_references`` flag is set get emitted as ``FIRST_N``
+   constants. For LL(1) grammars that's empty: ``Op::Star`` /
+   ``Op::Opt`` codegen at ``k = 1`` inlines the FIRST set into a
+   ``match`` arm pattern instead of consulting the pool, and
+   ``Op::Dispatch`` builds its decision tree at lowering time.
+   For LL(k > 1) only the entries actually referenced by
+   ``matches_first(FIRST_N)`` calls are emitted.
+8. **Entry-state constants.** One ``ENTRY_<RULE>`` per public rule.
+9. **State-dispatch function.** A single function — in most backends
    a large ``switch`` on the current state id — that runs one state
    of the parser and either consumes an event or transfers control.
-8. **parse_<rule> entry points.** One convenience constructor per
-   public rule, wrapping the runtime's ``Parser::new`` with the
-   correct entry-state constant and a configured lexer.
-9. **A small amount of backend-specific plumbing.** Package
-   declarations, import blocks, module wrappers, and whatever else
-   the target language needs. Each backend keeps this to the
-   minimum.
+10. **parse_<rule> entry points.** One convenience constructor per
+    public rule, wrapping the runtime's ``Parser::new`` with the
+    correct entry-state constant and a configured lexer.
+11. **A small amount of backend-specific plumbing.** Package
+    declarations, import blocks, module wrappers, and whatever else
+    the target language needs. Each backend keeps this to the
+    minimum.
 
 The state-dispatch function: how ops become code
 ------------------------------------------------
@@ -82,9 +119,15 @@ statements in the target language. The mapping is direct:
   ``parser.state = parser.ret()``.
 
 ``Star { first, body, next }`` / ``Opt { first, body, next }``
-  An ``if parser.matches_first(FIRST_N)`` branch: on a match, push
-  the appropriate return state and jump into ``body``; on a miss,
-  jump to ``next``.
+  A predicated branch: on lookahead match, push the appropriate
+  return state and jump into ``body``; on miss, jump to ``next``.
+  The form depends on ``state_table.k``:
+
+  * ``k = 1`` — the FIRST set is inlined into a ``match`` arm
+    pattern (one alternative per token kind it accepts). No
+    ``FIRST_N`` constant is emitted or referenced.
+  * ``k > 1`` — emits ``parser.matches_first(FIRST_N)``, the
+    only place the FIRST intern pool is consulted at runtime.
 
 ``Dispatch { tree, sync, next }``
   A nested ``switch``. Each ``DispatchTree::Switch`` becomes one
@@ -92,7 +135,10 @@ statements in the target language. The mapping is direct:
   becomes an action — take an arm (push ``next``, jump to the arm's
   body), fall through to ``next``, or ``error+recover(sync)``. The
   trie structure is what lets a k-token lookahead compile to k
-  nested switches rather than a linear scan.
+  nested switches rather than a linear scan. ``Dispatch`` consumes
+  its FIRST sets at lowering time when the tree is built; the
+  emitted switch arms carry concrete token kinds, so no
+  ``FIRST_N`` reference appears at runtime.
 
 Because the ops are already linear and the state ids are dense
 integers, most backends can emit the whole parser as a single
@@ -151,7 +197,7 @@ prologue ahead of the regular per-byte switch. The prologue advances
 the host language's optimizer typically autovectorizes (Rust's
 LLVM, V8's Irregexp via sticky regex, .NET's
 ``MemoryExtensions.IndexOfAnyExcept``, Go's ``bytes.IndexFunc``,
-HotSpot's loop vectoriser). The byte that breaks the prologue then
+HotSpot's loop vectorizer). The byte that breaks the prologue then
 falls through to the regular dispatch — non-self-loop transitions
 are unchanged.
 
@@ -176,7 +222,7 @@ Why code instead of tables
   Go SSA pass, and friends; they compile to jump tables, branch
   tables, or inlined comparisons depending on the target. A
   data-driven walk over a packed transition array is opaque to
-  those optimisers.
+  those optimizers.
 * **Dense binaries for sparse DFAs.** Most DFA states have only a
   handful of live transitions; emitting just those arms is much
   smaller than reserving 256 entries per state.
@@ -186,23 +232,31 @@ Why code instead of tables
   opaque tables threaded through a runtime helper.
 
 Each backend supplies its compiled matcher to the runtime through
-a ``DfaMatcher`` trait (Rust), interface (Go, TypeScript, Java,
-C#), or function pointer (C). The runtime calls
+a ``DfaMatcher`` trait (Rust), interface (Go, Java, C#), function
+type (TypeScript), or function pointer (C). The runtime calls
 ``longest_match(buf, pos)`` once per token; everything else about
 the lexer (input buffering, position tracking, EOF handling) stays
 generic in the runtime crate.
+
+The ``buf`` argument is a byte view in every backend except
+TypeScript, which receives a Latin-1-decoded string so the matcher
+can read bytes via ``buf.charCodeAt(pos)``. The TS runtime keeps
+the original ``Uint8Array`` alongside it for spans, ``advance()``,
+and UTF-8 token-text decoding; the Latin-1 string exists purely to
+make the inner DFA loop a one-byte-string indexing pattern that
+V8's JIT specializes hard.
 
 Shared helpers
 --------------
 
 File: ``src/codegen/common.rs``.
 
-Language-neutral string helpers live here: naming conversions
-(``pascal``, ``camel``, ``snake``, ``screaming_snake``), token
-literal escaping, FIRST/SYNC-set formatting helpers, and a few
-small utilities the backends share. A backend's job is mostly
-deciding what layout to produce; ``common`` exists so two backends
-producing the same name convention do so consistently.
+Language-neutral helpers shared across backends: naming conversions
+(``pascal``, ``screaming_snake``), string-literal escaping
+(``escape_string``, ``escape_string_bmp``), and an ``Expr`` walker
+(``visit``). A backend's job is mostly deciding what layout to
+produce; ``common`` exists so two backends producing the same name
+convention do so consistently.
 
 Differences between backends
 ----------------------------
