@@ -25,11 +25,12 @@ public readonly record struct Span(Pos Start, Pos End)
 /// A lexed token: kind id, source span, and the matched text.
 /// </summary>
 /// <remarks>
-/// <c>Kind</c> is null only when the lexer could not match any pattern at
-/// the current position; the scanner still advances by one codepoint so
-/// parsing can recover. EOF has its own non-null kind value.
+/// <c>Kind</c> is a <c>short</c> matching the generated <c>TokenKind</c>
+/// enum's <c>id</c>. The runtime reserves <c>-1</c> as the "no DFA pattern
+/// matched" sentinel that the lexer emits when it can't classify a
+/// codepoint; real token kinds (including EOF = 0) are non-negative.
 /// </remarks>
-public sealed record Token(ushort? Kind, Span Span, string Text);
+public sealed record Token(short Kind, Span Span, string Text);
 
 /// <summary>A recoverable parse or lex error with its source span.</summary>
 public sealed record ParseError(string Message, Span Span)
@@ -75,11 +76,10 @@ public sealed record ErrorEvent(ParseError Error) : Event;
 /// </summary>
 /// <remarks>
 /// Writes three ints to <paramref name="output"/>:
-/// [0] bestLen (0 = no accept; bestKind is meaningless when 0),
-/// [1] bestKind (only valid when bestLen > 0),
-/// [2] scanned (== bufLen - start when the scan ran out of buffer rather
-/// than hitting a dead transition; used to detect buffer exhaustion
-/// mid-token).
+/// [0] bestLen (0 = no accept), [1] bestKind (error sentinel when no
+/// accept reached), [2] scanned (== bufLen - start when the scan ran out
+/// of buffer rather than hitting a dead transition; used to detect
+/// buffer exhaustion mid-token).
 /// </remarks>
 public delegate void DfaMatcher(byte[] buf, int start, int bufLen, int[] output);
 
@@ -97,15 +97,17 @@ public sealed class Lexer
     private int _line = 1;
     private int _col = 1;
     private readonly DfaMatcher _matcher;
-    private readonly ushort _eofKind;
+    private readonly short _eofKind;
+    private readonly short _errorKind;
     private readonly int[] _matchOut = new int[3];
 
-    public Lexer(Stream stream, DfaMatcher matcher, ushort eofKind)
+    public Lexer(Stream stream, DfaMatcher matcher, short eofKind, short errorKind)
     {
         _stream = stream;
         _buf = new byte[Chunk * 2];
         _matcher = matcher;
         _eofKind = eofKind;
+        _errorKind = errorKind;
     }
 
     private Pos CurPos() => new(_offset, _line, _col);
@@ -166,7 +168,7 @@ public sealed class Lexer
         }
     }
 
-    private (int Len, ushort Kind) LongestMatch()
+    private (int Len, short Kind) LongestMatch()
     {
         while (true)
         {
@@ -177,14 +179,14 @@ public sealed class Lexer
             {
                 if (ReadMore()) continue;
             }
-            return (_matchOut[0], (ushort)_matchOut[1]);
+            return (_matchOut[0], (short)_matchOut[1]);
         }
     }
 
     /// <summary>
     /// Produce the next token. Returns repeated EOF once input is fully
     /// consumed; lex failures (no DFA pattern matched) come through with
-    /// <c>Token.Kind == null</c>.
+    /// <c>Token.Kind == errorKind</c> (<c>-1</c> by convention).
     /// </summary>
     public Token NextToken()
     {
@@ -199,7 +201,7 @@ public sealed class Lexer
             int take = Math.Min(cpLen, _bufLen - _bufPos);
             string text = Encoding.UTF8.GetString(_buf, _bufPos, take);
             Advance(take);
-            return new Token(null, new Span(start, CurPos()), text);
+            return new Token(_errorKind, new Span(start, CurPos()), text);
         }
         string tokText = Encoding.UTF8.GetString(_buf, _bufPos, best.Len);
         Advance(best.Len);
@@ -210,8 +212,8 @@ public sealed class Lexer
 /// <summary>Grammar-specific callbacks a generated parser wires into the runtime.</summary>
 public sealed record ParserConfig(
     int K,
-    ushort EofKind,
-    Predicate<ushort> IsSkip,
+    short EofKind,
+    Predicate<short> IsSkip,
     Action<Parser> Drive);
 
 /// <summary>
@@ -254,11 +256,8 @@ public sealed class Parser : IEnumerable<Event>, IEnumerator<Event>
     public int PopRet() => _ret.Count > 0 ? _ret.Pop() : Terminated;
     public bool QueueIsEmpty() => _queue.Count == 0;
 
-    /// <summary>
-    /// True iff the current lookahead matches any of the given prefixes.
-    /// Lookahead slots whose Kind is null never match.
-    /// </summary>
-    public bool MatchesFirst(ushort[][] set)
+    /// <summary>True iff the current lookahead matches any of the given prefixes.</summary>
+    public bool MatchesFirst(short[][] set)
     {
         foreach (var seq in set)
         {
@@ -289,7 +288,7 @@ public sealed class Parser : IEnumerable<Event>, IEnumerator<Event>
         AdvanceLook();
     }
 
-    public void TryConsume(ushort kind, ushort[] sync, string name)
+    public void TryConsume(short kind, short[] sync, string name)
     {
         if (Look(0).Kind == kind) { Consume(); return; }
         ErrorHere($"expected {name}");
@@ -297,24 +296,17 @@ public sealed class Parser : IEnumerable<Event>, IEnumerator<Event>
         if (Look(0).Kind == kind) Consume();
     }
 
-    private static bool ContainsKind(ushort[] set, ushort k)
+    private static bool ContainsKind(short[] set, short k)
     {
         foreach (var x in set) if (x == k) return true;
         return false;
     }
 
-    /// <summary>
-    /// Consume tokens until the lookahead matches <paramref name="sync"/>
-    /// (or EOF). Tokens with a null Kind are unconditionally consumed
-    /// during recovery — they never match a sync kind and aren't EOF.
-    /// </summary>
-    public void RecoverTo(ushort[] sync)
+    /// <summary>Consume tokens until the lookahead matches <paramref name="sync"/> (or EOF).</summary>
+    public void RecoverTo(short[] sync)
     {
-        while (true)
+        while (Look(0).Kind != _cfg.EofKind && !ContainsKind(sync, Look(0).Kind))
         {
-            var k = Look(0).Kind;
-            if (k == _cfg.EofKind) return;
-            if (k.HasValue && ContainsKind(sync, k.Value)) return;
             Emit(new TokenEvent(Look(0)));
             AdvanceLook();
         }
@@ -364,7 +356,7 @@ public sealed class Parser : IEnumerable<Event>, IEnumerator<Event>
         while (true)
         {
             var t = _lex.NextToken();
-            if (t.Kind.HasValue && _cfg.IsSkip(t.Kind.Value)) { _pendingSkips.Enqueue(t); continue; }
+            if (_cfg.IsSkip(t.Kind)) { _pendingSkips.Enqueue(t); continue; }
             return t;
         }
     }
