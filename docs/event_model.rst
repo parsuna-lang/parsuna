@@ -28,8 +28,8 @@ Every event is one of:
   A lexed token. Carries:
 
   * ``kind`` — a ``TokenKind`` value identifying which token
-    declaration this matches. The reserved sentinels ``EOF`` and
-    ``ERROR`` are also possible; see below.
+    declaration this matches, or a nullable/sentinel value when the
+    lexer failed to match at the current position; see below.
   * ``span`` — a ``Span`` covering the matched input.
   * ``text`` — the matched source text, exactly as it appeared.
     Un-escaping, numeric conversion, and other transforms are not
@@ -119,10 +119,12 @@ Every backend exposes the same two shapes:
   == span.end`` denotes a zero-width span at a point — used, for
   example, for the ``Enter`` of an empty rule.
 
-Reserved token kinds
+EOF and lex failures
 --------------------
 
-Two token kinds are reserved and never collide with a grammar token:
+The names ``EOF`` and ``ERROR`` are reserved — a grammar that
+declares a token with either name is rejected. Only ``EOF`` becomes
+a real token kind:
 
 ``EOF`` (kind id ``0``)
   Emitted once by the lexer when the input is exhausted. The parser
@@ -130,12 +132,14 @@ Two token kinds are reserved and never collide with a grammar token:
   token, but may see one inside ``Token`` events during error
   recovery in pathological cases.
 
-``ERROR`` (kind id ``-1``)
-  Emitted by the lexer when no token pattern matches at the current
-  position. The lexer still advances by one codepoint so the parser
-  can keep making progress. You will see an ``ERROR`` token in the
-  event stream at the offending position, accompanied by a nearby
-  ``Error`` event explaining what was expected.
+Lex failures (no token pattern matches at the current position) are
+not represented as a separate token kind. The lexer emits a normal
+``Token`` event covering one codepoint with the ``kind`` field set
+to the language's "no kind" value — ``None`` in Rust, ``null`` in
+TypeScript, ``Optional[TokenKind]`` ``None`` in Python, and the
+sentinel ``-1`` in Go, Java, C#, and C — so the parser can surface
+an error and keep making progress. The offending position will
+also produce a nearby ``Error`` event explaining what was expected.
 
 Error recovery, observably
 --------------------------

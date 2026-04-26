@@ -232,11 +232,14 @@ Why code instead of tables
   opaque tables threaded through a runtime helper.
 
 Each backend supplies its compiled matcher to the runtime through
-a ``DfaMatcher`` trait (Rust), interface (Go, Java, C#), function
-type (TypeScript), or function pointer (C). The runtime calls
-``longest_match(buf, pos)`` once per token; everything else about
-the lexer (input buffering, position tracking, EOF handling) stays
-generic in the runtime crate.
+a ``DfaMatcher`` trait (Rust), interface (Go, Java, C#), or function
+type (TypeScript). C is single-translation-unit: the runtime header
+forward-declares ``static void longest_match_impl(...)`` and the
+generated ``.c`` file (which ``#include``\s the header) provides the
+definition, so every reference resolves within the same TU. The
+runtime calls ``longest_match(buf, pos)`` once per token; everything
+else about the lexer (input buffering, position tracking, EOF
+handling) stays generic in the runtime crate.
 
 The ``buf`` argument is a byte view in every backend except
 TypeScript, which receives a Latin-1-decoded string so the matcher
