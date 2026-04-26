@@ -477,6 +477,30 @@ fn emit_dfa_state_arm(
         return;
     }
     writeln!(c, "      case {}: {{", ds.id).unwrap();
+    if !ds.self_loop.is_empty() {
+        // Self-loop scan-skip prologue. clang/gcc autovectorise tight
+        // byte-test loops with -O2; we keep the body simple and let
+        // the optimiser lift it into SIMD on platforms that support it.
+        writeln!(c, "        while (pos < buf_len) {{").unwrap();
+        writeln!(c, "          unsigned char b = (unsigned char)buf[pos];").unwrap();
+        writeln!(
+            c,
+            "          if (!({})) break;",
+            byte_cond(&ds.self_loop)
+        )
+        .unwrap();
+        writeln!(c, "          pos++;").unwrap();
+        writeln!(c, "        }}").unwrap();
+        if let Some(kind) = ds.accept {
+            writeln!(c, "        bl = pos - start;").unwrap();
+            writeln!(
+                c,
+                "        bk = (int16_t){};",
+                c_token_name(st, upper, kind)
+            )
+            .unwrap();
+        }
+    }
     writeln!(c, "        if (pos >= buf_len) goto done;").unwrap();
     writeln!(c, "        unsigned char b = (unsigned char)buf[pos];").unwrap();
     let mut first = true;

@@ -253,6 +253,30 @@ fn emit_dfa_state_arm(
         return;
     }
     writeln!(s, "                case {}: {{", ds.id).unwrap();
+    if !ds.self_loop.is_empty() {
+        // Self-loop scan-skip prologue. HotSpot's loop optimiser will
+        // unroll and (on supported CPUs) vectorise tight byte-test
+        // loops; keeping the body simple lets the JIT do its work.
+        writeln!(s, "                    while (pos < bufLen) {{").unwrap();
+        writeln!(s, "                        int b = buf[pos] & 0xFF;").unwrap();
+        writeln!(
+            s,
+            "                        if (!({})) break;",
+            byte_cond(&ds.self_loop)
+        )
+        .unwrap();
+        writeln!(s, "                        pos++;").unwrap();
+        writeln!(s, "                    }}").unwrap();
+        if let Some(kind) = ds.accept {
+            writeln!(s, "                    bestLen = pos - start;").unwrap();
+            writeln!(
+                s,
+                "                    bestKind = {};",
+                token_id(st, kind)
+            )
+            .unwrap();
+        }
+    }
     writeln!(s, "                    if (pos >= bufLen) break outer;").unwrap();
     writeln!(s, "                    int b = buf[pos] & 0xFF;").unwrap();
     let mut first = true;

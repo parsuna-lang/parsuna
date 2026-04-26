@@ -228,6 +228,25 @@ fn emit_dfa_state_arm(
         return;
     }
     writeln!(s, "\t\tcase {}:", ds.id).unwrap();
+    if !ds.self_loop.is_empty() {
+        // Self-loop scan-skip prologue. The Go compiler vectorises
+        // tight byte-comparison loops on amd64; we keep it inline so
+        // it inlines into the per-state case without a closure.
+        writeln!(s, "\t\t\tfor pos < len(buf) {{").unwrap();
+        writeln!(s, "\t\t\t\tb := buf[pos]").unwrap();
+        writeln!(s, "\t\t\t\tif !({}) {{ break }}", byte_cond(&ds.self_loop)).unwrap();
+        writeln!(s, "\t\t\t\tpos++").unwrap();
+        writeln!(s, "\t\t\t}}").unwrap();
+        if let Some(kind) = ds.accept {
+            writeln!(s, "\t\t\tbestLen = pos - start").unwrap();
+            writeln!(
+                s,
+                "\t\t\tbestKind = int16({})",
+                token_const(st, kind)
+            )
+            .unwrap();
+        }
+    }
     writeln!(
         s,
         "\t\t\tif pos >= len(buf) {{ return bestLen, bestKind, pos - start }}"

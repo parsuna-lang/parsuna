@@ -233,6 +233,29 @@ fn emit_dfa_state_arm(
         return;
     }
     writeln!(s, "                case {}: {{", ds.id).unwrap();
+    if !ds.self_loop.is_empty() {
+        // Self-loop scan-skip prologue. RyuJIT recognises this loop
+        // shape and lifts it to vectorised byte tests on x86/Arm.
+        writeln!(s, "                    while (pos < bufLen) {{").unwrap();
+        writeln!(s, "                        int b = buf[pos];").unwrap();
+        writeln!(
+            s,
+            "                        if (!({})) break;",
+            byte_cond(&ds.self_loop)
+        )
+        .unwrap();
+        writeln!(s, "                        pos++;").unwrap();
+        writeln!(s, "                    }}").unwrap();
+        if let Some(kind) = ds.accept {
+            writeln!(s, "                    bestLen = pos - start;").unwrap();
+            writeln!(
+                s,
+                "                    bestKind = {};",
+                token_short(st, kind)
+            )
+            .unwrap();
+        }
+    }
     writeln!(s, "                    if (pos >= bufLen) goto done;").unwrap();
     writeln!(s, "                    int b = buf[pos];").unwrap();
     let mut first = true;

@@ -22,22 +22,26 @@ The artifact handed to code generation holds:
   for file and package names.
 * ``tokens: Vec<TokenInfo>`` — non-fragment tokens, each with its
   resolved pattern (fragments inlined), its ``skip`` flag, and a
-  stable numeric kind id (1-based; ``0`` is EOF, ``-1`` is lexer
-  ERROR).
+  stable numeric kind id (1-based; ``0`` is EOF). Lex failures are
+  surfaced as ``Option<TK>`` (``None``) at the runtime boundary,
+  not as a reserved kind id, so kinds stay on a non-negative range.
 * ``rule_kinds: Vec<String>`` — names of the non-fragment rules in
   declaration order. A rule's ``RuleKind`` id is its index here.
 * ``first_sets: Vec<FirstSet>`` — the interned FIRST-set pool. Each
-  entry is a ``Vec<Vec<i16>>``: a set of token-id sequences.
-* ``sync_sets: Vec<Vec<i16>>`` — the interned SYNC-set pool. Each
+  entry is a ``Vec<Vec<u16>>``: a set of token-id sequences.
+* ``sync_sets: Vec<Vec<u16>>`` — the interned SYNC-set pool. Each
   entry is a flat list of token ids.
 * ``states: BTreeMap<StateId, State>`` — every parser state, keyed
   by id. Each ``State`` holds a label and a short straight-line
   program of ``Op``\ s.
 * ``entry_states: Vec<(String, StateId)>`` — public entry points,
   one per non-fragment rule.
-* ``eof_id``, ``error_id`` — the reserved sentinel kinds.
 * ``k`` — the grammar's LL(k).
 * ``lexer_dfa`` — the compiled lexer DFA.
+
+EOF's id is the constant ``parsuna_rt::TOKEN_EOF`` (= ``0``); it is
+not stored on the state table because every backend can read the
+constant directly.
 
 The lexer DFA
 -------------
@@ -60,16 +64,37 @@ using standard Thompson construction plus subset determinization:
    via ε-transitions. This is what lets the lexer try every pattern
    in parallel.
 3. **Subset construction.** The NFA is determinized into a flat
-   ``Vec<DfaState>``. Each state carries an optional ``accept: i16``
-   plus its byte transitions already grouped into ``ByteArm`` runs
-   (bytes sharing a target collapse into one arm; contiguous bytes
-   within an arm collapse into ranges). State ``0`` ([``DEAD``]) is
-   reserved as the dead sink — every missing transition lands there,
-   so the runtime's inner loop is a single branch ("exit on 0").
-   The start state is always ``1`` ([``START``]). The accept kind
-   for a DFA state is the **minimum** token id present in the
-   collapsed NFA states, which encodes "declaration order =
-   priority": tokens declared earlier win on ties.
+   ``Vec<DfaState>``. Each state carries an optional
+   ``accept: Option<u16>`` plus its byte transitions already grouped
+   into ``ByteArm`` runs (bytes sharing a target collapse into one
+   arm; contiguous bytes within an arm collapse into ranges). State
+   ``0`` ([``DEAD``]) is reserved as the dead sink — every missing
+   transition lands there, so the runtime's inner loop is a single
+   branch ("exit on 0"). The start state is always ``1``
+   ([``START``]). The accept kind for a DFA state is the **minimum**
+   token id present in the collapsed NFA states, which encodes
+   "declaration order = priority": tokens declared earlier win on
+   ties.
+4. **Minimization.** Subset construction over a UTF-8 NFA produces
+   many nearly-identical states — for example four separate
+   "I'm scanning whitespace" states because each entry byte arrives
+   at a fresh DFA state. ``minimize`` partitions states by ``accept``
+   value, then iteratively splits each block by 256-byte transition
+   signature against the current partitioning, until partitions
+   stabilize. Equivalent states collapse into one. The pass preserves
+   longest-match semantics — accept visits along any input trace
+   stay on the same input position — and it makes the next step
+   substantially more effective.
+5. **Self-loop detection.** For each state, the ``self_loop`` field
+   is filled with the byte ranges whose arms loop the state back to
+   itself (every byte ``b`` for which the matching arm's ``target``
+   equals ``state.id``). Backends use this to emit a "scan past
+   every byte in this set" prologue before the per-byte switch —
+   turning the byte-by-byte hot loop on ``[a-z]+``-like states into
+   one bulk scan that the optimizer can autovectorize. The arms
+   themselves are unchanged (the self-loop arm stays in the dispatch
+   table for backends that don't implement the prologue, or for
+   debug fall-through).
 
 At runtime the lexer implements **longest match**: advance until the
 transition table lands on dead, then back up to the last DFA state
@@ -80,7 +105,10 @@ into the event stream.
 
 The bytes the DFA consumes are UTF-8 octets. Character classes with
 multi-byte codepoints expand to multi-byte NFA paths, so the DFA
-implicitly handles UTF-8 without a separate decoder.
+implicitly handles UTF-8 without a separate decoder. (The character
+class lowering performs the canonical Russ-Cox split into UTF-8 byte
+sequences before the NFA is built — see ``class_byte_seqs`` in
+``lexer_dfa.rs``.)
 
 The state-machine op set
 ------------------------

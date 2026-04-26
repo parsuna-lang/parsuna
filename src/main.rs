@@ -366,6 +366,14 @@ fn print_dfa(st: &StateTable) {
             None => "-".to_string(),
         };
         println!("state {:>3}  {}", state.id, accept);
+        if !state.self_loop.is_empty() {
+            let label: Vec<String> = state
+                .self_loop
+                .iter()
+                .map(|&(lo, hi)| byte_range_label(lo, hi))
+                .collect();
+            println!("            self-loop  {{{}}}", label.join(", "));
+        }
         if state.arms.is_empty() {
             println!("            (terminal — no live transitions)");
         } else {

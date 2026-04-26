@@ -112,25 +112,48 @@ function shaped like:
     fn longest_match(buf, start) -> DfaMatch:
         pos        = start
         best_len   = 0
-        best_kind  = TokenKind.Error
+        best_kind  = None
         state      = <dfa.start>
         loop:
             match state:
                 1 => match buf[pos]:
                     'a'..='z' => { pos += 1; state = 2;
                                    best_len = pos - start;
-                                   best_kind = TokenKind.Ident; }
+                                   best_kind = Some(TokenKind.Ident); }
                     _         => break
-                2 => match buf[pos]:
-                    ...
+                2 => {
+                    // Self-loop prologue: scan past every byte that
+                    // would loop the state back to itself in one go,
+                    // before the per-byte switch.
+                    while buf[pos] in {'a'..='z', '0'..='9', '_'}:
+                        pos += 1
+                    best_len = pos - start
+                    best_kind = Some(TokenKind.Ident)
+                    match buf[pos]:
+                        ...
+                }
                 ...
-            ...
         return DfaMatch { len: best_len, kind: best_kind }
 
 One outer ``switch`` arm per DFA state, one inner ``switch`` arm
 per byte target. Whenever a transition lands on an accept state,
 the surrounding code records ``(best_len, best_kind)`` so the
 classic longest-match rule falls out of the structure.
+
+Self-loop prologue
+~~~~~~~~~~~~~~~~~~
+
+For states whose ``self_loop`` field (set by lowering) is non-empty
+— the typical lexer hot-path states like whitespace runs, identifier
+bodies, comment / string contents — backends emit a bulk scan
+prologue ahead of the regular per-byte switch. The prologue advances
+``pos`` past every byte in the self-loop set in one tight loop that
+the host language's optimizer typically autovectorizes (Rust's
+LLVM, V8's Irregexp via sticky regex, .NET's
+``MemoryExtensions.IndexOfAnyExcept``, Go's ``bytes.IndexFunc``,
+HotSpot's loop vectoriser). The byte that breaks the prologue then
+falls through to the regular dispatch — non-self-loop transitions
+are unchanged.
 
 Byte-range collapsing
 ~~~~~~~~~~~~~~~~~~~~~

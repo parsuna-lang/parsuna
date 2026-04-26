@@ -230,6 +230,46 @@ fn emit_dfa(s: &mut String, st: &StateTable) {
     }
     writeln!(s, "]);").unwrap();
     writeln!(s).unwrap();
+
+    // Per-state sticky regex used by the self-loop scan-skip prologue.
+    // Sets `lastIndex = pos`, runs `.test()` once; on a match the regex
+    // bumps `lastIndex` past the entire run, and the prologue copies
+    // it back into `pos`. Irregexp scans these classes with its native
+    // SIMD primitives, so a 64 KiB whitespace run becomes one tight
+    // bulk loop instead of one switch dispatch per byte.
+    for ds in &st.lexer_dfa {
+        if !ds.self_loop.is_empty() {
+            writeln!(
+                s,
+                "const SKIP_S{} = /[{}]+/y;",
+                ds.id,
+                regex_class(&ds.self_loop)
+            )
+            .unwrap();
+        }
+    }
+    writeln!(s).unwrap();
+}
+
+fn regex_class(ranges: &[(u8, u8)]) -> String {
+    let mut out = String::new();
+    for &(lo, hi) in ranges {
+        if lo == hi {
+            out.push_str(&regex_byte(lo));
+        } else {
+            out.push_str(&regex_byte(lo));
+            out.push('-');
+            out.push_str(&regex_byte(hi));
+        }
+    }
+    out
+}
+
+fn regex_byte(b: u8) -> String {
+    // Always emit `\xHH`. Escapes the regex-class metacharacters
+    // (`]`, `^`, `-`, `\`) implicitly because they're never < 0x80
+    // taken alone — the hex form sidesteps the question entirely.
+    format!("\\x{:02x}", b)
 }
 
 fn emit_dfa_state_arm(
@@ -247,6 +287,24 @@ fn emit_dfa_state_arm(
         return;
     }
     writeln!(s, "      case {}: {{", ds.id).unwrap();
+    if !ds.self_loop.is_empty() {
+        writeln!(s, "        SKIP_S{}.lastIndex = pos;", ds.id).unwrap();
+        writeln!(
+            s,
+            "        if (SKIP_S{}.test(buf)) pos = SKIP_S{}.lastIndex;",
+            ds.id, ds.id
+        )
+        .unwrap();
+        if let Some(kind) = ds.accept {
+            writeln!(s, "        bestLen = pos - start;").unwrap();
+            writeln!(
+                s,
+                "        bestKind = {};",
+                token_variant(st, kind)
+            )
+            .unwrap();
+        }
+    }
     writeln!(
         s,
         "        if (pos >= buf.length) return {{ bestLen, bestKind, scanned: pos - start }};"
