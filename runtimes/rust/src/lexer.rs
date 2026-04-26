@@ -6,18 +6,21 @@ use crate::span::{Pos, Span};
 
 /// Result of running the compiled DFA over a byte slice.
 ///
-/// `best_len`/`best_kind` are the longest match found. `scanned` is how
-/// many bytes the scan actually walked past `start` before it died — it
-/// may exceed `best_len` when the DFA accepted something early and then
-/// kept advancing through non-accept states before running dead. The
-/// streaming lexer uses `scanned == (buf.len() - start)` to detect that
-/// the match ran out of buffer rather than hitting a real dead transition.
+/// `best_len`/`best_kind` are the longest match found. `best_kind` is
+/// `Some(TK)` whenever `best_len > 0`; on a dead scan that never reached
+/// an accept state, `best_len` is `0` and `best_kind` is `None`.
+/// `scanned` is how many bytes the scan actually walked past `start`
+/// before it died — it may exceed `best_len` when the DFA accepted
+/// something early and then kept advancing through non-accept states
+/// before running dead. The streaming lexer uses `scanned == (buf.len()
+/// - start)` to detect that the match ran out of buffer rather than
+/// hitting a real dead transition.
 pub struct DfaMatch<TK: TokenKindEnum> {
     /// Bytes consumed by the longest match. `0` means no accept.
     pub best_len: usize,
-    /// Token kind of the longest match, or [`TokenKindEnum::ERROR`] when the
-    /// scan never reached an accept state.
-    pub best_kind: TK,
+    /// Token kind of the longest match, or `None` when the scan never
+    /// reached an accept state.
+    pub best_kind: Option<TK>,
     /// Total bytes the scan walked. `>= best_len`; equals `buf.len() - start`
     /// if the scan stopped at the end of input rather than at a dead state.
     pub scanned: usize,
@@ -91,15 +94,15 @@ impl<'a, TK: TokenKindEnum, D: DfaMatcher<TK>> Scanner<'a, TK, D> {
     /// Produce the next token, advancing the scanner.
     ///
     /// Behaviour at the boundary: if no token pattern matches at the current
-    /// position, the scanner emits a single-codepoint [`TOKEN_ERROR`] token
+    /// position, the scanner emits a single-codepoint token with `kind: None`
     /// so the parser can surface an error and recover. On exhaustion it
-    /// emits repeated [`TOKEN_EOF`] tokens.
+    /// emits repeated `Some(TK::EOF)` tokens.
     #[inline]
     pub fn next_token(&mut self) -> Token<'a, TK> {
         if self.pos >= self.buf.len() {
             let pos = self.cur_pos();
             return Token {
-                kind: TK::EOF,
+                kind: Some(TK::EOF),
                 span: Span::point(pos),
                 text: Cow::Borrowed(""),
             };
@@ -119,7 +122,7 @@ impl<'a, TK: TokenKindEnum, D: DfaMatcher<TK>> Scanner<'a, TK, D> {
             let text: Cow<'a, str> = Cow::Borrowed(&self.src[self.pos..self.pos + ch_len]);
             self.advance(ch_len);
             Token {
-                kind: TK::ERROR,
+                kind: None,
                 span: Span::new(start, self.cur_pos()),
                 text,
             }
@@ -222,7 +225,7 @@ impl<R: Read, TK: TokenKindEnum, D: DfaMatcher<TK>> StreamingLexer<R, TK, D> {
         if self.view().is_empty() {
             let p = self.pos();
             return Token {
-                kind: TK::EOF,
+                kind: Some(TK::EOF),
                 span: Span::point(p),
                 text: Cow::Borrowed(""),
             };
@@ -242,14 +245,14 @@ impl<R: Read, TK: TokenKindEnum, D: DfaMatcher<TK>> StreamingLexer<R, TK, D> {
             let text = Cow::Owned(String::from_utf8_lossy(&self.view()[..ch_len]).into_owned());
             self.consume(ch_len);
             Token {
-                kind: TK::ERROR,
+                kind: None,
                 span: Span::new(start, self.pos()),
                 text,
             }
         }
     }
 
-    fn longest_match(&mut self) -> (usize, TK) {
+    fn longest_match(&mut self) -> (usize, Option<TK>) {
         loop {
             let view_slice = &self.buf[self.buf_pos..];
             let view_len = view_slice.len();

@@ -4,10 +4,11 @@ use crate::span::{Pos, Span};
 
 /// The token-kind enumeration produced by the code generator.
 ///
-/// Generated parsers declare a `#[repr(i16)]` enum whose variants correspond
+/// Generated parsers declare a `#[repr(u16)]` enum whose variants correspond
 /// to the grammar's named tokens; it implements this trait so the runtime can
 /// talk about kinds uniformly. `EOF` is the sentinel returned once input is
-/// exhausted.
+/// exhausted. Lex failures are represented as `Option<TK>` (`None`) at the
+/// lexer/parser boundary — there is no in-band "error" variant.
 ///
 /// `Copy + Eq + 'static` keep token kinds cheap to move through the parser
 /// and comparable in `FIRST`/`SYNC` sets.
@@ -17,9 +18,6 @@ pub trait TokenKindEnum: Copy + Eq + 'static {
     fn name(self) -> &'static str;
     /// The sentinel that marks end-of-input.
     const EOF: Self;
-    /// The sentinel produced by the lexer when no token pattern matches at
-    /// the current position.
-    const ERROR: Self;
 }
 
 /// The rule-kind enumeration produced by the code generator.
@@ -40,11 +38,11 @@ pub trait RuleKindEnum: Copy + 'static {
 /// order reconstructs the parse tree without the parser ever materialising
 /// one.
 ///
-/// The defaults `TK = i16, RK = u16` exist so the type can name itself
+/// The defaults `TK = u16, RK = u16` exist so the type can name itself
 /// without depending on the generated enums; generated code substitutes its
 /// own kind enums.
 #[derive(Clone, Debug)]
-pub enum Event<'a, TK = i16, RK = u16> {
+pub enum Event<'a, TK = u16, RK = u16> {
     /// Opens the subtree for a rule. `pos` is the start of the first child.
     Enter {
         /// Which rule's subtree is opening.
@@ -71,13 +69,18 @@ pub enum Event<'a, TK = i16, RK = u16> {
 
 /// A lexed token: kind, source span, and the matched text.
 ///
+/// `kind` is `None` only when the lexer could not match any pattern at the
+/// current position; the scanner still advances by one codepoint so parsing
+/// can recover. EOF is its own variant (`Some(TK::EOF)`).
+///
 /// `text` borrows from the input when possible ([`Scanner`](crate::lexer::Scanner)),
 /// and owns an independent string when that is not possible
 /// ([`StreamingLexer`](crate::lexer::StreamingLexer)).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Token<'a, TK = i16> {
-    /// Classification given to this token by the lexer's DFA.
-    pub kind: TK,
+pub struct Token<'a, TK = u16> {
+    /// Classification given to this token by the lexer's DFA, or `None` if
+    /// no token pattern matched.
+    pub kind: Option<TK>,
     /// Source span covered by the matched text.
     pub span: Span,
     /// The matched source text — borrowed from the input where possible
@@ -85,13 +88,13 @@ pub struct Token<'a, TK = i16> {
     pub text: Cow<'a, str>,
 }
 
-impl<'a> Token<'a, i16> {
+impl<'a> Token<'a, u16> {
     /// Build a token with the raw numeric kind id. Mostly used by tests and
     /// by the default-kind specialisation; generated code constructs tokens
     /// with its own enum variants.
-    pub fn new(kind: i16, span: Span, text: impl Into<Cow<'a, str>>) -> Self {
+    pub fn new(kind: u16, span: Span, text: impl Into<Cow<'a, str>>) -> Self {
         Self {
-            kind,
+            kind: Some(kind),
             span,
             text: text.into(),
         }
@@ -99,7 +102,7 @@ impl<'a> Token<'a, i16> {
     /// Build an EOF token at `span`. Always has empty text.
     pub fn eof(span: Span) -> Self {
         Self {
-            kind: TOKEN_EOF,
+            kind: Some(TOKEN_EOF),
             span,
             text: Cow::Borrowed(""),
         }
@@ -108,12 +111,7 @@ impl<'a> Token<'a, i16> {
 
 /// Reserved kind id for end-of-input. Never collides with a grammar token
 /// because the code generator numbers real tokens from `1`.
-pub const TOKEN_EOF: i16 = 0;
-
-/// Reserved kind id for a lexer error (a byte at the current position that
-/// no token pattern matches). The lexer still advances by one codepoint so
-/// parsing can recover.
-pub const TOKEN_ERROR: i16 = -1;
+pub const TOKEN_EOF: u16 = 0;
 
 /// A recoverable parse or lex error.
 ///

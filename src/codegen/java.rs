@@ -176,12 +176,9 @@ fn emit_constants(s: &mut String, st: &StateTable) {
     writeln!(s).unwrap();
 }
 
-fn token_short(st: &StateTable, kind: i16) -> String {
+fn token_short(st: &StateTable, kind: u16) -> String {
     if kind == 0 {
         return "TokenKind.EOF.id".to_string();
-    }
-    if kind == -1 {
-        return "TokenKind.ERROR.id".to_string();
     }
     match st.tokens.iter().find(|t| t.kind == kind) {
         Some(t) => format!("TokenKind.{}.id", screaming_snake(&t.name)),

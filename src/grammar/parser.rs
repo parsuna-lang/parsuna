@@ -106,14 +106,14 @@ impl<'a, I: Iterator<Item = Event<'a>>> Reader<'a, I> {
                     self.issues
                         .push(Error::new("expected a token, got a structural mark").at(span));
                     return Token {
-                        kind: TokenKind::Error,
+                        kind: None,
                         span,
                         text: std::borrow::Cow::Borrowed(""),
                     };
                 }
                 None => {
                     return Token {
-                        kind: TokenKind::Eof,
+                        kind: Some(TokenKind::Eof),
                         span: Span::default(),
                         text: std::borrow::Cow::Borrowed(""),
                     }
@@ -124,7 +124,7 @@ impl<'a, I: Iterator<Item = Event<'a>>> Reader<'a, I> {
 
     fn eat_token(&mut self, want_kind: TokenKind) -> Option<Token<'a>> {
         match self.peek() {
-            Some(Event::Token(t)) if t.kind == want_kind => {
+            Some(Event::Token(t)) if t.kind == Some(want_kind) => {
                 if let Some(Event::Token(t)) = self.advance() {
                     Some(t)
                 } else {
@@ -139,7 +139,7 @@ impl<'a, I: Iterator<Item = Event<'a>>> Reader<'a, I> {
 fn pull_significant<'a, I: Iterator<Item = Event<'a>>>(inner: &mut I) -> Option<Event<'a>> {
     loop {
         match inner.next()? {
-            Event::Token(t) if is_skip(t.kind) => continue,
+            Event::Token(t) if t.kind.map_or(false, is_skip) => continue,
             other => return Some(other),
         }
     }
@@ -325,14 +325,14 @@ fn read_primary_expr<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>) -
         _ => {
             let tok = r.next_token();
             match tok.kind {
-                k if k == TokenKind::Ident => {
+                k if k == Some(TokenKind::Ident) => {
                     if initial_letter(&tok.text).map_or(false, |c| c.is_ascii_uppercase()) {
                         Expr::Token(tok.text.into_owned())
                     } else {
                         Expr::Rule(tok.text.into_owned())
                     }
                 }
-                k if k == TokenKind::String => {
+                k if k == Some(TokenKind::String) => {
                     r.issues.push(
                         Error::new("string literal atoms are only valid inside token declarations")
                             .at(tok.span),
@@ -380,15 +380,15 @@ fn apply_quantifiers<'a, I: Iterator<Item = Event<'a>>>(
 ) -> Expr {
     loop {
         match r.peek() {
-            Some(Event::Token(t)) if t.kind == TokenKind::Question => {
+            Some(Event::Token(t)) if t.kind == Some(TokenKind::Question) => {
                 r.advance();
                 x = Expr::Opt(Box::new(x));
             }
-            Some(Event::Token(t)) if t.kind == TokenKind::Star => {
+            Some(Event::Token(t)) if t.kind == Some(TokenKind::Star) => {
                 r.advance();
                 x = Expr::Star(Box::new(x));
             }
-            Some(Event::Token(t)) if t.kind == TokenKind::Plus => {
+            Some(Event::Token(t)) if t.kind == Some(TokenKind::Plus) => {
                 r.advance();
                 x = Expr::Plus(Box::new(x));
             }
@@ -432,8 +432,8 @@ fn read_pattern_primary<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>
         _ => {
             let tok = r.next_token();
             match tok.kind {
-                k if k == TokenKind::Ident => TokenPattern::Ref(tok.text.into_owned()),
-                k if k == TokenKind::String => {
+                k if k == Some(TokenKind::Ident) => TokenPattern::Ref(tok.text.into_owned()),
+                k if k == Some(TokenKind::String) => {
                     TokenPattern::Literal(unquote_string(&tok.text, tok.span, &mut r.issues))
                 }
                 _ => {
@@ -452,12 +452,12 @@ fn read_pattern_primary<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>
 fn read_char_primary<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>) -> TokenPattern {
     r.expect_enter(RuleKind::CharPrimary);
     let first = r.next_token();
-    let p = if first.kind == TokenKind::Dot {
+    let p = if first.kind == Some(TokenKind::Dot) {
         TokenPattern::Class(CharClass {
             negated: true,
             items: Vec::new(),
         })
-    } else if first.kind == TokenKind::Char {
+    } else if first.kind == Some(TokenKind::Char) {
         let lo = unquote_char(&first.text, first.span, &mut r.issues);
         if r.eat_token(TokenKind::Dotdot).is_some() {
             let hi_tok = r.next_token();
@@ -629,15 +629,15 @@ fn apply_pattern_quantifiers<'a, I: Iterator<Item = Event<'a>>>(
 ) -> TokenPattern {
     loop {
         match r.peek() {
-            Some(Event::Token(t)) if t.kind == TokenKind::Question => {
+            Some(Event::Token(t)) if t.kind == Some(TokenKind::Question) => {
                 r.advance();
                 p = TokenPattern::Opt(Box::new(p));
             }
-            Some(Event::Token(t)) if t.kind == TokenKind::Star => {
+            Some(Event::Token(t)) if t.kind == Some(TokenKind::Star) => {
                 r.advance();
                 p = TokenPattern::Star(Box::new(p));
             }
-            Some(Event::Token(t)) if t.kind == TokenKind::Plus => {
+            Some(Event::Token(t)) if t.kind == Some(TokenKind::Plus) => {
                 r.advance();
                 p = TokenPattern::Plus(Box::new(p));
             }

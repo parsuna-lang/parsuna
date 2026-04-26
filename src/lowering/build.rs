@@ -58,7 +58,7 @@ pub enum Op {
     /// to `sync`.
     Expect {
         /// Required token-kind id.
-        kind: i16,
+        kind: u16,
         /// Token name, retained only for the diagnostic message.
         token_name: String,
         /// SYNC-set id to recover to on mismatch.
@@ -137,15 +137,11 @@ pub struct Program {
     /// is its index here.
     pub rules: Vec<String>,
     /// Interned FIRST-set pool. Each entry is a `FirstSet` — a list of
-    /// `LookaheadSeq`s (i.e. `Vec<Vec<i16>>`). Index by [`FirstSetId`].
+    /// `LookaheadSeq`s (i.e. `Vec<Vec<u16>>`). Index by [`FirstSetId`].
     pub first_sets: FirstSetPool,
-    /// Interned SYNC-set pool. Each entry is a flat `Vec<i16>` of token
+    /// Interned SYNC-set pool. Each entry is a flat `Vec<u16>` of token
     /// ids. Index by [`SyncSetId`].
     pub sync_sets: SyncSetPool,
-    /// Token-kind id reserved for end-of-input.
-    pub eof_id: i16,
-    /// Token-kind id reserved for lexer ERROR.
-    pub error_id: i16,
 }
 
 /// Mutable state carried through the recursive descent over rule bodies.
@@ -161,7 +157,7 @@ struct Builder<'a> {
     first_sets: FirstSetPool,
     first_intern: HashMap<Vec<LookaheadSeq>, FirstSetId>,
     sync_sets: SyncSetPool,
-    sync_intern: HashMap<Vec<i16>, SyncSetId>,
+    sync_intern: HashMap<Vec<u16>, SyncSetId>,
     current_sync: SyncSetId,
     current_symbol: String,
 }
@@ -173,9 +169,10 @@ pub fn build(ag: &AnalyzedGrammar) -> Program {
     let g = &ag.grammar;
     let rules = collect_rules(g);
 
-    // Assign dense kind ids starting at 1 — EOF (0) and ERROR (-1) are
-    // reserved runtime sentinels. Fragments are filtered out because they
-    // never become a real token kind at run time.
+    // Assign dense kind ids starting at 1 — EOF (0) is reserved. Lex
+    // failures are surfaced as `Option<TK>` (`None`) at the runtime
+    // boundary, so they consume no kind id. Fragments are filtered out
+    // because they never become a real token kind at run time.
     let tokens: Vec<TokenInfo> = g
         .tokens
         .values()
@@ -185,12 +182,9 @@ pub fn build(ag: &AnalyzedGrammar) -> Program {
             name: t.name.clone(),
             pattern: resolve_pattern(&t.pattern, g),
             skip: t.skip,
-            kind: (i + 1) as i16,
+            kind: (i + 1) as u16,
         })
         .collect();
-    let error_id: i16 = parsuna_rt::TOKEN_ERROR;
-    let eof_id: i16 = parsuna_rt::TOKEN_EOF;
-
     let mut b = Builder {
         ag,
         blocks: Vec::new(),
@@ -208,7 +202,7 @@ pub fn build(ag: &AnalyzedGrammar) -> Program {
         // Every rule gets its own SYNC set (its FOLLOW plus EOF). Interned
         // up-front and stashed in `current_sync` so every `Expect` emitted
         // inside this rule's body can refer to it without recomputing.
-        let sync = compute_sync(ag, &rule.name, eof_id);
+        let sync = compute_sync(ag, &rule.name);
         b.current_sync = b.intern_sync(sync);
         b.current_symbol = rule.name.clone();
         let bid = b.new_block(rule.name.clone());
@@ -253,8 +247,6 @@ pub fn build(ag: &AnalyzedGrammar) -> Program {
         rules,
         first_sets,
         sync_sets,
-        eof_id,
-        error_id,
     }
 }
 
@@ -297,7 +289,7 @@ impl Builder<'_> {
 
     /// Intern a SYNC set (a list of token ids). Same sort+dedup strategy
     /// as `intern_first`.
-    fn intern_sync(&mut self, mut kinds: Vec<i16>) -> SyncSetId {
+    fn intern_sync(&mut self, mut kinds: Vec<u16>) -> SyncSetId {
         kinds.sort();
         kinds.dedup();
         if let Some(id) = self.sync_intern.get(&kinds) {
@@ -514,7 +506,7 @@ fn collect_rules(g: &Grammar) -> Vec<String> {
 /// SYNC set for a rule: every real token in its FOLLOW plus EOF. `EOF`
 /// always sits at the end so the recovery loop will stop if nothing else
 /// catches it, rather than running off the input.
-fn compute_sync(ag: &AnalyzedGrammar, rule_name: &str, eof_id: i16) -> Vec<i16> {
+fn compute_sync(ag: &AnalyzedGrammar, rule_name: &str) -> Vec<u16> {
     let follow = ag.follow.get(rule_name).cloned().unwrap_or_default();
     let mut names: Vec<&str> = follow
         .iter()
@@ -523,21 +515,21 @@ fn compute_sync(ag: &AnalyzedGrammar, rule_name: &str, eof_id: i16) -> Vec<i16> 
         .collect();
     names.sort();
     names.dedup();
-    let mut ids: Vec<i16> = names.iter().map(|n| token_kind(ag, n)).collect();
-    ids.push(eof_id);
+    let mut ids: Vec<u16> = names.iter().map(|n| token_kind(ag, n)).collect();
+    ids.push(parsuna_rt::TOKEN_EOF);
     ids
 }
 
 /// Look up the numeric kind id of a token by name. Fragments are excluded
 /// from the numbering (they never appear at run time), so the id is 1-based
 /// over the non-fragment tokens.
-fn token_kind(ag: &AnalyzedGrammar, name: &str) -> i16 {
+fn token_kind(ag: &AnalyzedGrammar, name: &str) -> u16 {
     ag.grammar
         .tokens
         .values()
         .filter(|t| !t.is_fragment)
         .position(|t| t.name == name)
-        .map(|i| (i + 1) as i16)
+        .map(|i| (i + 1) as u16)
         .unwrap_or(0)
 }
 
@@ -606,7 +598,7 @@ mod tests {
         let prog = build(&ag);
         // Fragment _DIGIT must be excluded from the kind table.
         assert!(prog.tokens.iter().all(|t| !t.name.starts_with('_')));
-        let kinds: Vec<i16> = prog.tokens.iter().map(|t| t.kind).collect();
+        let kinds: Vec<u16> = prog.tokens.iter().map(|t| t.kind).collect();
         assert_eq!(kinds, vec![1, 2]);
     }
 
@@ -683,17 +675,9 @@ mod tests {
     }
 
     #[test]
-    fn build_eof_and_error_ids_match_runtime_sentinels() {
-        let ag = analyze_src("T = \"t\"; main = T;");
-        let prog = build(&ag);
-        assert_eq!(prog.eof_id, parsuna_rt::TOKEN_EOF);
-        assert_eq!(prog.error_id, parsuna_rt::TOKEN_ERROR);
-    }
-
-    #[test]
     fn compute_sync_includes_eof_marker_at_end() {
         let ag = analyze_src("T = \"t\"; main = T;");
-        let sync = compute_sync(&ag, "main", parsuna_rt::TOKEN_EOF);
+        let sync = compute_sync(&ag, "main");
         assert!(!sync.is_empty());
         assert_eq!(*sync.last().unwrap(), parsuna_rt::TOKEN_EOF);
     }

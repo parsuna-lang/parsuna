@@ -40,7 +40,7 @@ pub struct DfaState {
     /// Token-kind id accepted in this state, or `None` if it is not an
     /// accept state. Filled by taking the minimum (= highest priority) of
     /// the NFA states collapsed into this DFA state.
-    pub accept: Option<i16>,
+    pub accept: Option<u16>,
 }
 
 /// One `match`/`switch` arm in a generated DFA state: every byte that
@@ -52,7 +52,7 @@ pub struct ByteArm {
     /// If `target` is an accept state, the token-kind id it accepts. Folded
     /// onto the arm so backends can emit `best_kind = ...` inline at the
     /// transition site without re-resolving `target` against the state vec.
-    pub target_accept: Option<i16>,
+    pub target_accept: Option<u16>,
     /// Inclusive byte ranges that all transition to `target`. Stored
     /// sorted and gap-separated; adjacent runs (`hi + 1 == next.lo`)
     /// merge into a single range.
@@ -85,7 +85,7 @@ struct NfaState {
     /// NFA state to enter on any byte in that range.
     range_trans: Vec<((u8, u8), NfaStateId)>,
     epsilon: Vec<NfaStateId>,
-    accept: Option<i16>,
+    accept: Option<u16>,
 }
 
 struct NfaFragment {
@@ -115,7 +115,7 @@ impl NfaBuilder {
         self.states[from].range_trans.push(((lo, hi), to));
     }
 
-    fn set_accept(&mut self, s: NfaStateId, kind: i16) {
+    fn set_accept(&mut self, s: NfaStateId, kind: u16) {
         self.states[s].accept = Some(kind);
     }
 
@@ -515,7 +515,7 @@ fn subset_construct(nfa: &Nfa) -> Vec<DfaState> {
         // set of NFA targets, which we close and look up / register as a
         // DFA state. Track each target's accept kind alongside its ranges
         // so we can fold it onto the emitted `ByteArm`.
-        let mut by_target: BTreeMap<u32, (Option<i16>, Vec<(u8, u8)>)> = BTreeMap::new();
+        let mut by_target: BTreeMap<u32, (Option<u16>, Vec<(u8, u8)>)> = BTreeMap::new();
         for ((lo, hi), targets) in partition_ranges(&edges) {
             let closed = epsilon_closure(nfa, targets);
             let tgt_id = if let Some(id) = set_to_id.get(&closed) {
@@ -573,7 +573,7 @@ fn new_dfa_state(id: u32, nfa: &Nfa, set: &BTreeSet<NfaStateId>) -> DfaState {
     // accepts multiple kinds, we keep the smallest id — which matches the
     // grammar's declaration order and gives earlier tokens precedence (for
     // example, keyword `if` beats generic `IDENT`).
-    let mut accept: Option<i16> = None;
+    let mut accept: Option<u16> = None;
     for &s in set {
         if let Some(k) = nfa.states[s].accept {
             accept = Some(match accept {
@@ -623,10 +623,10 @@ mod tests {
         dfa.iter().find(|s| s.id == id).expect("state id not in dfa")
     }
 
-    fn scan(dfa: &[DfaState], bytes: &[u8]) -> Option<(usize, i16)> {
+    fn scan(dfa: &[DfaState], bytes: &[u8]) -> Option<(usize, u16)> {
         let mut state = START;
         let mut pos = 0;
-        let mut last: Option<(usize, i16)> = None;
+        let mut last: Option<(usize, u16)> = None;
         loop {
             if pos < bytes.len() {
                 let next = step(by_id(dfa, state), bytes[pos]);
@@ -656,7 +656,7 @@ mod tests {
         xs.into_iter()
             .enumerate()
             .map(|(i, mut t)| {
-                t.kind = (i + 1) as i16;
+                t.kind = (i + 1) as u16;
                 t
             })
             .collect()

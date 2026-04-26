@@ -179,8 +179,6 @@ mod tests {
             sync_sets: vec![],
             states,
             entry_states: vec![("main".into(), 1)],
-            eof_id: 0,
-            error_id: -1,
             k: 1,
             lexer_dfa: empty_dfa(),
         };

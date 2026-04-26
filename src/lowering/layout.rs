@@ -96,8 +96,6 @@ pub fn layout(prog: Program, ag: &AnalyzedGrammar) -> StateTable {
         sync_sets: prog.sync_sets,
         states,
         entry_states,
-        eof_id: prog.eof_id,
-        error_id: prog.error_id,
         k: ag.k,
         lexer_dfa,
     }

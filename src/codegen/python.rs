@@ -128,19 +128,19 @@ fn build_lib_rs(
         let p = crate::codegen::common::pascal(n);
         writeln!(
             &mut out,
-            "    #[classattr] pub const {}: i16 = TokenKind::{} as i16;",
+            "    #[classattr] pub const {}: u16 = TokenKind::{} as u16;",
             p, p
         )
         .unwrap();
     }
     writeln!(
         &mut out,
-        "    #[classattr] pub const EOF: i16 = parsuna_rt::TOKEN_EOF;"
+        "    #[classattr] pub const EOF: u16 = parsuna_rt::TOKEN_EOF;"
     )
     .unwrap();
     writeln!(
         &mut out,
-        "    #[classattr] pub const ERROR: i16 = parsuna_rt::TOKEN_ERROR;"
+        "    #[classattr] pub const ERROR: u16 = parsuna_rt::TOKEN_ERROR;"
     )
     .unwrap();
     writeln!(&mut out, "}}").unwrap();

@@ -70,28 +70,31 @@ fn emit_token_kinds(s: &mut String, st: &StateTable) {
     writeln!(s, "///").unwrap();
     writeln!(
         s,
-        "/// `Eof` marks end-of-input and `Error` is produced by the lexer when"
+        "/// `Eof` marks end-of-input; the other variants come from the grammar's"
     )
     .unwrap();
     writeln!(
         s,
-        "/// no pattern matches at the current position; the other variants come"
+        "/// `token` declarations. Lex failures (no pattern matched) are surfaced"
     )
     .unwrap();
-    writeln!(s, "/// from the grammar's `token` declarations.").unwrap();
+    writeln!(
+        s,
+        "/// as `Token {{ kind: None }}` rather than an in-band error variant."
+    )
+    .unwrap();
     writeln!(s, "#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]").unwrap();
-    writeln!(s, "#[repr(i16)]").unwrap();
+    writeln!(s, "#[repr(u16)]").unwrap();
     writeln!(s, "pub enum TokenKind {{").unwrap();
     writeln!(s, "    Eof = 0,").unwrap();
-    writeln!(s, "    Error = -1,").unwrap();
     for t in &st.tokens {
         writeln!(s, "    {} = {},", pascal(&t.name), t.kind).unwrap();
     }
     writeln!(s, "}}").unwrap();
     writeln!(s).unwrap();
     writeln!(s, "impl TokenKind {{").unwrap();
-    writeln!(s, "    /// Numeric discriminant, equal to `self as i16`.").unwrap();
-    writeln!(s, "    pub const fn id(self) -> i16 {{ self as i16 }}").unwrap();
+    writeln!(s, "    /// Numeric discriminant, equal to `self as u16`.").unwrap();
+    writeln!(s, "    pub const fn id(self) -> u16 {{ self as u16 }}").unwrap();
     writeln!(s, "}}").unwrap();
     writeln!(s).unwrap();
 
@@ -99,7 +102,6 @@ fn emit_token_kinds(s: &mut String, st: &StateTable) {
     writeln!(s, "    fn name(self) -> &'static str {{").unwrap();
     writeln!(s, "        match self {{").unwrap();
     writeln!(s, "            TokenKind::Eof => \"EOF\",").unwrap();
-    writeln!(s, "            TokenKind::Error => \"ERROR\",").unwrap();
     for t in &st.tokens {
         writeln!(
             s,
@@ -112,7 +114,6 @@ fn emit_token_kinds(s: &mut String, st: &StateTable) {
     writeln!(s, "        }}").unwrap();
     writeln!(s, "    }}").unwrap();
     writeln!(s, "    const EOF: Self = Self::Eof;").unwrap();
-    writeln!(s, "    const ERROR: Self = Self::Error;").unwrap();
     writeln!(s, "}}").unwrap();
     writeln!(s).unwrap();
 }
@@ -192,7 +193,7 @@ fn emit_compiled_dfa(s: &mut String, st: &StateTable) {
     .unwrap();
     writeln!(s, "        let mut pos = start;").unwrap();
     writeln!(s, "        let mut best_len: usize = 0;").unwrap();
-    writeln!(s, "        let mut best_kind: TokenKind = TokenKind::Error;").unwrap();
+    writeln!(s, "        let mut best_kind: Option<TokenKind> = None;").unwrap();
     writeln!(s, "        let mut state: u32 = {};", START).unwrap();
     writeln!(s, "        loop {{").unwrap();
     writeln!(s, "            match state {{").unwrap();
@@ -240,7 +241,7 @@ fn emit_dfa_state_arm(
         if let Some(kind) = arm.target_accept {
             write!(
                 s,
-                " best_len = pos - start; best_kind = {};",
+                " best_len = pos - start; best_kind = Some({});",
                 token_variant(st, kind)
             )
             .unwrap();
@@ -320,12 +321,9 @@ fn emit_tables(s: &mut String, st: &StateTable) {
     writeln!(s).unwrap();
 }
 
-fn token_variant(st: &StateTable, kind: i16) -> String {
+fn token_variant(st: &StateTable, kind: u16) -> String {
     if kind == 0 {
         return "TokenKind::Eof".to_string();
-    }
-    if kind == -1 {
-        return "TokenKind::Error".to_string();
     }
     match st.tokens.iter().find(|t| t.kind == kind) {
         Some(t) => format!("TokenKind::{}", pascal(&t.name)),
@@ -357,8 +355,8 @@ pub type Parser<'a, L> = parsuna_rt::Parser<'a, L, K, Grammar>;
     );
 }
 
-fn kind_pattern(st: &StateTable, first: &[Vec<i16>]) -> String {
-    let mut kinds: Vec<i16> = first
+fn kind_pattern(st: &StateTable, first: &[Vec<u16>]) -> String {
+    let mut kinds: Vec<u16> = first
         .iter()
         .map(|seq| {
             assert_eq!(seq.len(), 1, "kind_pattern expects LL(1) singletons");
@@ -369,7 +367,7 @@ fn kind_pattern(st: &StateTable, first: &[Vec<i16>]) -> String {
     kinds.dedup();
     kinds
         .iter()
-        .map(|k| token_variant(st, *k))
+        .map(|k| format!("Some({})", token_variant(st, *k)))
         .collect::<Vec<_>>()
         .join(" | ")
 }
@@ -474,7 +472,7 @@ fn emit_dispatch_tree(
             let inner = format!("{}    ", ind);
             let inner2 = format!("{}    ", inner);
             for (kind, sub) in arms {
-                let pat = token_variant(table, *kind);
+                let pat = format!("Some({})", token_variant(table, *kind));
                 match sub {
                     DispatchTree::Leaf(leaf) => {
                         write!(s, "{}{} => {{ ", inner, pat).unwrap();
@@ -524,7 +522,7 @@ fn emit_leaf_inline(s: &mut String, leaf: &DispatchLeaf, sync: u32, next: u32) {
 }
 
 fn emit_step(s: &mut String, table: &StateTable) {
-    let skip_kinds: Vec<i16> = table
+    let skip_kinds: Vec<u16> = table
         .tokens
         .iter()
         .filter(|t| t.skip)

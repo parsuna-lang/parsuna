@@ -67,7 +67,7 @@ impl<'a, L: LexerBackend<'a, G::TokenKind>, const K: usize, G: Drive<K>> Parser<
         let mut parser = Parser {
             lex,
             look: std::array::from_fn(|_| Token {
-                kind: G::TokenKind::EOF,
+                kind: Some(G::TokenKind::EOF),
                 span: Span::default(),
                 text: std::borrow::Cow::Borrowed(""),
             }),
@@ -139,7 +139,7 @@ impl<'a, L: LexerBackend<'a, G::TokenKind>, const K: usize, G: Drive<K>> Parser<
     pub fn matches_first(&self, set: &[&[G::TokenKind]]) -> bool {
         'seq: for seq in set {
             for (i, want) in seq.iter().enumerate() {
-                if self.look[i].kind != *want {
+                if self.look[i].kind != Some(*want) {
                     continue 'seq;
                 }
             }
@@ -207,13 +207,13 @@ impl<'a, L: LexerBackend<'a, G::TokenKind>, const K: usize, G: Drive<K>> Parser<
         sync: &[G::TokenKind],
         expected_msg: &'static str,
     ) {
-        if self.look[0].kind == kind {
+        if self.look[0].kind == Some(kind) {
             self.consume();
             return;
         }
         self.error_here(expected_msg);
         self.recover_to(sync);
-        if self.look[0].kind == kind {
+        if self.look[0].kind == Some(kind) {
             self.consume();
         }
     }
@@ -234,8 +234,12 @@ impl<'a, L: LexerBackend<'a, G::TokenKind>, const K: usize, G: Drive<K>> Parser<
     /// Consume tokens until the current lookahead matches `sync` (or EOF).
     /// Called after an error to skip past garbage.
     pub fn recover_to(&mut self, sync: &[G::TokenKind]) {
-        while self.look[0].kind != G::TokenKind::EOF && !sync.contains(&self.look[0].kind) {
-            self.consume();
+        loop {
+            match self.look[0].kind {
+                Some(k) if k == G::TokenKind::EOF => return,
+                Some(k) if sync.contains(&k) => return,
+                _ => self.consume(),
+            }
         }
     }
 
@@ -255,9 +259,9 @@ impl<'a, L: LexerBackend<'a, G::TokenKind>, const K: usize, G: Drive<K>> Parser<
             if self.state == TERMINATED {
                 if !self.eof_checked {
                     self.eof_checked = true;
-                    if self.look[0].kind != G::TokenKind::EOF {
+                    if self.look[0].kind != Some(G::TokenKind::EOF) {
                         self.error_here("expected end of input");
-                        while self.look[0].kind != G::TokenKind::EOF {
+                        while self.look[0].kind != Some(G::TokenKind::EOF) {
                             self.consume();
                         }
                     }
@@ -277,9 +281,13 @@ impl<'a, L: LexerBackend<'a, G::TokenKind>, const K: usize, G: Drive<K>> Parser<
     fn pump_token(&mut self) -> Token<'a, G::TokenKind> {
         loop {
             let t = self.lex.next_token();
-            if G::HAS_SKIPS && G::is_skip(t.kind) {
-                self.pending_skips.push_back(t);
-                continue;
+            if G::HAS_SKIPS {
+                if let Some(k) = t.kind {
+                    if G::is_skip(k) {
+                        self.pending_skips.push_back(t);
+                        continue;
+                    }
+                }
             }
             return t;
         }

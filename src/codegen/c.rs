@@ -612,12 +612,9 @@ fn emit_step(c: &mut String, st: &StateTable, _stem: &str, upper: &str) {
     writeln!(c).unwrap();
 }
 
-fn c_token_name(st: &StateTable, upper: &str, kind: i16) -> String {
+fn c_token_name(st: &StateTable, upper: &str, kind: u16) -> String {
     if kind == 0 {
         return format!("{upper}_TK_EOF");
-    }
-    if kind == -1 {
-        return format!("{upper}_TK_ERROR");
     }
     match st.tokens.iter().find(|t| t.kind == kind) {
         Some(t) => format!("{upper}_TK_{}", t.name),

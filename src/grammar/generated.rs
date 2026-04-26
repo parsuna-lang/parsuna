@@ -10,14 +10,13 @@ use parsuna_rt::{DfaMatch, DfaMatcher, LexerBackend, Scanner, StreamingLexer, TE
 
 /// The set of token kinds this grammar can emit.
 ///
-/// `Eof` marks end-of-input and `Error` is produced by the lexer when
-/// no pattern matches at the current position; the other variants come
-/// from the grammar's `token` declarations.
+/// `Eof` marks end-of-input; the other variants come from the grammar's
+/// `token` declarations. Lex failures (no pattern matched) are surfaced
+/// as `Token { kind: None }` rather than an in-band error variant.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-#[repr(i16)]
+#[repr(u16)]
 pub enum TokenKind {
     Eof = 0,
-    Error = -1,
     Lparen = 1,
     Rparen = 2,
     Lbrack = 3,
@@ -40,15 +39,14 @@ pub enum TokenKind {
 }
 
 impl TokenKind {
-    /// Numeric discriminant, equal to `self as i16`.
-    pub const fn id(self) -> i16 { self as i16 }
+    /// Numeric discriminant, equal to `self as u16`.
+    pub const fn id(self) -> u16 { self as u16 }
 }
 
 impl parsuna_rt::TokenKindEnum for TokenKind {
     fn name(self) -> &'static str {
         match self {
             TokenKind::Eof => "EOF",
-            TokenKind::Error => "ERROR",
             TokenKind::Lparen => "LPAREN",
             TokenKind::Rparen => "RPAREN",
             TokenKind::Lbrack => "LBRACK",
@@ -71,7 +69,6 @@ impl parsuna_rt::TokenKindEnum for TokenKind {
         }
     }
     const EOF: Self = Self::Eof;
-    const ERROR: Self = Self::Error;
 }
 
 /// One variant per non-fragment rule in the grammar.
@@ -137,68 +134,68 @@ impl DfaMatcher<TokenKind> for LexerDfa {
     fn longest_match(buf: &[u8], start: usize) -> DfaMatch<TokenKind> {
         let mut pos = start;
         let mut best_len: usize = 0;
-        let mut best_kind: TokenKind = TokenKind::Error;
+        let mut best_kind: Option<TokenKind> = None;
         let mut state: u32 = 1;
         loop {
             match state {
                 1 => match buf.get(pos) {
-                    Some(&b'\t') => { pos += 1; state = 2; best_len = pos - start; best_kind = TokenKind::Ws; }
-                    Some(&b'\n') => { pos += 1; state = 3; best_len = pos - start; best_kind = TokenKind::Ws; }
-                    Some(&b'\r') => { pos += 1; state = 4; best_len = pos - start; best_kind = TokenKind::Ws; }
-                    Some(&b' ') => { pos += 1; state = 5; best_len = pos - start; best_kind = TokenKind::Ws; }
-                    Some(&b'!') => { pos += 1; state = 6; best_len = pos - start; best_kind = TokenKind::Bang; }
+                    Some(&b'\t') => { pos += 1; state = 2; best_len = pos - start; best_kind = Some(TokenKind::Ws); }
+                    Some(&b'\n') => { pos += 1; state = 3; best_len = pos - start; best_kind = Some(TokenKind::Ws); }
+                    Some(&b'\r') => { pos += 1; state = 4; best_len = pos - start; best_kind = Some(TokenKind::Ws); }
+                    Some(&b' ') => { pos += 1; state = 5; best_len = pos - start; best_kind = Some(TokenKind::Ws); }
+                    Some(&b'!') => { pos += 1; state = 6; best_len = pos - start; best_kind = Some(TokenKind::Bang); }
                     Some(&b'"') => { pos += 1; state = 7; }
                     Some(&b'\'') => { pos += 1; state = 8; }
-                    Some(&b'(') => { pos += 1; state = 9; best_len = pos - start; best_kind = TokenKind::Lparen; }
-                    Some(&b')') => { pos += 1; state = 10; best_len = pos - start; best_kind = TokenKind::Rparen; }
-                    Some(&b'*') => { pos += 1; state = 11; best_len = pos - start; best_kind = TokenKind::Star; }
-                    Some(&b'+') => { pos += 1; state = 12; best_len = pos - start; best_kind = TokenKind::Plus; }
-                    Some(&b',') => { pos += 1; state = 13; best_len = pos - start; best_kind = TokenKind::Comma; }
-                    Some(&b'.') => { pos += 1; state = 14; best_len = pos - start; best_kind = TokenKind::Dot; }
+                    Some(&b'(') => { pos += 1; state = 9; best_len = pos - start; best_kind = Some(TokenKind::Lparen); }
+                    Some(&b')') => { pos += 1; state = 10; best_len = pos - start; best_kind = Some(TokenKind::Rparen); }
+                    Some(&b'*') => { pos += 1; state = 11; best_len = pos - start; best_kind = Some(TokenKind::Star); }
+                    Some(&b'+') => { pos += 1; state = 12; best_len = pos - start; best_kind = Some(TokenKind::Plus); }
+                    Some(&b',') => { pos += 1; state = 13; best_len = pos - start; best_kind = Some(TokenKind::Comma); }
+                    Some(&b'.') => { pos += 1; state = 14; best_len = pos - start; best_kind = Some(TokenKind::Dot); }
                     Some(&b'/') => { pos += 1; state = 15; }
-                    Some(&b';') => { pos += 1; state = 16; best_len = pos - start; best_kind = TokenKind::Semi; }
-                    Some(&b'=') => { pos += 1; state = 17; best_len = pos - start; best_kind = TokenKind::Eq; }
-                    Some(&b'?') => { pos += 1; state = 18; best_len = pos - start; best_kind = TokenKind::Question; }
-                    Some(&(b'A'..=b'Z')) => { pos += 1; state = 19; best_len = pos - start; best_kind = TokenKind::Ident; }
-                    Some(&b'[') => { pos += 1; state = 20; best_len = pos - start; best_kind = TokenKind::Lbrack; }
-                    Some(&b']') => { pos += 1; state = 21; best_len = pos - start; best_kind = TokenKind::Rbrack; }
-                    Some(&b'_') => { pos += 1; state = 22; best_len = pos - start; best_kind = TokenKind::Ident; }
-                    Some(&(b'a'..=b'z')) => { pos += 1; state = 23; best_len = pos - start; best_kind = TokenKind::Ident; }
-                    Some(&b'|') => { pos += 1; state = 24; best_len = pos - start; best_kind = TokenKind::Pipe; }
+                    Some(&b';') => { pos += 1; state = 16; best_len = pos - start; best_kind = Some(TokenKind::Semi); }
+                    Some(&b'=') => { pos += 1; state = 17; best_len = pos - start; best_kind = Some(TokenKind::Eq); }
+                    Some(&b'?') => { pos += 1; state = 18; best_len = pos - start; best_kind = Some(TokenKind::Question); }
+                    Some(&(b'A'..=b'Z')) => { pos += 1; state = 19; best_len = pos - start; best_kind = Some(TokenKind::Ident); }
+                    Some(&b'[') => { pos += 1; state = 20; best_len = pos - start; best_kind = Some(TokenKind::Lbrack); }
+                    Some(&b']') => { pos += 1; state = 21; best_len = pos - start; best_kind = Some(TokenKind::Rbrack); }
+                    Some(&b'_') => { pos += 1; state = 22; best_len = pos - start; best_kind = Some(TokenKind::Ident); }
+                    Some(&(b'a'..=b'z')) => { pos += 1; state = 23; best_len = pos - start; best_kind = Some(TokenKind::Ident); }
+                    Some(&b'|') => { pos += 1; state = 24; best_len = pos - start; best_kind = Some(TokenKind::Pipe); }
                     _ => break,
                 },
                 2 => match buf.get(pos) {
-                    Some(&b'\t') => { pos += 1; state = 25; best_len = pos - start; best_kind = TokenKind::Ws; }
-                    Some(&b'\n') => { pos += 1; state = 26; best_len = pos - start; best_kind = TokenKind::Ws; }
-                    Some(&b'\r') => { pos += 1; state = 27; best_len = pos - start; best_kind = TokenKind::Ws; }
-                    Some(&b' ') => { pos += 1; state = 28; best_len = pos - start; best_kind = TokenKind::Ws; }
+                    Some(&b'\t') => { pos += 1; state = 25; best_len = pos - start; best_kind = Some(TokenKind::Ws); }
+                    Some(&b'\n') => { pos += 1; state = 26; best_len = pos - start; best_kind = Some(TokenKind::Ws); }
+                    Some(&b'\r') => { pos += 1; state = 27; best_len = pos - start; best_kind = Some(TokenKind::Ws); }
+                    Some(&b' ') => { pos += 1; state = 28; best_len = pos - start; best_kind = Some(TokenKind::Ws); }
                     _ => break,
                 },
                 3 => match buf.get(pos) {
-                    Some(&b'\t') => { pos += 1; state = 25; best_len = pos - start; best_kind = TokenKind::Ws; }
-                    Some(&b'\n') => { pos += 1; state = 26; best_len = pos - start; best_kind = TokenKind::Ws; }
-                    Some(&b'\r') => { pos += 1; state = 27; best_len = pos - start; best_kind = TokenKind::Ws; }
-                    Some(&b' ') => { pos += 1; state = 28; best_len = pos - start; best_kind = TokenKind::Ws; }
+                    Some(&b'\t') => { pos += 1; state = 25; best_len = pos - start; best_kind = Some(TokenKind::Ws); }
+                    Some(&b'\n') => { pos += 1; state = 26; best_len = pos - start; best_kind = Some(TokenKind::Ws); }
+                    Some(&b'\r') => { pos += 1; state = 27; best_len = pos - start; best_kind = Some(TokenKind::Ws); }
+                    Some(&b' ') => { pos += 1; state = 28; best_len = pos - start; best_kind = Some(TokenKind::Ws); }
                     _ => break,
                 },
                 4 => match buf.get(pos) {
-                    Some(&b'\t') => { pos += 1; state = 25; best_len = pos - start; best_kind = TokenKind::Ws; }
-                    Some(&b'\n') => { pos += 1; state = 26; best_len = pos - start; best_kind = TokenKind::Ws; }
-                    Some(&b'\r') => { pos += 1; state = 27; best_len = pos - start; best_kind = TokenKind::Ws; }
-                    Some(&b' ') => { pos += 1; state = 28; best_len = pos - start; best_kind = TokenKind::Ws; }
+                    Some(&b'\t') => { pos += 1; state = 25; best_len = pos - start; best_kind = Some(TokenKind::Ws); }
+                    Some(&b'\n') => { pos += 1; state = 26; best_len = pos - start; best_kind = Some(TokenKind::Ws); }
+                    Some(&b'\r') => { pos += 1; state = 27; best_len = pos - start; best_kind = Some(TokenKind::Ws); }
+                    Some(&b' ') => { pos += 1; state = 28; best_len = pos - start; best_kind = Some(TokenKind::Ws); }
                     _ => break,
                 },
                 5 => match buf.get(pos) {
-                    Some(&b'\t') => { pos += 1; state = 25; best_len = pos - start; best_kind = TokenKind::Ws; }
-                    Some(&b'\n') => { pos += 1; state = 26; best_len = pos - start; best_kind = TokenKind::Ws; }
-                    Some(&b'\r') => { pos += 1; state = 27; best_len = pos - start; best_kind = TokenKind::Ws; }
-                    Some(&b' ') => { pos += 1; state = 28; best_len = pos - start; best_kind = TokenKind::Ws; }
+                    Some(&b'\t') => { pos += 1; state = 25; best_len = pos - start; best_kind = Some(TokenKind::Ws); }
+                    Some(&b'\n') => { pos += 1; state = 26; best_len = pos - start; best_kind = Some(TokenKind::Ws); }
+                    Some(&b'\r') => { pos += 1; state = 27; best_len = pos - start; best_kind = Some(TokenKind::Ws); }
+                    Some(&b' ') => { pos += 1; state = 28; best_len = pos - start; best_kind = Some(TokenKind::Ws); }
                     _ => break,
                 },
                 6 => break,
                 7 => match buf.get(pos) {
                     Some(&(0x00..=b'\t' | 0x0b..=b'!' | b'#'..=b'[' | b']'..=0x7f)) => { pos += 1; state = 29; }
-                    Some(&b'"') => { pos += 1; state = 30; best_len = pos - start; best_kind = TokenKind::String; }
+                    Some(&b'"') => { pos += 1; state = 30; best_len = pos - start; best_kind = Some(TokenKind::String); }
                     Some(&b'\\') => { pos += 1; state = 31; }
                     Some(&(0xc2..=0xdf)) => { pos += 1; state = 32; }
                     Some(&0xe0) => { pos += 1; state = 33; }
@@ -229,71 +226,71 @@ impl DfaMatcher<TokenKind> for LexerDfa {
                 12 => break,
                 13 => break,
                 14 => match buf.get(pos) {
-                    Some(&b'.') => { pos += 1; state = 50; best_len = pos - start; best_kind = TokenKind::Dotdot; }
+                    Some(&b'.') => { pos += 1; state = 50; best_len = pos - start; best_kind = Some(TokenKind::Dotdot); }
                     _ => break,
                 },
                 15 => match buf.get(pos) {
-                    Some(&b'/') => { pos += 1; state = 51; best_len = pos - start; best_kind = TokenKind::Comment; }
+                    Some(&b'/') => { pos += 1; state = 51; best_len = pos - start; best_kind = Some(TokenKind::Comment); }
                     _ => break,
                 },
                 16 => break,
                 17 => break,
                 18 => break,
                 19 => match buf.get(pos) {
-                    Some(&(b'0'..=b'9')) => { pos += 1; state = 52; best_len = pos - start; best_kind = TokenKind::Ident; }
-                    Some(&(b'A'..=b'Z')) => { pos += 1; state = 53; best_len = pos - start; best_kind = TokenKind::Ident; }
-                    Some(&b'_') => { pos += 1; state = 54; best_len = pos - start; best_kind = TokenKind::Ident; }
-                    Some(&(b'a'..=b'z')) => { pos += 1; state = 55; best_len = pos - start; best_kind = TokenKind::Ident; }
+                    Some(&(b'0'..=b'9')) => { pos += 1; state = 52; best_len = pos - start; best_kind = Some(TokenKind::Ident); }
+                    Some(&(b'A'..=b'Z')) => { pos += 1; state = 53; best_len = pos - start; best_kind = Some(TokenKind::Ident); }
+                    Some(&b'_') => { pos += 1; state = 54; best_len = pos - start; best_kind = Some(TokenKind::Ident); }
+                    Some(&(b'a'..=b'z')) => { pos += 1; state = 55; best_len = pos - start; best_kind = Some(TokenKind::Ident); }
                     _ => break,
                 },
                 20 => break,
                 21 => break,
                 22 => match buf.get(pos) {
-                    Some(&(b'0'..=b'9')) => { pos += 1; state = 52; best_len = pos - start; best_kind = TokenKind::Ident; }
-                    Some(&(b'A'..=b'Z')) => { pos += 1; state = 53; best_len = pos - start; best_kind = TokenKind::Ident; }
-                    Some(&b'_') => { pos += 1; state = 54; best_len = pos - start; best_kind = TokenKind::Ident; }
-                    Some(&(b'a'..=b'z')) => { pos += 1; state = 55; best_len = pos - start; best_kind = TokenKind::Ident; }
+                    Some(&(b'0'..=b'9')) => { pos += 1; state = 52; best_len = pos - start; best_kind = Some(TokenKind::Ident); }
+                    Some(&(b'A'..=b'Z')) => { pos += 1; state = 53; best_len = pos - start; best_kind = Some(TokenKind::Ident); }
+                    Some(&b'_') => { pos += 1; state = 54; best_len = pos - start; best_kind = Some(TokenKind::Ident); }
+                    Some(&(b'a'..=b'z')) => { pos += 1; state = 55; best_len = pos - start; best_kind = Some(TokenKind::Ident); }
                     _ => break,
                 },
                 23 => match buf.get(pos) {
-                    Some(&(b'0'..=b'9')) => { pos += 1; state = 52; best_len = pos - start; best_kind = TokenKind::Ident; }
-                    Some(&(b'A'..=b'Z')) => { pos += 1; state = 53; best_len = pos - start; best_kind = TokenKind::Ident; }
-                    Some(&b'_') => { pos += 1; state = 54; best_len = pos - start; best_kind = TokenKind::Ident; }
-                    Some(&(b'a'..=b'z')) => { pos += 1; state = 55; best_len = pos - start; best_kind = TokenKind::Ident; }
+                    Some(&(b'0'..=b'9')) => { pos += 1; state = 52; best_len = pos - start; best_kind = Some(TokenKind::Ident); }
+                    Some(&(b'A'..=b'Z')) => { pos += 1; state = 53; best_len = pos - start; best_kind = Some(TokenKind::Ident); }
+                    Some(&b'_') => { pos += 1; state = 54; best_len = pos - start; best_kind = Some(TokenKind::Ident); }
+                    Some(&(b'a'..=b'z')) => { pos += 1; state = 55; best_len = pos - start; best_kind = Some(TokenKind::Ident); }
                     _ => break,
                 },
                 24 => break,
                 25 => match buf.get(pos) {
-                    Some(&b'\t') => { pos += 1; state = 25; best_len = pos - start; best_kind = TokenKind::Ws; }
-                    Some(&b'\n') => { pos += 1; state = 26; best_len = pos - start; best_kind = TokenKind::Ws; }
-                    Some(&b'\r') => { pos += 1; state = 27; best_len = pos - start; best_kind = TokenKind::Ws; }
-                    Some(&b' ') => { pos += 1; state = 28; best_len = pos - start; best_kind = TokenKind::Ws; }
+                    Some(&b'\t') => { pos += 1; state = 25; best_len = pos - start; best_kind = Some(TokenKind::Ws); }
+                    Some(&b'\n') => { pos += 1; state = 26; best_len = pos - start; best_kind = Some(TokenKind::Ws); }
+                    Some(&b'\r') => { pos += 1; state = 27; best_len = pos - start; best_kind = Some(TokenKind::Ws); }
+                    Some(&b' ') => { pos += 1; state = 28; best_len = pos - start; best_kind = Some(TokenKind::Ws); }
                     _ => break,
                 },
                 26 => match buf.get(pos) {
-                    Some(&b'\t') => { pos += 1; state = 25; best_len = pos - start; best_kind = TokenKind::Ws; }
-                    Some(&b'\n') => { pos += 1; state = 26; best_len = pos - start; best_kind = TokenKind::Ws; }
-                    Some(&b'\r') => { pos += 1; state = 27; best_len = pos - start; best_kind = TokenKind::Ws; }
-                    Some(&b' ') => { pos += 1; state = 28; best_len = pos - start; best_kind = TokenKind::Ws; }
+                    Some(&b'\t') => { pos += 1; state = 25; best_len = pos - start; best_kind = Some(TokenKind::Ws); }
+                    Some(&b'\n') => { pos += 1; state = 26; best_len = pos - start; best_kind = Some(TokenKind::Ws); }
+                    Some(&b'\r') => { pos += 1; state = 27; best_len = pos - start; best_kind = Some(TokenKind::Ws); }
+                    Some(&b' ') => { pos += 1; state = 28; best_len = pos - start; best_kind = Some(TokenKind::Ws); }
                     _ => break,
                 },
                 27 => match buf.get(pos) {
-                    Some(&b'\t') => { pos += 1; state = 25; best_len = pos - start; best_kind = TokenKind::Ws; }
-                    Some(&b'\n') => { pos += 1; state = 26; best_len = pos - start; best_kind = TokenKind::Ws; }
-                    Some(&b'\r') => { pos += 1; state = 27; best_len = pos - start; best_kind = TokenKind::Ws; }
-                    Some(&b' ') => { pos += 1; state = 28; best_len = pos - start; best_kind = TokenKind::Ws; }
+                    Some(&b'\t') => { pos += 1; state = 25; best_len = pos - start; best_kind = Some(TokenKind::Ws); }
+                    Some(&b'\n') => { pos += 1; state = 26; best_len = pos - start; best_kind = Some(TokenKind::Ws); }
+                    Some(&b'\r') => { pos += 1; state = 27; best_len = pos - start; best_kind = Some(TokenKind::Ws); }
+                    Some(&b' ') => { pos += 1; state = 28; best_len = pos - start; best_kind = Some(TokenKind::Ws); }
                     _ => break,
                 },
                 28 => match buf.get(pos) {
-                    Some(&b'\t') => { pos += 1; state = 25; best_len = pos - start; best_kind = TokenKind::Ws; }
-                    Some(&b'\n') => { pos += 1; state = 26; best_len = pos - start; best_kind = TokenKind::Ws; }
-                    Some(&b'\r') => { pos += 1; state = 27; best_len = pos - start; best_kind = TokenKind::Ws; }
-                    Some(&b' ') => { pos += 1; state = 28; best_len = pos - start; best_kind = TokenKind::Ws; }
+                    Some(&b'\t') => { pos += 1; state = 25; best_len = pos - start; best_kind = Some(TokenKind::Ws); }
+                    Some(&b'\n') => { pos += 1; state = 26; best_len = pos - start; best_kind = Some(TokenKind::Ws); }
+                    Some(&b'\r') => { pos += 1; state = 27; best_len = pos - start; best_kind = Some(TokenKind::Ws); }
+                    Some(&b' ') => { pos += 1; state = 28; best_len = pos - start; best_kind = Some(TokenKind::Ws); }
                     _ => break,
                 },
                 29 => match buf.get(pos) {
                     Some(&(0x00..=b'\t' | 0x0b..=b'!' | b'#'..=b'[' | b']'..=0x7f)) => { pos += 1; state = 29; }
-                    Some(&b'"') => { pos += 1; state = 30; best_len = pos - start; best_kind = TokenKind::String; }
+                    Some(&b'"') => { pos += 1; state = 30; best_len = pos - start; best_kind = Some(TokenKind::String); }
                     Some(&b'\\') => { pos += 1; state = 31; }
                     Some(&(0xc2..=0xdf)) => { pos += 1; state = 32; }
                     Some(&0xe0) => { pos += 1; state = 33; }
@@ -350,7 +347,7 @@ impl DfaMatcher<TokenKind> for LexerDfa {
                     _ => break,
                 },
                 40 => match buf.get(pos) {
-                    Some(&b'\'') => { pos += 1; state = 71; best_len = pos - start; best_kind = TokenKind::Char; }
+                    Some(&b'\'') => { pos += 1; state = 71; best_len = pos - start; best_kind = Some(TokenKind::Char); }
                     _ => break,
                 },
                 41 => match buf.get(pos) {
@@ -398,7 +395,7 @@ impl DfaMatcher<TokenKind> for LexerDfa {
                 },
                 50 => break,
                 51 => match buf.get(pos) {
-                    Some(&(0x00..=b'\t' | 0x0b..=0x7f)) => { pos += 1; state = 87; best_len = pos - start; best_kind = TokenKind::Comment; }
+                    Some(&(0x00..=b'\t' | 0x0b..=0x7f)) => { pos += 1; state = 87; best_len = pos - start; best_kind = Some(TokenKind::Comment); }
                     Some(&(0xc2..=0xdf)) => { pos += 1; state = 88; }
                     Some(&0xe0) => { pos += 1; state = 89; }
                     Some(&(0xe1..=0xec)) => { pos += 1; state = 90; }
@@ -410,36 +407,36 @@ impl DfaMatcher<TokenKind> for LexerDfa {
                     _ => break,
                 },
                 52 => match buf.get(pos) {
-                    Some(&(b'0'..=b'9')) => { pos += 1; state = 52; best_len = pos - start; best_kind = TokenKind::Ident; }
-                    Some(&(b'A'..=b'Z')) => { pos += 1; state = 53; best_len = pos - start; best_kind = TokenKind::Ident; }
-                    Some(&b'_') => { pos += 1; state = 54; best_len = pos - start; best_kind = TokenKind::Ident; }
-                    Some(&(b'a'..=b'z')) => { pos += 1; state = 55; best_len = pos - start; best_kind = TokenKind::Ident; }
+                    Some(&(b'0'..=b'9')) => { pos += 1; state = 52; best_len = pos - start; best_kind = Some(TokenKind::Ident); }
+                    Some(&(b'A'..=b'Z')) => { pos += 1; state = 53; best_len = pos - start; best_kind = Some(TokenKind::Ident); }
+                    Some(&b'_') => { pos += 1; state = 54; best_len = pos - start; best_kind = Some(TokenKind::Ident); }
+                    Some(&(b'a'..=b'z')) => { pos += 1; state = 55; best_len = pos - start; best_kind = Some(TokenKind::Ident); }
                     _ => break,
                 },
                 53 => match buf.get(pos) {
-                    Some(&(b'0'..=b'9')) => { pos += 1; state = 52; best_len = pos - start; best_kind = TokenKind::Ident; }
-                    Some(&(b'A'..=b'Z')) => { pos += 1; state = 53; best_len = pos - start; best_kind = TokenKind::Ident; }
-                    Some(&b'_') => { pos += 1; state = 54; best_len = pos - start; best_kind = TokenKind::Ident; }
-                    Some(&(b'a'..=b'z')) => { pos += 1; state = 55; best_len = pos - start; best_kind = TokenKind::Ident; }
+                    Some(&(b'0'..=b'9')) => { pos += 1; state = 52; best_len = pos - start; best_kind = Some(TokenKind::Ident); }
+                    Some(&(b'A'..=b'Z')) => { pos += 1; state = 53; best_len = pos - start; best_kind = Some(TokenKind::Ident); }
+                    Some(&b'_') => { pos += 1; state = 54; best_len = pos - start; best_kind = Some(TokenKind::Ident); }
+                    Some(&(b'a'..=b'z')) => { pos += 1; state = 55; best_len = pos - start; best_kind = Some(TokenKind::Ident); }
                     _ => break,
                 },
                 54 => match buf.get(pos) {
-                    Some(&(b'0'..=b'9')) => { pos += 1; state = 52; best_len = pos - start; best_kind = TokenKind::Ident; }
-                    Some(&(b'A'..=b'Z')) => { pos += 1; state = 53; best_len = pos - start; best_kind = TokenKind::Ident; }
-                    Some(&b'_') => { pos += 1; state = 54; best_len = pos - start; best_kind = TokenKind::Ident; }
-                    Some(&(b'a'..=b'z')) => { pos += 1; state = 55; best_len = pos - start; best_kind = TokenKind::Ident; }
+                    Some(&(b'0'..=b'9')) => { pos += 1; state = 52; best_len = pos - start; best_kind = Some(TokenKind::Ident); }
+                    Some(&(b'A'..=b'Z')) => { pos += 1; state = 53; best_len = pos - start; best_kind = Some(TokenKind::Ident); }
+                    Some(&b'_') => { pos += 1; state = 54; best_len = pos - start; best_kind = Some(TokenKind::Ident); }
+                    Some(&(b'a'..=b'z')) => { pos += 1; state = 55; best_len = pos - start; best_kind = Some(TokenKind::Ident); }
                     _ => break,
                 },
                 55 => match buf.get(pos) {
-                    Some(&(b'0'..=b'9')) => { pos += 1; state = 52; best_len = pos - start; best_kind = TokenKind::Ident; }
-                    Some(&(b'A'..=b'Z')) => { pos += 1; state = 53; best_len = pos - start; best_kind = TokenKind::Ident; }
-                    Some(&b'_') => { pos += 1; state = 54; best_len = pos - start; best_kind = TokenKind::Ident; }
-                    Some(&(b'a'..=b'z')) => { pos += 1; state = 55; best_len = pos - start; best_kind = TokenKind::Ident; }
+                    Some(&(b'0'..=b'9')) => { pos += 1; state = 52; best_len = pos - start; best_kind = Some(TokenKind::Ident); }
+                    Some(&(b'A'..=b'Z')) => { pos += 1; state = 53; best_len = pos - start; best_kind = Some(TokenKind::Ident); }
+                    Some(&b'_') => { pos += 1; state = 54; best_len = pos - start; best_kind = Some(TokenKind::Ident); }
+                    Some(&(b'a'..=b'z')) => { pos += 1; state = 55; best_len = pos - start; best_kind = Some(TokenKind::Ident); }
                     _ => break,
                 },
                 56 => match buf.get(pos) {
                     Some(&(0x00..=b'\t' | 0x0b..=b'!' | b'#'..=b'[' | b']'..=0x7f)) => { pos += 1; state = 29; }
-                    Some(&b'"') => { pos += 1; state = 30; best_len = pos - start; best_kind = TokenKind::String; }
+                    Some(&b'"') => { pos += 1; state = 30; best_len = pos - start; best_kind = Some(TokenKind::String); }
                     Some(&b'\\') => { pos += 1; state = 31; }
                     Some(&(0xc2..=0xdf)) => { pos += 1; state = 32; }
                     Some(&0xe0) => { pos += 1; state = 33; }
@@ -453,7 +450,7 @@ impl DfaMatcher<TokenKind> for LexerDfa {
                 },
                 57 => match buf.get(pos) {
                     Some(&(0x00..=b'\t' | 0x0b..=b'!' | b'#'..=b'[' | b']'..=0x7f)) => { pos += 1; state = 29; }
-                    Some(&b'"') => { pos += 1; state = 30; best_len = pos - start; best_kind = TokenKind::String; }
+                    Some(&b'"') => { pos += 1; state = 30; best_len = pos - start; best_kind = Some(TokenKind::String); }
                     Some(&b'\\') => { pos += 1; state = 31; }
                     Some(&(0xc2..=0xdf)) => { pos += 1; state = 32; }
                     Some(&0xe0) => { pos += 1; state = 33; }
@@ -467,7 +464,7 @@ impl DfaMatcher<TokenKind> for LexerDfa {
                 },
                 58 => match buf.get(pos) {
                     Some(&(0x00..=b'\t' | 0x0b..=b'!' | b'#'..=b'[' | b']'..=0x7f)) => { pos += 1; state = 29; }
-                    Some(&b'"') => { pos += 1; state = 30; best_len = pos - start; best_kind = TokenKind::String; }
+                    Some(&b'"') => { pos += 1; state = 30; best_len = pos - start; best_kind = Some(TokenKind::String); }
                     Some(&b'\\') => { pos += 1; state = 31; }
                     Some(&(0xc2..=0xdf)) => { pos += 1; state = 32; }
                     Some(&0xe0) => { pos += 1; state = 33; }
@@ -481,7 +478,7 @@ impl DfaMatcher<TokenKind> for LexerDfa {
                 },
                 59 => match buf.get(pos) {
                     Some(&(0x00..=b'\t' | 0x0b..=b'!' | b'#'..=b'[' | b']'..=0x7f)) => { pos += 1; state = 29; }
-                    Some(&b'"') => { pos += 1; state = 30; best_len = pos - start; best_kind = TokenKind::String; }
+                    Some(&b'"') => { pos += 1; state = 30; best_len = pos - start; best_kind = Some(TokenKind::String); }
                     Some(&b'\\') => { pos += 1; state = 31; }
                     Some(&(0xc2..=0xdf)) => { pos += 1; state = 32; }
                     Some(&0xe0) => { pos += 1; state = 33; }
@@ -495,7 +492,7 @@ impl DfaMatcher<TokenKind> for LexerDfa {
                 },
                 60 => match buf.get(pos) {
                     Some(&(0x00..=b'\t' | 0x0b..=b'!' | b'#'..=b'[' | b']'..=0x7f)) => { pos += 1; state = 29; }
-                    Some(&b'"') => { pos += 1; state = 30; best_len = pos - start; best_kind = TokenKind::String; }
+                    Some(&b'"') => { pos += 1; state = 30; best_len = pos - start; best_kind = Some(TokenKind::String); }
                     Some(&b'\\') => { pos += 1; state = 31; }
                     Some(&(0xc2..=0xdf)) => { pos += 1; state = 32; }
                     Some(&0xe0) => { pos += 1; state = 33; }
@@ -509,7 +506,7 @@ impl DfaMatcher<TokenKind> for LexerDfa {
                 },
                 61 => match buf.get(pos) {
                     Some(&(0x00..=b'\t' | 0x0b..=b'!' | b'#'..=b'[' | b']'..=0x7f)) => { pos += 1; state = 29; }
-                    Some(&b'"') => { pos += 1; state = 30; best_len = pos - start; best_kind = TokenKind::String; }
+                    Some(&b'"') => { pos += 1; state = 30; best_len = pos - start; best_kind = Some(TokenKind::String); }
                     Some(&b'\\') => { pos += 1; state = 31; }
                     Some(&(0xc2..=0xdf)) => { pos += 1; state = 32; }
                     Some(&0xe0) => { pos += 1; state = 33; }
@@ -523,7 +520,7 @@ impl DfaMatcher<TokenKind> for LexerDfa {
                 },
                 62 => match buf.get(pos) {
                     Some(&(0x00..=b'\t' | 0x0b..=b'!' | b'#'..=b'[' | b']'..=0x7f)) => { pos += 1; state = 29; }
-                    Some(&b'"') => { pos += 1; state = 30; best_len = pos - start; best_kind = TokenKind::String; }
+                    Some(&b'"') => { pos += 1; state = 30; best_len = pos - start; best_kind = Some(TokenKind::String); }
                     Some(&b'\\') => { pos += 1; state = 31; }
                     Some(&(0xc2..=0xdf)) => { pos += 1; state = 32; }
                     Some(&0xe0) => { pos += 1; state = 33; }
@@ -569,31 +566,31 @@ impl DfaMatcher<TokenKind> for LexerDfa {
                 },
                 71 => break,
                 72 => match buf.get(pos) {
-                    Some(&b'\'') => { pos += 1; state = 71; best_len = pos - start; best_kind = TokenKind::Char; }
+                    Some(&b'\'') => { pos += 1; state = 71; best_len = pos - start; best_kind = Some(TokenKind::Char); }
                     _ => break,
                 },
                 73 => match buf.get(pos) {
-                    Some(&b'\'') => { pos += 1; state = 71; best_len = pos - start; best_kind = TokenKind::Char; }
+                    Some(&b'\'') => { pos += 1; state = 71; best_len = pos - start; best_kind = Some(TokenKind::Char); }
                     _ => break,
                 },
                 74 => match buf.get(pos) {
-                    Some(&b'\'') => { pos += 1; state = 71; best_len = pos - start; best_kind = TokenKind::Char; }
+                    Some(&b'\'') => { pos += 1; state = 71; best_len = pos - start; best_kind = Some(TokenKind::Char); }
                     _ => break,
                 },
                 75 => match buf.get(pos) {
-                    Some(&b'\'') => { pos += 1; state = 71; best_len = pos - start; best_kind = TokenKind::Char; }
+                    Some(&b'\'') => { pos += 1; state = 71; best_len = pos - start; best_kind = Some(TokenKind::Char); }
                     _ => break,
                 },
                 76 => match buf.get(pos) {
-                    Some(&b'\'') => { pos += 1; state = 71; best_len = pos - start; best_kind = TokenKind::Char; }
+                    Some(&b'\'') => { pos += 1; state = 71; best_len = pos - start; best_kind = Some(TokenKind::Char); }
                     _ => break,
                 },
                 77 => match buf.get(pos) {
-                    Some(&b'\'') => { pos += 1; state = 71; best_len = pos - start; best_kind = TokenKind::Char; }
+                    Some(&b'\'') => { pos += 1; state = 71; best_len = pos - start; best_kind = Some(TokenKind::Char); }
                     _ => break,
                 },
                 78 => match buf.get(pos) {
-                    Some(&b'\'') => { pos += 1; state = 71; best_len = pos - start; best_kind = TokenKind::Char; }
+                    Some(&b'\'') => { pos += 1; state = 71; best_len = pos - start; best_kind = Some(TokenKind::Char); }
                     _ => break,
                 },
                 79 => match buf.get(pos) {
@@ -629,7 +626,7 @@ impl DfaMatcher<TokenKind> for LexerDfa {
                     _ => break,
                 },
                 87 => match buf.get(pos) {
-                    Some(&(0x00..=b'\t' | 0x0b..=0x7f)) => { pos += 1; state = 87; best_len = pos - start; best_kind = TokenKind::Comment; }
+                    Some(&(0x00..=b'\t' | 0x0b..=0x7f)) => { pos += 1; state = 87; best_len = pos - start; best_kind = Some(TokenKind::Comment); }
                     Some(&(0xc2..=0xdf)) => { pos += 1; state = 88; }
                     Some(&0xe0) => { pos += 1; state = 89; }
                     Some(&(0xe1..=0xec)) => { pos += 1; state = 90; }
@@ -641,7 +638,7 @@ impl DfaMatcher<TokenKind> for LexerDfa {
                     _ => break,
                 },
                 88 => match buf.get(pos) {
-                    Some(&(0x80..=0xbf)) => { pos += 1; state = 87; best_len = pos - start; best_kind = TokenKind::Comment; }
+                    Some(&(0x80..=0xbf)) => { pos += 1; state = 87; best_len = pos - start; best_kind = Some(TokenKind::Comment); }
                     _ => break,
                 },
                 89 => match buf.get(pos) {
@@ -709,19 +706,19 @@ impl DfaMatcher<TokenKind> for LexerDfa {
                     _ => break,
                 },
                 104 => match buf.get(pos) {
-                    Some(&(0x80..=0xbf)) => { pos += 1; state = 87; best_len = pos - start; best_kind = TokenKind::Comment; }
+                    Some(&(0x80..=0xbf)) => { pos += 1; state = 87; best_len = pos - start; best_kind = Some(TokenKind::Comment); }
                     _ => break,
                 },
                 105 => match buf.get(pos) {
-                    Some(&(0x80..=0xbf)) => { pos += 1; state = 87; best_len = pos - start; best_kind = TokenKind::Comment; }
+                    Some(&(0x80..=0xbf)) => { pos += 1; state = 87; best_len = pos - start; best_kind = Some(TokenKind::Comment); }
                     _ => break,
                 },
                 106 => match buf.get(pos) {
-                    Some(&(0x80..=0xbf)) => { pos += 1; state = 87; best_len = pos - start; best_kind = TokenKind::Comment; }
+                    Some(&(0x80..=0xbf)) => { pos += 1; state = 87; best_len = pos - start; best_kind = Some(TokenKind::Comment); }
                     _ => break,
                 },
                 107 => match buf.get(pos) {
-                    Some(&(0x80..=0xbf)) => { pos += 1; state = 87; best_len = pos - start; best_kind = TokenKind::Comment; }
+                    Some(&(0x80..=0xbf)) => { pos += 1; state = 87; best_len = pos - start; best_kind = Some(TokenKind::Comment); }
                     _ => break,
                 },
                 108 => match buf.get(pos) {
@@ -779,15 +776,15 @@ impl DfaMatcher<TokenKind> for LexerDfa {
                     _ => break,
                 },
                 117 => match buf.get(pos) {
-                    Some(&(0x80..=0xbf)) => { pos += 1; state = 87; best_len = pos - start; best_kind = TokenKind::Comment; }
+                    Some(&(0x80..=0xbf)) => { pos += 1; state = 87; best_len = pos - start; best_kind = Some(TokenKind::Comment); }
                     _ => break,
                 },
                 118 => match buf.get(pos) {
-                    Some(&(0x80..=0xbf)) => { pos += 1; state = 87; best_len = pos - start; best_kind = TokenKind::Comment; }
+                    Some(&(0x80..=0xbf)) => { pos += 1; state = 87; best_len = pos - start; best_kind = Some(TokenKind::Comment); }
                     _ => break,
                 },
                 119 => match buf.get(pos) {
-                    Some(&(0x80..=0xbf)) => { pos += 1; state = 87; best_len = pos - start; best_kind = TokenKind::Comment; }
+                    Some(&(0x80..=0xbf)) => { pos += 1; state = 87; best_len = pos - start; best_kind = Some(TokenKind::Comment); }
                     _ => break,
                 },
                 120 => match buf.get(pos) {
@@ -813,7 +810,7 @@ impl DfaMatcher<TokenKind> for LexerDfa {
                 },
                 123 => match buf.get(pos) {
                     Some(&(0x00..=b'\t' | 0x0b..=b'!' | b'#'..=b'[' | b']'..=0x7f)) => { pos += 1; state = 29; }
-                    Some(&b'"') => { pos += 1; state = 30; best_len = pos - start; best_kind = TokenKind::String; }
+                    Some(&b'"') => { pos += 1; state = 30; best_len = pos - start; best_kind = Some(TokenKind::String); }
                     Some(&b'\\') => { pos += 1; state = 31; }
                     Some(&(0xc2..=0xdf)) => { pos += 1; state = 32; }
                     Some(&0xe0) => { pos += 1; state = 33; }
@@ -847,7 +844,7 @@ impl DfaMatcher<TokenKind> for LexerDfa {
                     _ => break,
                 },
                 127 => match buf.get(pos) {
-                    Some(&b'\'') => { pos += 1; state = 71; best_len = pos - start; best_kind = TokenKind::Char; }
+                    Some(&b'\'') => { pos += 1; state = 71; best_len = pos - start; best_kind = Some(TokenKind::Char); }
                     _ => break,
                 },
                 _ => break,
@@ -925,7 +922,7 @@ impl parsuna_rt::Drive<K> for Grammar {
                 }
                 2 => { // file:star
                     match p.look(0).kind {
-                        TokenKind::Ident => {
+                        Some(TokenKind::Ident) => {
                             p.push_ret(2); cur = 5;
                         }
                         _ => {
@@ -962,7 +959,7 @@ impl parsuna_rt::Drive<K> for Grammar {
                 }
                 11 => { // decl:opt
                     match p.look(0).kind {
-                        TokenKind::Lbrack => {
+                        Some(TokenKind::Lbrack) => {
                             p.push_ret(12); cur = 15;
                         }
                         _ => {
@@ -999,7 +996,7 @@ impl parsuna_rt::Drive<K> for Grammar {
                 }
                 20 => { // annots:star
                     match p.look(0).kind {
-                        TokenKind::Comma => {
+                        Some(TokenKind::Comma) => {
                             p.push_ret(20); cur = 24;
                         }
                         _ => {
@@ -1040,7 +1037,7 @@ impl parsuna_rt::Drive<K> for Grammar {
                 }
                 33 => { // alt_expr:star
                     match p.look(0).kind {
-                        TokenKind::Pipe => {
+                        Some(TokenKind::Pipe) => {
                             p.push_ret(33); cur = 36;
                         }
                         _ => {
@@ -1067,7 +1064,7 @@ impl parsuna_rt::Drive<K> for Grammar {
                 }
                 40 => { // seq_expr:star
                     match p.look(0).kind {
-                        TokenKind::Lparen | TokenKind::Dot | TokenKind::Bang | TokenKind::String | TokenKind::Char | TokenKind::Ident => {
+                        Some(TokenKind::Lparen) | Some(TokenKind::Dot) | Some(TokenKind::Bang) | Some(TokenKind::String) | Some(TokenKind::Char) | Some(TokenKind::Ident) => {
                             p.push_ret(40); cur = 43;
                         }
                         _ => {
@@ -1089,7 +1086,7 @@ impl parsuna_rt::Drive<K> for Grammar {
                 }
                 46 => { // _postfix_expr:star
                     match p.look(0).kind {
-                        TokenKind::Question | TokenKind::Star | TokenKind::Plus => {
+                        Some(TokenKind::Question) | Some(TokenKind::Star) | Some(TokenKind::Plus) => {
                             p.push_ret(46); cur = 48;
                         }
                         _ => {
@@ -1109,9 +1106,9 @@ impl parsuna_rt::Drive<K> for Grammar {
                 }
                 50 => { // _quant_op:dispatch
                     match p.look(0).kind {
-                        TokenKind::Question => { p.push_ret(51); cur = 52; }
-                        TokenKind::Star => { p.push_ret(51); cur = 54; }
-                        TokenKind::Plus => { p.push_ret(51); cur = 56; }
+                        Some(TokenKind::Question) => { p.push_ret(51); cur = 52; }
+                        Some(TokenKind::Star) => { p.push_ret(51); cur = 54; }
+                        Some(TokenKind::Plus) => { p.push_ret(51); cur = 56; }
                         _ => { cur = 51; p.error_here("unexpected token"); p.recover_to(SYNC_3); }
                     }
                 }
@@ -1132,12 +1129,12 @@ impl parsuna_rt::Drive<K> for Grammar {
                 }
                 58 => { // _primary_expr:dispatch
                     match p.look(0).kind {
-                        TokenKind::Lparen => { p.push_ret(59); cur = 60; }
-                        TokenKind::Dot => { p.push_ret(59); cur = 62; }
-                        TokenKind::Bang => { p.push_ret(59); cur = 62; }
-                        TokenKind::String => { p.push_ret(59); cur = 62; }
-                        TokenKind::Char => { p.push_ret(59); cur = 62; }
-                        TokenKind::Ident => { p.push_ret(59); cur = 62; }
+                        Some(TokenKind::Lparen) => { p.push_ret(59); cur = 60; }
+                        Some(TokenKind::Dot) => { p.push_ret(59); cur = 62; }
+                        Some(TokenKind::Bang) => { p.push_ret(59); cur = 62; }
+                        Some(TokenKind::String) => { p.push_ret(59); cur = 62; }
+                        Some(TokenKind::Char) => { p.push_ret(59); cur = 62; }
+                        Some(TokenKind::Ident) => { p.push_ret(59); cur = 62; }
                         _ => { cur = 59; p.error_here("unexpected token"); p.recover_to(SYNC_3); }
                     }
                 }
@@ -1185,11 +1182,11 @@ impl parsuna_rt::Drive<K> for Grammar {
                 }
                 71 => { // atom:dispatch
                     match p.look(0).kind {
-                        TokenKind::Dot => { p.push_ret(72); cur = 78; }
-                        TokenKind::Bang => { p.push_ret(72); cur = 80; }
-                        TokenKind::String => { p.push_ret(72); cur = 76; }
-                        TokenKind::Char => { p.push_ret(72); cur = 78; }
-                        TokenKind::Ident => { p.push_ret(72); cur = 74; }
+                        Some(TokenKind::Dot) => { p.push_ret(72); cur = 78; }
+                        Some(TokenKind::Bang) => { p.push_ret(72); cur = 80; }
+                        Some(TokenKind::String) => { p.push_ret(72); cur = 76; }
+                        Some(TokenKind::Char) => { p.push_ret(72); cur = 78; }
+                        Some(TokenKind::Ident) => { p.push_ret(72); cur = 74; }
                         _ => { cur = 72; p.error_here("unexpected token"); p.recover_to(SYNC_3); }
                     }
                 }
@@ -1228,8 +1225,8 @@ impl parsuna_rt::Drive<K> for Grammar {
                 }
                 83 => { // char_primary:dispatch
                     match p.look(0).kind {
-                        TokenKind::Dot => { p.push_ret(84); cur = 89; }
-                        TokenKind::Char => { p.push_ret(84); cur = 86; }
+                        Some(TokenKind::Dot) => { p.push_ret(84); cur = 89; }
+                        Some(TokenKind::Char) => { p.push_ret(84); cur = 86; }
                         _ => { cur = 84; p.error_here("unexpected token"); p.recover_to(SYNC_3); }
                     }
                 }
@@ -1243,7 +1240,7 @@ impl parsuna_rt::Drive<K> for Grammar {
                 }
                 87 => { // char_primary:alt0:opt
                     match p.look(0).kind {
-                        TokenKind::Dotdot => {
+                        Some(TokenKind::Dotdot) => {
                             p.push_ret(88); cur = 91;
                         }
                         _ => {
@@ -1270,9 +1267,9 @@ impl parsuna_rt::Drive<K> for Grammar {
                 }
                 96 => { // neg_class:dispatch
                     match p.look(0).kind {
-                        TokenKind::Lparen => { p.push_ret(97); cur = 101; }
-                        TokenKind::Dot => { p.push_ret(97); cur = 99; }
-                        TokenKind::Char => { p.push_ret(97); cur = 99; }
+                        Some(TokenKind::Lparen) => { p.push_ret(97); cur = 101; }
+                        Some(TokenKind::Dot) => { p.push_ret(97); cur = 99; }
+                        Some(TokenKind::Char) => { p.push_ret(97); cur = 99; }
                         _ => { cur = 97; p.error_here("unexpected token"); p.recover_to(SYNC_3); }
                     }
                 }
@@ -1296,7 +1293,7 @@ impl parsuna_rt::Drive<K> for Grammar {
                 }
                 103 => { // neg_class:alt1:star
                     match p.look(0).kind {
-                        TokenKind::Pipe => {
+                        Some(TokenKind::Pipe) => {
                             p.push_ret(103); cur = 106;
                         }
                         _ => {

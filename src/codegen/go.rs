@@ -143,12 +143,9 @@ fn emit_constants(s: &mut String, st: &StateTable) {
     writeln!(s).unwrap();
 }
 
-fn token_const(st: &StateTable, kind: i16) -> String {
+fn token_const(st: &StateTable, kind: u16) -> String {
     if kind == 0 {
         return "TkEof".to_string();
-    }
-    if kind == -1 {
-        return "TkError".to_string();
     }
     match st.tokens.iter().find(|t| t.kind == kind) {
         Some(t) => format!("Tk{}", pascal(&t.name)),

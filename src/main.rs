@@ -615,14 +615,10 @@ fn state_ref(st: &StateTable, id: u32) -> String {
     }
 }
 
-fn token_name_for_kind(st: &StateTable, kind: i16) -> &str {
-    if kind == st.eof_id {
+fn token_name_for_kind(st: &StateTable, kind: u16) -> &str {
+    if kind == parsuna_rt::TOKEN_EOF {
         return "EOF";
     }
-    if kind == st.error_id {
-        return "ERROR";
-    }
-
     if kind == 0 {
         return "?";
     }
@@ -632,7 +628,7 @@ fn token_name_for_kind(st: &StateTable, kind: i16) -> &str {
         .unwrap_or("?")
 }
 
-fn token_name_for_kind_fallback<'a>(st: &'a StateTable, kind: i16, fallback: &'a str) -> &'a str {
+fn token_name_for_kind_fallback<'a>(st: &'a StateTable, kind: u16, fallback: &'a str) -> &'a str {
     if kind == 0 {
         return fallback;
     }

@@ -34,7 +34,7 @@ pub type SyncSetId = u32;
 ///
 /// Sequences are the unit of LL(k) prediction — a FIRST set is a set of
 /// these, and dispatch-tree paths consume them one token at a time.
-pub type LookaheadSeq = Vec<i16>;
+pub type LookaheadSeq = Vec<u16>;
 
 /// An interned FIRST set: every lookahead sequence that can open the
 /// dispatch site that owns this id. Sequences are stored as a sorted,
@@ -62,7 +62,7 @@ pub struct SyncSet {
     /// [`StateTable::sync_sets`].
     pub id: SyncSetId,
     /// Token-kind ids the parser will recover to.
-    pub kinds: Vec<i16>,
+    pub kinds: Vec<u16>,
 }
 
 /// Pool of interned SYNC sets, indexed by [`SyncSetId`].
@@ -84,10 +84,10 @@ pub struct StateTable {
     /// `RuleKind` id is its index here.
     pub rule_kinds: Vec<String>,
     /// Interned FIRST-set pool. Each entry is a `FirstSet` — a list of
-    /// `LookaheadSeq`s (i.e. `Vec<Vec<i16>>`). Index by [`FirstSetId`].
+    /// `LookaheadSeq`s (i.e. `Vec<Vec<u16>>`). Index by [`FirstSetId`].
     pub first_sets: FirstSetPool,
     /// Interned SYNC-set pool. Each entry is a `SyncSet` — a flat list of
-    /// token ids (`Vec<i16>`). Index by [`SyncSetId`].
+    /// token ids (`Vec<u16>`). Index by [`SyncSetId`].
     pub sync_sets: SyncSetPool,
     /// Every parser state, keyed by id. A `BTreeMap` so backends walk the
     /// table in deterministic id order.
@@ -95,11 +95,6 @@ pub struct StateTable {
     /// Public entry points: one `(rule_name, start_state)` per non-fragment
     /// rule. Backends emit a `parse_<name>` for each.
     pub entry_states: Vec<(String, StateId)>,
-    /// Token-kind id reserved for end-of-input. Copied out of the runtime
-    /// so backends don't import `parsuna_rt` just for this sentinel.
-    pub eof_id: i16,
-    /// Token-kind id reserved for "lexer could not match anything here".
-    pub error_id: i16,
     /// Lookahead required to disambiguate every alternative (LL(k)).
     pub k: usize,
     /// The compiled lexer DFA.
@@ -117,9 +112,10 @@ pub struct TokenInfo {
     /// True if the token is `[skip]`-annotated: matched but dropped from
     /// the structural stream.
     pub skip: bool,
-    /// Dense, 1-based numeric id. `0` and `-1` are reserved for EOF and
-    /// lexer ERROR respectively.
-    pub kind: i16,
+    /// Dense, 1-based numeric id. `0` is reserved for EOF; lex failures
+    /// are surfaced as `Option<TK>` (`None`) at the runtime boundary, so
+    /// they consume no kind id.
+    pub kind: u16,
 }
 
 /// One instruction in a parser state.
@@ -137,7 +133,7 @@ pub enum Op {
     /// to the given SYNC set.
     Expect {
         /// Required token-kind id.
-        kind: i16,
+        kind: u16,
         /// Token name, baked in purely for the diagnostic message.
         token_name: String,
         /// SYNC set to recover to on mismatch.
@@ -215,7 +211,7 @@ pub enum DispatchTree {
         depth: u8,
         /// `(token kind, sub-tree)` pairs for each matched lookahead.
         /// Kept sorted by kind so a backend can compile to a jump table.
-        arms: Vec<(i16, DispatchTree)>,
+        arms: Vec<(u16, DispatchTree)>,
         /// Action when no arm matches at this depth.
         default: DispatchLeaf,
     },
@@ -237,7 +233,7 @@ pub fn build_dispatch_tree(
     } else {
         DispatchLeaf::Error
     };
-    let mut entries: Vec<(Vec<i16>, StateId)> = Vec::new();
+    let mut entries: Vec<(Vec<u16>, StateId)> = Vec::new();
     for (fid, target) in arms {
         for seq in &first_sets[*fid as usize].seqs {
             entries.push((seq.clone(), *target));
@@ -247,7 +243,7 @@ pub fn build_dispatch_tree(
 }
 
 fn build_trie(
-    entries: &[(Vec<i16>, StateId)],
+    entries: &[(Vec<u16>, StateId)],
     depth: usize,
     outer_default: DispatchLeaf,
 ) -> DispatchTree {
@@ -256,7 +252,7 @@ fn build_trie(
     // that doesn't match a deeper prefix should still take this branch.
     // That's why we capture it as `node_default` for the sub-tree rather
     // than inheriting the outer one.
-    let mut surviving: Vec<(Vec<i16>, StateId)> = Vec::new();
+    let mut surviving: Vec<(Vec<u16>, StateId)> = Vec::new();
     let mut terminal: Option<DispatchLeaf> = None;
     for entry in entries {
         if entry.0.len() == depth {
@@ -273,7 +269,7 @@ fn build_trie(
     }
 
     use std::collections::BTreeMap;
-    let mut by_kind: BTreeMap<i16, Vec<(Vec<i16>, StateId)>> = BTreeMap::new();
+    let mut by_kind: BTreeMap<u16, Vec<(Vec<u16>, StateId)>> = BTreeMap::new();
     for entry in &surviving {
         by_kind
             .entry(entry.0[depth])
@@ -281,7 +277,7 @@ fn build_trie(
             .push(entry.clone());
     }
 
-    let arms: Vec<(i16, DispatchTree)> = by_kind
+    let arms: Vec<(u16, DispatchTree)> = by_kind
         .into_iter()
         .map(|(k, subentries)| (k, build_trie(&subentries, depth + 1, node_default)))
         .collect();
