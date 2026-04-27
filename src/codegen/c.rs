@@ -654,7 +654,7 @@ fn emit_step(c: &mut String, st: &StateTable, _stem: &str, upper: &str) {
     for state in st.states.values() {
         writeln!(c, "    case {}: {{ /* {} */", state.id, state.label).unwrap();
         for op in &state.ops {
-            emit_op(c, st, upper, op, state.id);
+            emit_op(c, st, upper, op);
         }
         writeln!(c, "      break;").unwrap();
         writeln!(c, "    }}").unwrap();
@@ -676,7 +676,7 @@ fn c_token_name(st: &StateTable, upper: &str, kind: u16) -> String {
     }
 }
 
-fn emit_op(c: &mut String, st: &StateTable, upper: &str, op: &Op, self_id: u32) {
+fn emit_op(c: &mut String, st: &StateTable, upper: &str, op: &Op) {
     match op {
         Op::Enter(k) => {
             let name = st.rule_kinds.get(*k as usize).unwrap_or_else(|| {
@@ -717,10 +717,10 @@ fn emit_op(c: &mut String, st: &StateTable, upper: &str, op: &Op, self_id: u32) 
         Op::Ret => {
             writeln!(c, "      cur = pop_ret(p);").unwrap();
         }
-        Op::Star { first, body, next } => {
+        Op::Star { first, body, next, head } => {
             writeln!(
                 c,
-                "      if (matches_first(p, FIRST_{first})) {{ push_ret(p, {self_id}); cur = {body}; }} else {{ cur = {next}; }}"
+                "      if (matches_first(p, FIRST_{first})) {{ push_ret(p, {head}); cur = {body}; }} else {{ cur = {next}; }}"
             )
             .unwrap();
         }

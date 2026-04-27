@@ -374,7 +374,7 @@ fn emit_drive(s: &mut String, st: &StateTable) {
     for state in st.states.values() {
         writeln!(s, "\t\tcase {}: // {}", state.id, state.label).unwrap();
         for op in &state.ops {
-            emit_op(s, st, op, state.id);
+            emit_op(s, st, op);
         }
     }
     writeln!(s, "\t\t}}").unwrap();
@@ -384,7 +384,7 @@ fn emit_drive(s: &mut String, st: &StateTable) {
     writeln!(s).unwrap();
 }
 
-fn emit_op(s: &mut String, st: &StateTable, op: &Op, self_id: u32) {
+fn emit_op(s: &mut String, st: &StateTable, op: &Op) {
     match op {
         Op::Enter(k) => {
             writeln!(
@@ -425,8 +425,8 @@ fn emit_op(s: &mut String, st: &StateTable, op: &Op, self_id: u32) {
         Op::Ret => {
             writeln!(s, "\t\t\tcur = p.PopRet()").unwrap();
         }
-        Op::Star { first, body, next } => {
-            writeln!(s, "\t\t\tif p.MatchesFirst(first_{}) {{ p.PushRet({}); cur = {} }} else {{ cur = {} }}", first, self_id, body, next).unwrap();
+        Op::Star { first, body, next, head } => {
+            writeln!(s, "\t\t\tif p.MatchesFirst(first_{}) {{ p.PushRet({}); cur = {} }} else {{ cur = {} }}", first, head, body, next).unwrap();
         }
         Op::Opt { first, body, next } => {
             writeln!(s, "\t\t\tif p.MatchesFirst(first_{}) {{ p.PushRet({}); cur = {} }} else {{ cur = {} }}", first, next, body, next).unwrap();

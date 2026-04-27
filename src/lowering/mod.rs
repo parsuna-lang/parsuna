@@ -157,7 +157,8 @@ pub enum Op {
     /// if the stack is empty.
     Ret,
     /// `*` loop: if lookahead matches `first`, call `body` and re-enter
-    /// this state; otherwise fall through to `next`.
+    /// `head` (the loop-condition state); otherwise fall through to
+    /// `next`.
     Star {
         /// FIRST-set id the body opens with.
         first: FirstSetId,
@@ -165,6 +166,11 @@ pub enum Op {
         body: StateId,
         /// State to fall through to when the body no longer matches.
         next: StateId,
+        /// State to return to after `body` finishes — the loop-head.
+        /// Initially the state that contains this Star, but stays
+        /// pointing at the original loop-head if the Star op is later
+        /// inlined into another state by the fuse pass.
+        head: StateId,
     },
     /// `?` branch: if lookahead matches `first`, call `body` once and
     /// continue at `next`; otherwise skip straight to `next`.

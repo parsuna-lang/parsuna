@@ -49,11 +49,7 @@ fn emit_prelude(s: &mut String, _st: &StateTable) {
         "//! `parse_*_from_reader` constructors and iterate the resulting [`Parser`]"
     )
     .unwrap();
-    writeln!(
-        s,
-        "//! to walk the parse as a flat [`Event`] stream."
-    )
-    .unwrap();
+    writeln!(s, "//! to walk the parse as a flat [`Event`] stream.").unwrap();
     writeln!(s, "#![allow(dead_code, unused_imports)]").unwrap();
     writeln!(s).unwrap();
     writeln!(s, "use std::io::Read;").unwrap();
@@ -198,7 +194,9 @@ fn emit_compiled_dfa(s: &mut String, st: &StateTable) {
     writeln!(s, "        loop {{").unwrap();
     writeln!(s, "            match state {{").unwrap();
 
-    for ds in dfa { emit_dfa_state_arm(s, st, ds, "                "); }
+    for ds in dfa {
+        emit_dfa_state_arm(s, st, ds, "                ");
+    }
 
     writeln!(s, "                _ => break,").unwrap();
     writeln!(s, "            }}").unwrap();
@@ -288,7 +286,6 @@ fn emit_dfa_state_arm(s: &mut String, st: &StateTable, ds: &DfaState, ind: &str)
     }
 }
 
-
 fn format_byte_pattern(ranges: &[(u8, u8)]) -> String {
     ranges
         .iter()
@@ -318,7 +315,11 @@ fn byte_literal(b: u8) -> String {
 fn emit_tables(s: &mut String, st: &StateTable) {
     writeln!(s).unwrap();
 
-    writeln!(s, "/// Lookahead required to disambiguate every alternative (LL(k)).").unwrap();
+    writeln!(
+        s,
+        "/// Lookahead required to disambiguate every alternative (LL(k))."
+    )
+    .unwrap();
     writeln!(s, "pub const K: usize = {};", st.k).unwrap();
 
     for (name, id) in &st.entry_states {
@@ -411,10 +412,10 @@ fn kind_pattern(st: &StateTable, first: &[Vec<u16>]) -> String {
         .join(" | ")
 }
 
-fn emit_op(s: &mut String, table: &StateTable, self_id: u32, op: &Op, ind: &str) {
+fn emit_op(s: &mut String, st: &StateTable, op: &Op, ind: &str) {
     match op {
-        Op::Enter(k) => writeln!(s, "{}p.enter({});", ind, rule_variant(table, *k)).unwrap(),
-        Op::Exit(k) => writeln!(s, "{}p.exit({});", ind, rule_variant(table, *k)).unwrap(),
+        Op::Enter(k) => writeln!(s, "{}p.enter({});", ind, rule_variant(st, *k)).unwrap(),
+        Op::Exit(k) => writeln!(s, "{}p.exit({});", ind, rule_variant(st, *k)).unwrap(),
         Op::Expect {
             kind,
             token_name,
@@ -423,7 +424,7 @@ fn emit_op(s: &mut String, table: &StateTable, self_id: u32, op: &Op, ind: &str)
             s,
             "{}p.expect({}, SYNC_{}, \"expected {}\");",
             ind,
-            token_variant(table, *kind),
+            token_variant(st, *kind),
             sync,
             token_name
         )
@@ -431,14 +432,19 @@ fn emit_op(s: &mut String, table: &StateTable, self_id: u32, op: &Op, ind: &str)
         Op::PushRet(r) => writeln!(s, "{}p.push_ret({});", ind, r).unwrap(),
         Op::Jump(n) => writeln!(s, "{}cur = {};", ind, n).unwrap(),
         Op::Ret => writeln!(s, "{}cur = p.ret();", ind).unwrap(),
-        Op::Star { first, body, next } => {
+        Op::Star {
+            first,
+            body,
+            next,
+            head,
+        } => {
             emit_lookahead_branch(
                 s,
-                table,
+                st,
                 *first,
                 ind,
                 |s, ind| {
-                    writeln!(s, "{}p.push_ret({}); cur = {};", ind, self_id, body).unwrap();
+                    writeln!(s, "{}p.push_ret({}); cur = {};", ind, head, body).unwrap();
                 },
                 |s, ind| {
                     writeln!(s, "{}cur = {};", ind, next).unwrap();
@@ -448,7 +454,7 @@ fn emit_op(s: &mut String, table: &StateTable, self_id: u32, op: &Op, ind: &str)
         Op::Opt { first, body, next } => {
             emit_lookahead_branch(
                 s,
-                table,
+                st,
                 *first,
                 ind,
                 |s, ind| {
@@ -460,21 +466,21 @@ fn emit_op(s: &mut String, table: &StateTable, self_id: u32, op: &Op, ind: &str)
             );
         }
         Op::Dispatch { tree, sync, next } => {
-            emit_dispatch_tree(s, table, tree, *sync, *next, ind);
+            emit_dispatch_tree(s, st, tree, *sync, *next, ind);
         }
     }
 }
 
 fn emit_lookahead_branch(
     s: &mut String,
-    table: &StateTable,
+    st: &StateTable,
     first: u32,
     ind: &str,
     on_match: impl FnOnce(&mut String, &str),
     on_miss: impl FnOnce(&mut String, &str),
 ) {
-    if table.k == 1 {
-        let pat = kind_pattern(table, &table.first_sets[first as usize].seqs);
+    if st.k == 1 {
+        let pat = kind_pattern(st, &st.first_sets[first as usize].seqs);
         writeln!(s, "{}match p.look(0).kind {{", ind).unwrap();
         writeln!(s, "{}    {} => {{", ind, pat).unwrap();
         on_match(s, &format!("{}        ", ind));
@@ -494,7 +500,7 @@ fn emit_lookahead_branch(
 
 fn emit_dispatch_tree(
     s: &mut String,
-    table: &StateTable,
+    st: &StateTable,
     tree: &DispatchTree,
     sync: u32,
     next: u32,
@@ -511,7 +517,7 @@ fn emit_dispatch_tree(
             let inner = format!("{}    ", ind);
             let inner2 = format!("{}    ", inner);
             for (kind, sub) in arms {
-                let pat = format!("Some({})", token_variant(table, *kind));
+                let pat = format!("Some({})", token_variant(st, *kind));
                 match sub {
                     DispatchTree::Leaf(leaf) => {
                         write!(s, "{}{} => {{ ", inner, pat).unwrap();
@@ -520,7 +526,7 @@ fn emit_dispatch_tree(
                     }
                     _ => {
                         writeln!(s, "{}{} => {{", inner, pat).unwrap();
-                        emit_dispatch_tree(s, table, sub, sync, next, &inner2);
+                        emit_dispatch_tree(s, st, sub, sync, next, &inner2);
                         writeln!(s, "{}}}", inner).unwrap();
                     }
                 }
@@ -560,8 +566,8 @@ fn emit_leaf_inline(s: &mut String, leaf: &DispatchLeaf, sync: u32, next: u32) {
     }
 }
 
-fn emit_step(s: &mut String, table: &StateTable) {
-    let skip_kinds: Vec<u16> = table
+fn emit_step(s: &mut String, st: &StateTable) {
+    let skip_kinds: Vec<u16> = st
         .tokens
         .iter()
         .filter(|t| t.skip)
@@ -579,7 +585,7 @@ fn emit_step(s: &mut String, table: &StateTable) {
     if has_skips {
         let pat = skip_kinds
             .iter()
-            .map(|k| token_variant(table, *k))
+            .map(|k| token_variant(st, *k))
             .collect::<Vec<_>>()
             .join(" | ");
         writeln!(s, "        matches!(kind, {})", pat).unwrap();
@@ -602,11 +608,11 @@ fn emit_step(s: &mut String, table: &StateTable) {
     )
     .unwrap();
     writeln!(s, "            match cur {{").unwrap();
-    for state in table.states.values() {
+    for state in st.states.values() {
         writeln!(s, "                {} => {{ // {}", state.id, state.label).unwrap();
         let ind = "                    ";
         for op in &state.ops {
-            emit_op(s, table, state.id, op, ind);
+            emit_op(s, st, op, ind);
         }
         writeln!(s, "                }}").unwrap();
     }
@@ -625,21 +631,9 @@ fn emit_public_api(s: &mut String, st: &StateTable) {
         writeln!(s).unwrap();
 
         for (name, _) in &st.entry_states {
-            writeln!(
-                s,
-                "/// Parse the `{name}` rule from an in-memory string."
-            )
-            .unwrap();
-            writeln!(
-                s,
-                "///"
-            )
-            .unwrap();
-            writeln!(
-                s,
-                "/// Zero-copy: tokens borrow their text from `src`."
-            )
-            .unwrap();
+            writeln!(s, "/// Parse the `{name}` rule from an in-memory string.").unwrap();
+            writeln!(s, "///").unwrap();
+            writeln!(s, "/// Zero-copy: tokens borrow their text from `src`.").unwrap();
             writeln!(
                 s,
                 "pub fn parse_{name}_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>> {{",
@@ -655,26 +649,14 @@ fn emit_public_api(s: &mut String, st: &StateTable) {
             writeln!(s, "}}").unwrap();
             writeln!(s).unwrap();
 
-            writeln!(
-                s,
-                "/// Parse the `{name}` rule from any [`Read`] source."
-            )
-            .unwrap();
-            writeln!(
-                s,
-                "///"
-            )
-            .unwrap();
+            writeln!(s, "/// Parse the `{name}` rule from any [`Read`] source.").unwrap();
+            writeln!(s, "///").unwrap();
             writeln!(
                 s,
                 "/// Streaming: tokens own their text; memory use stays bounded regardless of"
             )
             .unwrap();
-            writeln!(
-                s,
-                "/// input size."
-            )
-            .unwrap();
+            writeln!(s, "/// input size.").unwrap();
             writeln!(
                 s,
                 "pub fn parse_{name}_from_reader<R: Read>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>> {{",

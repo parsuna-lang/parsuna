@@ -508,11 +508,12 @@ fn format_op(op: &parsuna::lowering::Op, st: &StateTable) -> Vec<String> {
         Op::PushRet(r) => vec![format!("PushRet {}", state_ref(st, *r))],
         Op::Jump(n) => vec![format!("Jump {}", state_ref(st, *n))],
         Op::Ret => vec!["Ret".into()],
-        Op::Star { first, body, next } => vec![format!(
-            "Star {} body={} next={}",
+        Op::Star { first, body, next, head } => vec![format!(
+            "Star {} body={} next={} head={}",
             format_first_pool(st, *first),
             state_ref(st, *body),
-            state_ref(st, *next)
+            state_ref(st, *next),
+            state_ref(st, *head)
         )],
         Op::Opt { first, body, next } => vec![format!(
             "Opt {} body={} next={}",

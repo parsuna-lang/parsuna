@@ -419,7 +419,7 @@ fn emit_drive(s: &mut String, st: &StateTable) {
     for state in st.states.values() {
         writeln!(s, "      case {}: {{ // {}", state.id, state.label).unwrap();
         for op in &state.ops {
-            emit_op(s, st, op, state.id);
+            emit_op(s, st, op);
         }
         writeln!(s, "        break;").unwrap();
         writeln!(s, "      }}").unwrap();
@@ -436,7 +436,7 @@ fn emit_drive(s: &mut String, st: &StateTable) {
     writeln!(s).unwrap();
 }
 
-fn emit_op(s: &mut String, st: &StateTable, op: &Op, self_id: u32) {
+fn emit_op(s: &mut String, st: &StateTable, op: &Op) {
     match op {
         Op::Enter(k) => {
             writeln!(s, "        p.enter({});", rule_variant(st, *k)).unwrap();
@@ -467,11 +467,11 @@ fn emit_op(s: &mut String, st: &StateTable, op: &Op, self_id: u32) {
         Op::Ret => {
             writeln!(s, "        cur = p.popRet();").unwrap();
         }
-        Op::Star { first, body, next } => {
+        Op::Star { first, body, next, head } => {
             writeln!(
                 s,
                 "        if (p.matchesFirst(FIRST_{})) {{ p.pushRet({}); cur = {}; }}",
-                first, self_id, body
+                first, head, body
             )
             .unwrap();
             writeln!(s, "        else cur = {};", next).unwrap();

@@ -57,7 +57,7 @@ pub fn layout(prog: Program, ag: &AnalyzedGrammar) -> StateTable {
                 State {
                     id: here,
                     label: block.op_labels[i].clone(),
-                    ops: lower_op(op, fall, &entry, &prog.rule_entry, &prog.first_sets),
+                    ops: lower_op(op, here, fall, &entry, &prog.rule_entry, &prog.first_sets),
                 },
             );
             next_id += 1;
@@ -154,6 +154,7 @@ fn visit_block_targets(op: &Op, f: &mut dyn FnMut(BlockId)) {
 /// a trailing jump.
 fn lower_op(
     op: &Op,
+    here: StateId,
     fall: StateId,
     entry: &HashMap<BlockId, StateId>,
     rules: &HashMap<String, BlockId>,
@@ -190,6 +191,11 @@ fn lower_op(
             first: *first,
             body: resolve(body, entry, rules),
             next: fall,
+            // Loop-head defaults to the state we're being placed in.
+            // If the fuse pass later splices this Star elsewhere, the
+            // original `here` state stays alive (it's referenced via
+            // `head`) so the body's Ret has somewhere to land.
+            head: here,
         }],
         Op::Dispatch {
             arms,

@@ -450,7 +450,7 @@ fn emit_drive(s: &mut String, st: &StateTable) {
         )
         .unwrap();
         for op in &state.ops {
-            emit_op(s, st, op, state.id);
+            emit_op(s, st, op);
         }
         writeln!(s, "                    break;").unwrap();
         writeln!(s, "                }}").unwrap();
@@ -467,7 +467,7 @@ fn emit_drive(s: &mut String, st: &StateTable) {
     writeln!(s).unwrap();
 }
 
-fn emit_op(s: &mut String, st: &StateTable, op: &Op, self_id: u32) {
+fn emit_op(s: &mut String, st: &StateTable, op: &Op) {
     match op {
         Op::Enter(k) => {
             writeln!(s, "                    p.Enter({});", rule_id(st, *k)).unwrap();
@@ -498,8 +498,8 @@ fn emit_op(s: &mut String, st: &StateTable, op: &Op, self_id: u32) {
         Op::Ret => {
             writeln!(s, "                    cur = p.PopRet();").unwrap();
         }
-        Op::Star { first, body, next } => {
-            writeln!(s, "                    if (p.MatchesFirst(Tables.First{})) {{ p.PushRet({}); cur = {}; }}", first, self_id, body).unwrap();
+        Op::Star { first, body, next, head } => {
+            writeln!(s, "                    if (p.MatchesFirst(Tables.First{})) {{ p.PushRet({}); cur = {}; }}", first, head, body).unwrap();
             writeln!(s, "                    else cur = {};", next).unwrap();
         }
         Op::Opt { first, body, next } => {
