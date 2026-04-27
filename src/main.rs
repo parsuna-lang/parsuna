@@ -508,24 +508,35 @@ fn format_op(op: &parsuna::lowering::Op, st: &StateTable) -> Vec<String> {
         Op::PushRet(r) => vec![format!("PushRet {}", state_ref(st, *r))],
         Op::Jump(n) => vec![format!("Jump {}", state_ref(st, *n))],
         Op::Ret => vec!["Ret".into()],
-        Op::Star { first, body, next, head } => vec![format!(
+        Op::Star {
+            first,
+            body,
+            next,
+            head,
+        } => vec![format!(
             "Star {} body={} next={} head={}",
             format_first_pool(st, *first),
             state_ref(st, *body),
             state_ref(st, *next),
             state_ref(st, *head)
         )],
-        Op::Opt { first, body, next } => vec![format!(
-            "Opt {} body={} next={}",
+        Op::Opt { first, body, cont } => vec![format!(
+            "Opt {} body={} {}",
             format_first_pool(st, *first),
             state_ref(st, *body),
-            state_ref(st, *next)
+            match cont {
+                Some(n) => format!("cont={}", state_ref(st, *n)),
+                None => "tail".into(),
+            },
         )],
-        Op::Dispatch { tree, sync, next } => {
+        Op::Dispatch { tree, sync, cont } => {
             let mut lines = vec![format!(
-                "Dispatch sync={} fall={}",
+                "Dispatch sync={} {}",
                 format_sync_set(st, *sync),
-                state_ref(st, *next)
+                match cont {
+                    Some(n) => format!("cont={}", state_ref(st, *n)),
+                    None => "tail".into(),
+                },
             )];
             format_dispatch_tree(st, tree, "  ", &mut lines);
             lines

@@ -724,15 +724,20 @@ fn emit_op(c: &mut String, st: &StateTable, upper: &str, op: &Op) {
             )
             .unwrap();
         }
-        Op::Opt { first, body, next } => {
-            writeln!(
+        Op::Opt { first, body, cont } => match cont {
+            Some(n) => writeln!(
                 c,
-                "      if (matches_first(p, FIRST_{first})) {{ push_ret(p, {next}); cur = {body}; }} else {{ cur = {next}; }}"
+                "      if (matches_first(p, FIRST_{first})) {{ push_ret(p, {n}); cur = {body}; }} else {{ cur = {n}; }}"
             )
-            .unwrap();
-        }
-        Op::Dispatch { tree, sync, next } => {
-            emit_dispatch_tree(c, st, upper, tree, *sync, *next, "      ");
+            .unwrap(),
+            None => writeln!(
+                c,
+                "      if (matches_first(p, FIRST_{first})) {{ cur = {body}; }} else {{ cur = pop_ret(p); }}"
+            )
+            .unwrap(),
+        },
+        Op::Dispatch { tree, sync, cont } => {
+            emit_dispatch_tree(c, st, upper, tree, *sync, *cont, "      ");
         }
     }
 }
@@ -743,13 +748,13 @@ fn emit_dispatch_tree(
     upper: &str,
     tree: &DispatchTree,
     sync: u32,
-    next: u32,
+    cont: Option<u32>,
     ind: &str,
 ) {
     match tree {
         DispatchTree::Leaf(leaf) => {
             write!(c, "{}{{ ", ind).unwrap();
-            emit_leaf_inline(c, leaf, sync, next);
+            emit_leaf_inline(c, leaf, sync, cont);
             writeln!(c, "}}").unwrap();
         }
         DispatchTree::Switch {
@@ -764,33 +769,38 @@ fn emit_dispatch_tree(
                 match sub {
                     DispatchTree::Leaf(leaf) => {
                         write!(c, "{}case {}: {{ ", inner, name).unwrap();
-                        emit_leaf_inline(c, leaf, sync, next);
+                        emit_leaf_inline(c, leaf, sync, cont);
                         writeln!(c, "}} break;").unwrap();
                     }
                     _ => {
                         writeln!(c, "{}case {}: {{", inner, name).unwrap();
-                        emit_dispatch_tree(c, st, upper, sub, sync, next, &format!("{}  ", inner));
+                        emit_dispatch_tree(c, st, upper, sub, sync, cont, &format!("{}  ", inner));
                         writeln!(c, "{}}} break;", inner).unwrap();
                     }
                 }
             }
             write!(c, "{}default: {{ ", inner).unwrap();
-            emit_leaf_inline(c, default, sync, next);
+            emit_leaf_inline(c, default, sync, cont);
             writeln!(c, "}} break;").unwrap();
             writeln!(c, "{}}}", ind).unwrap();
         }
     }
 }
 
-fn emit_leaf_inline(c: &mut String, leaf: &DispatchLeaf, sync: u32, next: u32) {
-    match leaf {
-        DispatchLeaf::Arm(t) => {
-            write!(c, "push_ret(p, {next}); cur = {t}; ").unwrap()
-        }
-        DispatchLeaf::Fallthrough => write!(c, "cur = {next}; ").unwrap(),
-        DispatchLeaf::Error => write!(
+fn emit_leaf_inline(c: &mut String, leaf: &DispatchLeaf, sync: u32, cont: Option<u32>) {
+    match (leaf, cont) {
+        (DispatchLeaf::Arm(t), Some(n)) => write!(c, "push_ret(p, {n}); cur = {t}; ").unwrap(),
+        (DispatchLeaf::Arm(t), None) => write!(c, "cur = {t}; ").unwrap(),
+        (DispatchLeaf::Fallthrough, Some(n)) => write!(c, "cur = {n}; ").unwrap(),
+        (DispatchLeaf::Fallthrough, None) => write!(c, "cur = pop_ret(p); ").unwrap(),
+        (DispatchLeaf::Error, Some(n)) => write!(
             c,
-            "cur = {next}; error_here(p, \"unexpected token\"); recover_to(p, SYNC_{sync}); "
+            "cur = {n}; error_here(p, \"unexpected token\"); recover_to(p, SYNC_{sync}); "
+        )
+        .unwrap(),
+        (DispatchLeaf::Error, None) => write!(
+            c,
+            "error_here(p, \"unexpected token\"); recover_to(p, SYNC_{sync}); cur = pop_ret(p); "
         )
         .unwrap(),
     }

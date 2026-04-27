@@ -172,15 +172,22 @@ pub enum Op {
         /// inlined into another state by the fuse pass.
         head: StateId,
     },
-    /// `?` branch: if lookahead matches `first`, call `body` once and
-    /// continue at `next`; otherwise skip straight to `next`.
+    /// `?` branch: if lookahead matches `first`, call `body` once,
+    /// otherwise skip the body. The continuation is either a state to
+    /// jump to after `body` returns (push-and-jump) or "tail call".
     Opt {
         /// FIRST-set id the body opens with.
         first: FirstSetId,
         /// Body to call when taken.
         body: StateId,
-        /// Fall-through state (joined whether or not the body ran).
-        next: StateId,
+        /// Continuation. `Some(state)` is the original lowering shape
+        /// — `push_ret(state); cur = body` on match, `cur = state` on
+        /// miss. `None` is a tail call: `cur = body` on match (the
+        /// body's trailing `Ret` returns to *our* caller), and `cur =
+        /// ret()` on miss. The [`fuse`](crate::lowering::fuse)
+        /// tail-call elimination pass rewrites `Some(s)` to `None`
+        /// when `s` is a pure-`Ret` trampoline.
+        cont: Option<StateId>,
     },
     /// `Alt` dispatch: pick one arm based on up to `k` tokens of
     /// lookahead, or recover via `sync` on a miss.
@@ -189,8 +196,12 @@ pub enum Op {
         tree: DispatchTree,
         /// SYNC set to recover to on "unexpected token".
         sync: SyncSetId,
-        /// State to continue at once the chosen arm returns.
-        next: StateId,
+        /// Continuation once an arm's body returns (also used for
+        /// `Fallthrough` and post-recovery `Error` paths). Same
+        /// encoding as [`Op::Opt::cont`]: `Some(state)` is
+        /// push-and-jump, `None` is a tail call (no push, return
+        /// directly to caller).
+        cont: Option<StateId>,
     },
 }
 

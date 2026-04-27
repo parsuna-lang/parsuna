@@ -37,9 +37,16 @@ use crate::lowering::{DispatchLeaf, DispatchTree, Op, StateId, StateTable};
 /// file size for chains that would otherwise expand multiplicatively.
 pub const DUPLICATION_BUDGET: usize = 6;
 
-/// Splice straight-line jump chains and drop unreachable states.
+/// Splice straight-line jump chains, eliminate tail-call trampolines,
+/// and drop unreachable states.
+///
+/// Tail-call elimination runs after the chain splicer because splicing
+/// creates the situation TCE optimises: a state that ends in a "call"
+/// pattern (`PushRet(B); ... <call>`) where `B` is now a pure-`Ret`
+/// state because `splice_chains` collapsed everything else out of it.
 pub fn fuse(table: &mut StateTable) {
     splice_chains(table);
+    eliminate_tail_pushes(table);
     eliminate_dead(table);
 }
 
@@ -135,6 +142,71 @@ fn fuse_ops(
     ops
 }
 
+/// Eliminate "trampoline" pushes whose target is a pure-`Ret` state.
+///
+/// Three patterns get optimised, all of which boil down to "the
+/// continuation we'd push is a single `Ret`, so the called code's
+/// trailing `Ret` may as well pop our caller directly":
+///
+/// 1. **Explicit [`Op::PushRet(B)`]** where `B = [Op::Ret]` — the push
+///    is dropped outright. Typical post-splice shape:
+///
+///    ```text
+///    state A: [PushRet(B), Enter(R), Expect(...), Jump(C)]
+///    state B: [Ret]
+///    ```
+///
+/// 2. **[`Op::Opt`] whose `next` is `[Op::Ret]`** — the codegen would
+///    have emitted `push_ret(next); cur = body` on the matched path
+///    and `cur = next` on the miss path. With `tail = true` the
+///    backends emit `cur = body` (no push) and `cur = ret()` instead.
+///
+/// 3. **[`Op::Dispatch`] whose `next` is `[Op::Ret]`** — same shape as
+///    `Opt`, applied across every `Arm` leaf and the
+///    `Fallthrough`/`Error` recovery paths.
+///
+/// Safety:
+/// * The trampoline state must be exactly `[Op::Ret]`. Any other op
+///   (including `Enter`/`Exit`/`Expect`) is observable.
+/// * Entry states are never optimised away — they must remain
+///   callable from outside the dispatch.
+///
+/// `eliminate_dead` runs immediately after this pass and drops any
+/// trampoline states that became unreferenced.
+fn eliminate_tail_pushes(table: &mut StateTable) {
+    let entry_ids: HashSet<StateId> = table.entry_states.iter().map(|(_, id)| *id).collect();
+    let return_only: HashSet<StateId> = table
+        .states
+        .iter()
+        .filter(|(id, s)| !entry_ids.contains(id) && matches!(s.ops.as_slice(), [Op::Ret]))
+        .map(|(id, _)| *id)
+        .collect();
+    if return_only.is_empty() {
+        return;
+    }
+    for state in table.states.values_mut() {
+        // Pattern 1: drop explicit PushRets to trampolines.
+        state.ops.retain(|op| match op {
+            Op::PushRet(b) => !return_only.contains(b),
+            _ => true,
+        });
+        // Patterns 2 & 3: flip Opt/Dispatch's `cont` to `None` when the
+        // continuation is a trampoline. Backends pattern-match on
+        // `cont` and emit either push-and-jump or a tail call.
+        for op in state.ops.iter_mut() {
+            let cont = match op {
+                Op::Opt { cont, .. } | Op::Dispatch { cont, .. } => cont,
+                _ => continue,
+            };
+            if let Some(s) = *cont {
+                if return_only.contains(&s) {
+                    *cont = None;
+                }
+            }
+        }
+    }
+}
+
 fn eliminate_dead(table: &mut StateTable) {
     let mut reachable: HashSet<StateId> = HashSet::new();
     let mut queue: VecDeque<StateId> = table.entry_states.iter().map(|(_, id)| *id).collect();
@@ -165,9 +237,19 @@ fn op_targets(op: &Op) -> Vec<StateId> {
         Op::Star {
             body, next, head, ..
         } => vec![*body, *next, *head],
-        Op::Opt { body, next, .. } => vec![*body, *next],
-        Op::Dispatch { tree, next, .. } => {
-            let mut out = vec![*next];
+        // Tail-flavoured Opt/Dispatch (`cont = None`) don't transition
+        // through any continuation state — codegen emits `Ret` instead
+        // of `Jump(cont)`. Excluding the missing target here lets
+        // `eliminate_dead` drop the now-orphan trampoline state.
+        Op::Opt { body, cont, .. } => match cont {
+            Some(c) => vec![*body, *c],
+            None => vec![*body],
+        },
+        Op::Dispatch { tree, cont, .. } => {
+            let mut out = match cont {
+                Some(c) => vec![*c],
+                None => Vec::new(),
+            };
             collect_tree_targets(tree, &mut out);
             out
         }
@@ -241,6 +323,79 @@ mod tests {
     }
 
     #[test]
+    fn tail_push_to_ret_only_state_is_stripped() {
+        // 1 calls 5: pushes 6 (a pure-Ret trampoline) and jumps. After
+        // elimination 1 should not push 6 anymore, and 6 should be gone.
+        let mut states = BTreeMap::new();
+        states.insert(
+            1,
+            make_state(
+                1,
+                vec![Op::PushRet(6), Op::Enter(0), Op::Jump(5)],
+            ),
+        );
+        states.insert(5, make_state(5, vec![Op::Exit(0), Op::Ret]));
+        states.insert(6, make_state(6, vec![Op::Ret]));
+        let mut table = empty_table_with(states, 1);
+        fuse(&mut table);
+        let s1_ops = &table.states.get(&1).unwrap().ops;
+        // The PushRet(6) has been stripped.
+        assert!(
+            !s1_ops.iter().any(|op| matches!(op, Op::PushRet(6))),
+            "{:?}",
+            s1_ops
+        );
+        // State 6 was unreferenced after the strip, so DCE drops it.
+        assert!(!table.states.contains_key(&6), "trampoline state 6 still present");
+    }
+
+    #[test]
+    fn tail_push_does_not_strip_when_target_is_an_entry() {
+        // Entry states must remain callable even if their only role is Ret.
+        let mut states = BTreeMap::new();
+        states.insert(1, make_state(1, vec![Op::PushRet(2), Op::Jump(3)]));
+        states.insert(2, make_state(2, vec![Op::Ret]));
+        states.insert(3, make_state(3, vec![Op::Ret]));
+        let mut table = empty_table_with(states, 1);
+        // Mark 2 as a public entry.
+        table.entry_states.push(("alt".into(), 2));
+        fuse(&mut table);
+        // PushRet(2) survives because 2 is an entry.
+        assert!(
+            table
+                .states
+                .get(&1)
+                .unwrap()
+                .ops
+                .iter()
+                .any(|op| matches!(op, Op::PushRet(2))),
+            "{:?}",
+            table.states.get(&1).unwrap().ops
+        );
+        assert!(table.states.contains_key(&2));
+    }
+
+    #[test]
+    fn tail_push_does_not_strip_when_target_does_real_work() {
+        // Op::Exit is observable and can't be skipped, so a [Exit, Ret]
+        // state is NOT a pure trampoline.
+        let mut states = BTreeMap::new();
+        states.insert(1, make_state(1, vec![Op::PushRet(2), Op::Jump(3)]));
+        states.insert(2, make_state(2, vec![Op::Exit(0), Op::Ret]));
+        states.insert(3, make_state(3, vec![Op::Ret]));
+        let mut table = empty_table_with(states, 1);
+        fuse(&mut table);
+        assert!(table
+            .states
+            .get(&1)
+            .unwrap()
+            .ops
+            .iter()
+            .any(|op| matches!(op, Op::PushRet(2))));
+        assert!(table.states.contains_key(&2));
+    }
+
+    #[test]
     fn fuse_real_lowering_reaches_fixpoint_and_keeps_entries() {
         let ag = analyze_src("T = \"t\"; main = T;");
         let st = lower(&ag);
@@ -281,7 +436,7 @@ mod tests {
         let dispatch = Op::Dispatch {
             tree: DispatchTree::Leaf(DispatchLeaf::Fallthrough),
             sync: 0,
-            next: 99,
+            cont: Some(99),
         };
         let mut states = BTreeMap::new();
         states.insert(1, make_state(1, vec![Op::Jump(2)]));
@@ -305,7 +460,7 @@ mod tests {
         let dispatch = || Op::Dispatch {
             tree: DispatchTree::Leaf(DispatchLeaf::Fallthrough),
             sync: 0,
-            next: 99,
+            cont: Some(99),
         };
         let mut states = BTreeMap::new();
         states.insert(1, make_state(1, vec![Op::Jump(2)]));

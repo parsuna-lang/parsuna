@@ -185,7 +185,10 @@ fn lower_op(
         Op::Opt { first, body } => vec![StateOp::Opt {
             first: *first,
             body: resolve(body, entry, rules),
-            next: fall,
+            // Layout always emits the push-and-jump shape. The fuse
+            // tail-call pass rewrites this to `None` when `fall`
+            // turns out to be a pure-`Ret` trampoline.
+            cont: Some(fall),
         }],
         Op::Star { first, body } => vec![StateOp::Star {
             first: *first,
@@ -213,7 +216,7 @@ fn lower_op(
             vec![StateOp::Dispatch {
                 tree,
                 sync: *sync,
-                next: fall,
+                cont: Some(fall),
             }]
         }
     }

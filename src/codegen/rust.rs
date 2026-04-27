@@ -451,22 +451,30 @@ fn emit_op(s: &mut String, st: &StateTable, op: &Op, ind: &str) {
                 },
             );
         }
-        Op::Opt { first, body, next } => {
+        Op::Opt { first, body, cont } => {
             emit_lookahead_branch(
                 s,
                 st,
                 *first,
                 ind,
-                |s, ind| {
-                    writeln!(s, "{}p.push_ret({}); cur = {};", ind, next, body).unwrap();
+                |s, ind| match cont {
+                    Some(n) => {
+                        writeln!(s, "{}p.push_ret({}); cur = {};", ind, n, body).unwrap();
+                    }
+                    None => {
+                        // Tail call: body's trailing Ret pops our caller
+                        // directly because the trampoline was elided.
+                        writeln!(s, "{}cur = {};", ind, body).unwrap();
+                    }
                 },
-                |s, ind| {
-                    writeln!(s, "{}cur = {};", ind, next).unwrap();
+                |s, ind| match cont {
+                    Some(n) => writeln!(s, "{}cur = {};", ind, n).unwrap(),
+                    None => writeln!(s, "{}cur = p.ret();", ind).unwrap(),
                 },
             );
         }
-        Op::Dispatch { tree, sync, next } => {
-            emit_dispatch_tree(s, st, tree, *sync, *next, ind);
+        Op::Dispatch { tree, sync, cont } => {
+            emit_dispatch_tree(s, st, tree, *sync, *cont, ind);
         }
     }
 }
@@ -503,11 +511,11 @@ fn emit_dispatch_tree(
     st: &StateTable,
     tree: &DispatchTree,
     sync: u32,
-    next: u32,
+    cont: Option<u32>,
     ind: &str,
 ) {
     match tree {
-        DispatchTree::Leaf(leaf) => emit_dispatch_leaf(s, leaf, sync, next, ind),
+        DispatchTree::Leaf(leaf) => emit_dispatch_leaf(s, leaf, sync, cont, ind),
         DispatchTree::Switch {
             depth,
             arms,
@@ -521,48 +529,69 @@ fn emit_dispatch_tree(
                 match sub {
                     DispatchTree::Leaf(leaf) => {
                         write!(s, "{}{} => {{ ", inner, pat).unwrap();
-                        emit_leaf_inline(s, leaf, sync, next);
+                        emit_leaf_inline(s, leaf, sync, cont);
                         writeln!(s, "}}").unwrap();
                     }
                     _ => {
                         writeln!(s, "{}{} => {{", inner, pat).unwrap();
-                        emit_dispatch_tree(s, st, sub, sync, next, &inner2);
+                        emit_dispatch_tree(s, st, sub, sync, cont, &inner2);
                         writeln!(s, "{}}}", inner).unwrap();
                     }
                 }
             }
             write!(s, "{}_ => {{ ", inner).unwrap();
-            emit_leaf_inline(s, default, sync, next);
+            emit_leaf_inline(s, default, sync, cont);
             writeln!(s, "}}").unwrap();
             writeln!(s, "{}}}", ind).unwrap();
         }
     }
 }
 
-fn emit_dispatch_leaf(s: &mut String, leaf: &DispatchLeaf, sync: u32, next: u32, ind: &str) {
-    match leaf {
-        DispatchLeaf::Arm(t) => writeln!(s, "{}p.push_ret({}); cur = {};", ind, next, t).unwrap(),
-        DispatchLeaf::Fallthrough => writeln!(s, "{}cur = {};", ind, next).unwrap(),
-        DispatchLeaf::Error => {
-            writeln!(s, "{}cur = {};", ind, next).unwrap();
+fn emit_dispatch_leaf(s: &mut String, leaf: &DispatchLeaf, sync: u32, cont: Option<u32>, ind: &str) {
+    match (leaf, cont) {
+        (DispatchLeaf::Arm(t), Some(n)) => {
+            writeln!(s, "{}p.push_ret({}); cur = {};", ind, n, t).unwrap();
+        }
+        (DispatchLeaf::Arm(t), None) => {
+            writeln!(s, "{}cur = {};", ind, t).unwrap();
+        }
+        (DispatchLeaf::Fallthrough, Some(n)) => {
+            writeln!(s, "{}cur = {};", ind, n).unwrap();
+        }
+        (DispatchLeaf::Fallthrough, None) => {
+            writeln!(s, "{}cur = p.ret();", ind).unwrap();
+        }
+        (DispatchLeaf::Error, Some(n)) => {
+            writeln!(s, "{}cur = {};", ind, n).unwrap();
             writeln!(s, "{}p.error_here(\"unexpected token\");", ind).unwrap();
             writeln!(s, "{}p.recover_to(SYNC_{});", ind, sync).unwrap();
+        }
+        (DispatchLeaf::Error, None) => {
+            writeln!(s, "{}p.error_here(\"unexpected token\");", ind).unwrap();
+            writeln!(s, "{}p.recover_to(SYNC_{});", ind, sync).unwrap();
+            writeln!(s, "{}cur = p.ret();", ind).unwrap();
         }
     }
 }
 
-fn emit_leaf_inline(s: &mut String, leaf: &DispatchLeaf, sync: u32, next: u32) {
-    match leaf {
-        DispatchLeaf::Arm(t) => write!(s, "p.push_ret({}); cur = {}; ", next, t).unwrap(),
-        DispatchLeaf::Fallthrough => write!(s, "cur = {}; ", next).unwrap(),
-        DispatchLeaf::Error => {
-            write!(
-                s,
-                "cur = {}; p.error_here(\"unexpected token\"); p.recover_to(SYNC_{}); ",
-                next, sync
-            )
-            .unwrap();
-        }
+fn emit_leaf_inline(s: &mut String, leaf: &DispatchLeaf, sync: u32, cont: Option<u32>) {
+    match (leaf, cont) {
+        (DispatchLeaf::Arm(t), Some(n)) => write!(s, "p.push_ret({}); cur = {}; ", n, t).unwrap(),
+        (DispatchLeaf::Arm(t), None) => write!(s, "cur = {}; ", t).unwrap(),
+        (DispatchLeaf::Fallthrough, Some(n)) => write!(s, "cur = {}; ", n).unwrap(),
+        (DispatchLeaf::Fallthrough, None) => write!(s, "cur = p.ret(); ").unwrap(),
+        (DispatchLeaf::Error, Some(n)) => write!(
+            s,
+            "cur = {}; p.error_here(\"unexpected token\"); p.recover_to(SYNC_{}); ",
+            n, sync
+        )
+        .unwrap(),
+        (DispatchLeaf::Error, None) => write!(
+            s,
+            "p.error_here(\"unexpected token\"); p.recover_to(SYNC_{}); cur = p.ret(); ",
+            sync
+        )
+        .unwrap(),
     }
 }
 

@@ -502,12 +502,18 @@ fn emit_op(s: &mut String, st: &StateTable, op: &Op) {
             writeln!(s, "                    if (p.MatchesFirst(Tables.First{})) {{ p.PushRet({}); cur = {}; }}", first, head, body).unwrap();
             writeln!(s, "                    else cur = {};", next).unwrap();
         }
-        Op::Opt { first, body, next } => {
-            writeln!(s, "                    if (p.MatchesFirst(Tables.First{})) {{ p.PushRet({}); cur = {}; }}", first, next, body).unwrap();
-            writeln!(s, "                    else cur = {};", next).unwrap();
-        }
-        Op::Dispatch { tree, sync, next } => {
-            emit_dispatch_tree(s, st, tree, *sync, *next, "                    ");
+        Op::Opt { first, body, cont } => match cont {
+            Some(n) => {
+                writeln!(s, "                    if (p.MatchesFirst(Tables.First{})) {{ p.PushRet({}); cur = {}; }}", first, n, body).unwrap();
+                writeln!(s, "                    else cur = {};", n).unwrap();
+            }
+            None => {
+                writeln!(s, "                    if (p.MatchesFirst(Tables.First{})) cur = {};", first, body).unwrap();
+                writeln!(s, "                    else cur = p.PopRet();").unwrap();
+            }
+        },
+        Op::Dispatch { tree, sync, cont } => {
+            emit_dispatch_tree(s, st, tree, *sync, *cont, "                    ");
         }
     }
 }
@@ -517,13 +523,13 @@ fn emit_dispatch_tree(
     st: &StateTable,
     tree: &DispatchTree,
     sync: u32,
-    next: u32,
+    cont: Option<u32>,
     ind: &str,
 ) {
     match tree {
         DispatchTree::Leaf(leaf) => {
             write!(s, "{}{{ ", ind).unwrap();
-            emit_leaf_inline(s, leaf, sync, next);
+            emit_leaf_inline(s, leaf, sync, cont);
             writeln!(s, "}}").unwrap();
         }
         DispatchTree::Switch {
@@ -538,33 +544,41 @@ fn emit_dispatch_tree(
                 match sub {
                     DispatchTree::Leaf(leaf) => {
                         write!(s, "{}case {}: {{ ", inner, lit).unwrap();
-                        emit_leaf_inline(s, leaf, sync, next);
+                        emit_leaf_inline(s, leaf, sync, cont);
                         writeln!(s, "break; }}").unwrap();
                     }
                     _ => {
                         writeln!(s, "{}case {}: {{", inner, lit).unwrap();
-                        emit_dispatch_tree(s, st, sub, sync, next, &format!("{}  ", inner));
+                        emit_dispatch_tree(s, st, sub, sync, cont, &format!("{}  ", inner));
                         writeln!(s, "{}  break;", inner).unwrap();
                         writeln!(s, "{}}}", inner).unwrap();
                     }
                 }
             }
             write!(s, "{}default: {{ ", inner).unwrap();
-            emit_leaf_inline(s, default, sync, next);
+            emit_leaf_inline(s, default, sync, cont);
             writeln!(s, "break; }}").unwrap();
             writeln!(s, "{}}}", ind).unwrap();
         }
     }
 }
 
-fn emit_leaf_inline(s: &mut String, leaf: &DispatchLeaf, sync: u32, next: u32) {
-    match leaf {
-        DispatchLeaf::Arm(t) => write!(s, "p.PushRet({}); cur = {}; ", next, t).unwrap(),
-        DispatchLeaf::Fallthrough => write!(s, "cur = {}; ", next).unwrap(),
-        DispatchLeaf::Error => write!(
+fn emit_leaf_inline(s: &mut String, leaf: &DispatchLeaf, sync: u32, cont: Option<u32>) {
+    match (leaf, cont) {
+        (DispatchLeaf::Arm(t), Some(n)) => write!(s, "p.PushRet({}); cur = {}; ", n, t).unwrap(),
+        (DispatchLeaf::Arm(t), None) => write!(s, "cur = {}; ", t).unwrap(),
+        (DispatchLeaf::Fallthrough, Some(n)) => write!(s, "cur = {}; ", n).unwrap(),
+        (DispatchLeaf::Fallthrough, None) => write!(s, "cur = p.PopRet(); ").unwrap(),
+        (DispatchLeaf::Error, Some(n)) => write!(
             s,
             "cur = {}; p.ErrorHere(\"unexpected token\"); p.RecoverTo(Tables.Sync{}); ",
-            next, sync
+            n, sync
+        )
+        .unwrap(),
+        (DispatchLeaf::Error, None) => write!(
+            s,
+            "p.ErrorHere(\"unexpected token\"); p.RecoverTo(Tables.Sync{}); cur = p.PopRet(); ",
+            sync
         )
         .unwrap(),
     }
