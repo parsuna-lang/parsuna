@@ -155,17 +155,23 @@ impl<'a, L: LexerBackend<'a, G::TokenKind>, const K: usize, G: Drive<K>> Parser<
     pub fn enter(&mut self, rule: G::RuleKind) {
         let pos = self.look[0].span.start;
         self.prev_end = pos;
-        self.emit(Event::Enter { rule, pos });
+        // Inline `emit`: we already know the event start, so skip the
+        // `match` on the Event variant.
+        if G::HAS_SKIPS && !self.pending_skips.is_empty() {
+            self.flush_skips_before(pos);
+        }
+        self.queue.push_back(Event::Enter { rule, pos });
     }
 
     /// Emit an `Exit` event for `rule`, positioned at the end of the last
     /// consumed token (or the rule's start for empty rules).
     #[inline(always)]
     pub fn exit(&mut self, rule: G::RuleKind) {
-        self.emit(Event::Exit {
-            rule,
-            pos: self.prev_end,
-        });
+        let pos = self.prev_end;
+        if G::HAS_SKIPS && !self.pending_skips.is_empty() {
+            self.flush_skips_before(pos);
+        }
+        self.queue.push_back(Event::Exit { rule, pos });
     }
 
     /// Append an event to the output queue.
@@ -173,6 +179,11 @@ impl<'a, L: LexerBackend<'a, G::TokenKind>, const K: usize, G: Drive<K>> Parser<
     /// If skip tokens are pending and the event is positioned past them, we
     /// flush those skips first — this keeps the consumer-visible order
     /// faithful (comments before the structural event that follows them).
+    ///
+    /// `consume`/`enter`/`exit` inline this directly so they can avoid the
+    /// per-event `match` on the variant tag; this stays as the fallback for
+    /// callers (e.g. `error_here`) that don't know the start position
+    /// without inspecting the event.
     #[inline(always)]
     pub fn emit(&mut self, ev: Event<'a, G::TokenKind, G::RuleKind>) {
         if G::HAS_SKIPS && !self.pending_skips.is_empty() {
@@ -201,6 +212,7 @@ impl<'a, L: LexerBackend<'a, G::TokenKind>, const K: usize, G: Drive<K>> Parser<
     /// recovery handles the common case where the expected token is what
     /// we skipped *to* — the caller still wants to swallow it so the rest
     /// of the rule sees a clean input.
+    #[inline(always)]
     pub fn expect(
         &mut self,
         kind: G::TokenKind,
@@ -211,6 +223,21 @@ impl<'a, L: LexerBackend<'a, G::TokenKind>, const K: usize, G: Drive<K>> Parser<
             self.consume();
             return;
         }
+        self.expect_slow(kind, sync, expected_msg);
+    }
+
+    /// Cold path of [`expect`]: the lookahead didn't match, so we emit
+    /// the error, recover to the sync set, and (if recovery landed on
+    /// the expected kind) retry the consume. Hoisted out of `expect` so
+    /// the hot path is a single compare-and-call.
+    #[cold]
+    #[inline(never)]
+    fn expect_slow(
+        &mut self,
+        kind: G::TokenKind,
+        sync: &[G::TokenKind],
+        expected_msg: &'static str,
+    ) {
         self.error_here(expected_msg);
         self.recover_to(sync);
         if self.look[0].kind == Some(kind) {
@@ -220,6 +247,12 @@ impl<'a, L: LexerBackend<'a, G::TokenKind>, const K: usize, G: Drive<K>> Parser<
 
     /// Consume the current lookahead token, emit it, and shift the buffer
     /// up by one. The new slot `K-1` is refilled from the lexer.
+    ///
+    /// Hand-inlined against the generic `emit` path: the event is always
+    /// a `Token`, so we know the start position directly and can skip
+    /// `emit`'s `match` over Event variants. For K=1 the swap loop is
+    /// empty and folds away; for K>1 it shifts the buffer left so the
+    /// freshly pumped token lands in slot K-1.
     #[inline]
     pub fn consume(&mut self) {
         self.prev_end = self.look[0].span.end;
@@ -228,7 +261,10 @@ impl<'a, L: LexerBackend<'a, G::TokenKind>, const K: usize, G: Drive<K>> Parser<
         for i in 0..K - 1 {
             self.look.swap(i, i + 1);
         }
-        self.emit(Event::Token(t));
+        if G::HAS_SKIPS && !self.pending_skips.is_empty() {
+            self.flush_skips_before(t.span.start);
+        }
+        self.queue.push_back(Event::Token(t));
     }
 
     /// Consume tokens until the current lookahead matches `sync` (or EOF).
@@ -277,16 +313,39 @@ impl<'a, L: LexerBackend<'a, G::TokenKind>, const K: usize, G: Drive<K>> Parser<
 
     /// Pull one token from the lexer, routing skip tokens into a side queue
     /// so the state machine only sees structural tokens.
-    #[inline]
+    ///
+    /// The hot path — non-skip token, the common case for every grammar
+    /// that uses skip tokens at all — is straight-line: lex, peek-kind,
+    /// return. Only the cold "this was a skip" branch enters the loop in
+    /// [`pump_token_slow`]. When `HAS_SKIPS` is `false` the entire skip
+    /// check folds away and `pump_token` is just a passthrough to the
+    /// lexer.
+    #[inline(always)]
     fn pump_token(&mut self) -> Token<'a, G::TokenKind> {
+        let t = self.lex.next_token();
+        if G::HAS_SKIPS {
+            if let Some(k) = t.kind {
+                if G::is_skip(k) {
+                    return self.pump_token_slow(t);
+                }
+            }
+        }
+        t
+    }
+
+    /// Cold path of [`pump_token`]: the lexer just returned a skip token,
+    /// so queue it and keep pulling until we get a structural one. Hoisted
+    /// out of `pump_token` so the hot path stays a single lex-and-return.
+    #[cold]
+    #[inline(never)]
+    fn pump_token_slow(&mut self, first: Token<'a, G::TokenKind>) -> Token<'a, G::TokenKind> {
+        self.pending_skips.push_back(first);
         loop {
             let t = self.lex.next_token();
-            if G::HAS_SKIPS {
-                if let Some(k) = t.kind {
-                    if G::is_skip(k) {
-                        self.pending_skips.push_back(t);
-                        continue;
-                    }
+            if let Some(k) = t.kind {
+                if G::is_skip(k) {
+                    self.pending_skips.push_back(t);
+                    continue;
                 }
             }
             return t;

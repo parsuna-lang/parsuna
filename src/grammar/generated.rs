@@ -125,7 +125,7 @@ pub type Token<'a> = parsuna_rt::Token<'a, TokenKind>;
 /// Compiled lexer DFA for this grammar.
 ///
 /// Zero-sized type whose [`DfaMatcher`] impl drives the lexer via a
-/// per-state `match` rather than a transition st. Generated code
+/// per-state `match` rather than a transition table. Generated code
 /// supplies this to [`Scanner`]/[`StreamingLexer`].
 pub struct LexerDfa;
 
