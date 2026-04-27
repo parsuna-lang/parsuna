@@ -144,9 +144,9 @@ fn fuse_ops(
 
 /// Eliminate "trampoline" pushes whose target is a pure-`Ret` state.
 ///
-/// Three patterns get optimised, all of which boil down to "the
-/// continuation we'd push is a single `Ret`, so the called code's
-/// trailing `Ret` may as well pop our caller directly":
+/// Four patterns get optimized, all of which boil down to "the
+/// continuation we'd push or jump to is a single `Ret`, so the called
+/// code's trailing `Ret` may as well pop our caller directly":
 ///
 /// 1. **Explicit [`Op::PushRet(B)`]** where `B = [Op::Ret]` — the push
 ///    is dropped outright. Typical post-splice shape:
@@ -156,19 +156,26 @@ fn fuse_ops(
 ///    state B: [Ret]
 ///    ```
 ///
-/// 2. **[`Op::Opt`] whose `next` is `[Op::Ret]`** — the codegen would
-///    have emitted `push_ret(next); cur = body` on the matched path
-///    and `cur = next` on the miss path. With `tail = true` the
-///    backends emit `cur = body` (no push) and `cur = ret()` instead.
+/// 2. **[`Op::Opt`] whose `cont` is `[Op::Ret]`** — the codegen would
+///    have emitted `push_ret(cont); cur = body` on the matched path
+///    and `cur = cont` on the miss path. After this pass `cont` is
+///    `None`, and the backends emit `cur = body` (no push) on match
+///    and `cur = ret()` on miss.
 ///
-/// 3. **[`Op::Dispatch`] whose `next` is `[Op::Ret]`** — same shape as
+/// 3. **[`Op::Dispatch`] whose `cont` is `[Op::Ret]`** — same shape as
 ///    `Opt`, applied across every `Arm` leaf and the
 ///    `Fallthrough`/`Error` recovery paths.
+///
+/// 4. **[`Op::Star`] whose `cont` is `[Op::Ret]`** — only the miss /
+///    fall-through path is rewritten (the `head` push that runs every
+///    matched iteration can never be a trampoline because `head` is
+///    the state holding this very `Star` op). Backends emit
+///    `cur = ret()` on miss instead of `cur = cont`.
 ///
 /// Safety:
 /// * The trampoline state must be exactly `[Op::Ret]`. Any other op
 ///   (including `Enter`/`Exit`/`Expect`) is observable.
-/// * Entry states are never optimised away — they must remain
+/// * Entry states are never optimized away — they must remain
 ///   callable from outside the dispatch.
 ///
 /// `eliminate_dead` runs immediately after this pass and drops any
@@ -190,12 +197,13 @@ fn eliminate_tail_pushes(table: &mut StateTable) {
             Op::PushRet(b) => !return_only.contains(b),
             _ => true,
         });
-        // Patterns 2 & 3: flip Opt/Dispatch's `cont` to `None` when the
-        // continuation is a trampoline. Backends pattern-match on
-        // `cont` and emit either push-and-jump or a tail call.
+        // Patterns 2, 3 & 4: flip Opt/Dispatch/Star's `cont` to `None`
+        // when the continuation is a trampoline. Backends pattern-match
+        // on `cont` and emit either push-and-jump (or `cur = next` for
+        // Star's miss path) or a direct tail-`ret()`.
         for op in state.ops.iter_mut() {
             let cont = match op {
-                Op::Opt { cont, .. } | Op::Dispatch { cont, .. } => cont,
+                Op::Opt { cont, .. } | Op::Dispatch { cont, .. } | Op::Star { cont, .. } => cont,
                 _ => continue,
             };
             if let Some(s) = *cont {
@@ -233,10 +241,15 @@ fn op_targets(op: &Op) -> Vec<StateId> {
         Op::PushRet(n) | Op::Jump(n) => vec![*n],
         Op::Ret | Op::Enter(_) | Op::Exit(_) | Op::Expect { .. } => Vec::new(),
         // `head` keeps the original loop-head state alive when the Star
-        // op gets spliced into another state.
+        // op gets spliced into another state. `cont` is the post-loop
+        // fall-through; `None` means tail call (the `Op::Ret` chain
+        // shortcuts straight to the caller).
         Op::Star {
-            body, next, head, ..
-        } => vec![*body, *next, *head],
+            body, cont, head, ..
+        } => match cont {
+            Some(c) => vec![*body, *c, *head],
+            None => vec![*body, *head],
+        },
         // Tail-flavoured Opt/Dispatch (`cont = None`) don't transition
         // through any continuation state — codegen emits `Ret` instead
         // of `Jump(cont)`. Excluding the missing target here lets
@@ -329,10 +342,7 @@ mod tests {
         let mut states = BTreeMap::new();
         states.insert(
             1,
-            make_state(
-                1,
-                vec![Op::PushRet(6), Op::Enter(0), Op::Jump(5)],
-            ),
+            make_state(1, vec![Op::PushRet(6), Op::Enter(0), Op::Jump(5)]),
         );
         states.insert(5, make_state(5, vec![Op::Exit(0), Op::Ret]));
         states.insert(6, make_state(6, vec![Op::Ret]));
@@ -346,7 +356,10 @@ mod tests {
             s1_ops
         );
         // State 6 was unreferenced after the strip, so DCE drops it.
-        assert!(!table.states.contains_key(&6), "trampoline state 6 still present");
+        assert!(
+            !table.states.contains_key(&6),
+            "trampoline state 6 still present"
+        );
     }
 
     #[test]
@@ -393,6 +406,44 @@ mod tests {
             .iter()
             .any(|op| matches!(op, Op::PushRet(2))));
         assert!(table.states.contains_key(&2));
+    }
+
+    #[test]
+    fn tail_push_rewrites_star_cont_to_none() {
+        // 1 holds a Star with cont=2 and head=1; 2 is a pure-Ret
+        // trampoline. Tail-call elimination should rewrite cont to
+        // None so the loop's miss path emits `cur = ret()` directly.
+        let star = Op::Star {
+            first: 0,
+            body: 50,
+            cont: Some(2),
+            head: 1,
+        };
+        let mut states = BTreeMap::new();
+        states.insert(1, make_state(1, vec![star]));
+        states.insert(2, make_state(2, vec![Op::Ret]));
+        states.insert(50, make_state(50, vec![Op::Ret]));
+        let mut table = empty_table_with(states, 1);
+        fuse(&mut table);
+        // cont became None.
+        let s1 = table.states.get(&1).unwrap();
+        assert!(
+            matches!(
+                s1.ops.last(),
+                Some(Op::Star {
+                    cont: None,
+                    head: 1,
+                    ..
+                })
+            ),
+            "{:?}",
+            s1.ops
+        );
+        // The trampoline state was unreferenced after the rewrite, so DCE drops it.
+        assert!(
+            !table.states.contains_key(&2),
+            "trampoline state 2 still present"
+        );
     }
 
     #[test]
@@ -489,17 +540,20 @@ mod tests {
         // into 1. The Star's `head` keeps pointing at 2, so 2 stays alive
         // (eliminate_dead can reach it via the spliced Star), and the loop
         // re-evaluation lands at 2 instead of re-running 1's prologue.
+        // 99 isn't a pure-Ret here (we make it Exit + Ret) so the Star's
+        // `cont` doesn't get tail-call-rewritten — that would distract
+        // from what this test is checking.
         let star = Op::Star {
             first: 0,
             body: 50,
-            next: 99,
+            cont: Some(99),
             head: 2,
         };
         let mut states = BTreeMap::new();
         states.insert(1, make_state(1, vec![Op::Enter(0), Op::Jump(2)]));
         states.insert(2, make_state(2, vec![star]));
         states.insert(50, make_state(50, vec![Op::Ret]));
-        states.insert(99, make_state(99, vec![Op::Ret]));
+        states.insert(99, make_state(99, vec![Op::Exit(0), Op::Ret]));
         let mut table = empty_table_with(states, 1);
         fuse(&mut table);
         let s1_ops = &table.states.get(&1).unwrap().ops;

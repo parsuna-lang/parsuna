@@ -193,7 +193,7 @@ fn lower_op(
         Op::Star { first, body } => vec![StateOp::Star {
             first: *first,
             body: resolve(body, entry, rules),
-            next: fall,
+            cont: Some(fall),
             // Loop-head defaults to the state we're being placed in.
             // If the fuse pass later splices this Star elsewhere, the
             // original `here` state stays alive (it's referenced via

@@ -467,14 +467,17 @@ fn emit_op(s: &mut String, st: &StateTable, op: &Op) {
         Op::Ret => {
             writeln!(s, "        cur = p.popRet();").unwrap();
         }
-        Op::Star { first, body, next, head } => {
+        Op::Star { first, body, cont, head } => {
             writeln!(
                 s,
                 "        if (p.matchesFirst(FIRST_{})) {{ p.pushRet({}); cur = {}; }}",
                 first, head, body
             )
             .unwrap();
-            writeln!(s, "        else cur = {};", next).unwrap();
+            match cont {
+                Some(n) => writeln!(s, "        else cur = {};", n).unwrap(),
+                None => writeln!(s, "        else cur = p.popRet();").unwrap(),
+            }
         }
         Op::Opt { first, body, cont } => match cont {
             Some(n) => {

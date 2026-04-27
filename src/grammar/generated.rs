@@ -646,12 +646,9 @@ impl parsuna_rt::Drive<K> for Grammar {
                             p.push_ret(46); cur = 48;
                         }
                         _ => {
-                            cur = 47;
+                            cur = p.ret();
                         }
                     }
-                }
-                47 => { // _postfix_expr:ret
-                    cur = p.ret();
                 }
                 48 => { // _postfix_expr:star-body:call:_quant_op
                     match p.look(0).kind {

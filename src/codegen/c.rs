@@ -717,13 +717,18 @@ fn emit_op(c: &mut String, st: &StateTable, upper: &str, op: &Op) {
         Op::Ret => {
             writeln!(c, "      cur = pop_ret(p);").unwrap();
         }
-        Op::Star { first, body, next, head } => {
-            writeln!(
+        Op::Star { first, body, cont, head } => match cont {
+            Some(n) => writeln!(
                 c,
-                "      if (matches_first(p, FIRST_{first})) {{ push_ret(p, {head}); cur = {body}; }} else {{ cur = {next}; }}"
+                "      if (matches_first(p, FIRST_{first})) {{ push_ret(p, {head}); cur = {body}; }} else {{ cur = {n}; }}"
             )
-            .unwrap();
-        }
+            .unwrap(),
+            None => writeln!(
+                c,
+                "      if (matches_first(p, FIRST_{first})) {{ push_ret(p, {head}); cur = {body}; }} else {{ cur = pop_ret(p); }}"
+            )
+            .unwrap(),
+        },
         Op::Opt { first, body, cont } => match cont {
             Some(n) => writeln!(
                 c,

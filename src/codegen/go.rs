@@ -425,9 +425,10 @@ fn emit_op(s: &mut String, st: &StateTable, op: &Op) {
         Op::Ret => {
             writeln!(s, "\t\t\tcur = p.PopRet()").unwrap();
         }
-        Op::Star { first, body, next, head } => {
-            writeln!(s, "\t\t\tif p.MatchesFirst(first_{}) {{ p.PushRet({}); cur = {} }} else {{ cur = {} }}", first, head, body, next).unwrap();
-        }
+        Op::Star { first, body, cont, head } => match cont {
+            Some(n) => writeln!(s, "\t\t\tif p.MatchesFirst(first_{}) {{ p.PushRet({}); cur = {} }} else {{ cur = {} }}", first, head, body, n).unwrap(),
+            None => writeln!(s, "\t\t\tif p.MatchesFirst(first_{}) {{ p.PushRet({}); cur = {} }} else {{ cur = p.PopRet() }}", first, head, body).unwrap(),
+        },
         Op::Opt { first, body, cont } => match cont {
             Some(n) => writeln!(s, "\t\t\tif p.MatchesFirst(first_{}) {{ p.PushRet({}); cur = {} }} else {{ cur = {} }}", first, n, body, n).unwrap(),
             None => writeln!(s, "\t\t\tif p.MatchesFirst(first_{}) {{ cur = {} }} else {{ cur = p.PopRet() }}", first, body).unwrap(),

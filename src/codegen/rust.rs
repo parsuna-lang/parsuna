@@ -435,7 +435,7 @@ fn emit_op(s: &mut String, st: &StateTable, op: &Op, ind: &str) {
         Op::Star {
             first,
             body,
-            next,
+            cont,
             head,
         } => {
             emit_lookahead_branch(
@@ -446,8 +446,9 @@ fn emit_op(s: &mut String, st: &StateTable, op: &Op, ind: &str) {
                 |s, ind| {
                     writeln!(s, "{}p.push_ret({}); cur = {};", ind, head, body).unwrap();
                 },
-                |s, ind| {
-                    writeln!(s, "{}cur = {};", ind, next).unwrap();
+                |s, ind| match cont {
+                    Some(n) => writeln!(s, "{}cur = {};", ind, n).unwrap(),
+                    None => writeln!(s, "{}cur = p.ret();", ind).unwrap(),
                 },
             );
         }

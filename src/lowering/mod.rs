@@ -157,15 +157,26 @@ pub enum Op {
     /// if the stack is empty.
     Ret,
     /// `*` loop: if lookahead matches `first`, call `body` and re-enter
-    /// `head` (the loop-condition state); otherwise fall through to
-    /// `next`.
+    /// `head` (the loop-condition state); otherwise fall through to the
+    /// continuation.
     Star {
         /// FIRST-set id the body opens with.
         first: FirstSetId,
         /// Body of one iteration.
         body: StateId,
-        /// State to fall through to when the body no longer matches.
-        next: StateId,
+        /// What to do when the loop exits (lookahead misses `first`).
+        /// `Some(state)` is the original lowering shape — `cur = state`.
+        /// `None` is a tail call — `cur = ret()` directly. The
+        /// [`fuse`](crate::lowering::fuse) tail-call elimination pass
+        /// rewrites `Some(s)` to `None` when `s` is a pure-`Ret`
+        /// trampoline; by the time the loop misses, every iteration has
+        /// already pushed *and* popped its `head` frame, so the stack
+        /// is back to whatever was there when the loop was entered.
+        ///
+        /// Note that `head` itself is never tail-call-eligible: it's
+        /// the state hosting this `Op::Star`, so it always has at
+        /// least one op (this one).
+        cont: Option<StateId>,
         /// State to return to after `body` finishes — the loop-head.
         /// Initially the state that contains this Star, but stays
         /// pointing at the original loop-head if the Star op is later

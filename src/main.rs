@@ -511,13 +511,16 @@ fn format_op(op: &parsuna::lowering::Op, st: &StateTable) -> Vec<String> {
         Op::Star {
             first,
             body,
-            next,
+            cont,
             head,
         } => vec![format!(
-            "Star {} body={} next={} head={}",
+            "Star {} body={} {} head={}",
             format_first_pool(st, *first),
             state_ref(st, *body),
-            state_ref(st, *next),
+            match cont {
+                Some(n) => format!("cont={}", state_ref(st, *n)),
+                None => "tail".into(),
+            },
             state_ref(st, *head)
         )],
         Op::Opt { first, body, cont } => vec![format!(
