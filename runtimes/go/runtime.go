@@ -4,8 +4,8 @@
 // parsuna.
 //
 // A generated grammar package supplies its own TokenKind / RuleKind types
-// (as int16 / uint16 aliases), a DfaConfig, a skip-kind predicate, and a
-// Drive callback that runs the state machine. Everything else — lexing,
+// (as uint16 aliases), a MatcherFunc, a skip-kind predicate, and a Drive
+// callback that runs the state machine. Everything else — lexing,
 // lookahead, skip routing, event queueing, error recovery — lives here.
 package parsunart
 
@@ -32,15 +32,24 @@ func PointSpan(p Pos) Span { return Span{Start: p, End: p} }
 
 // Token is a lexed token: kind, source span, and the matched text.
 //
-// Kind is stored as int16 so the generated TokenKind enum's values
-// transfer as-is. The runtime reserves -1 as the "no DFA pattern matched"
-// sentinel that the lexer emits when it can't classify a codepoint; real
-// token kinds (including EOF = 0) are non-negative.
+// Kind is stored as uint16 to match the generated TokenKind enum's values.
+// EOF is always 0 (EofKind); grammar tokens have ids starting at 1; the
+// lexer emits ErrorKind (0xFFFF) when no DFA pattern matched at the
+// current position.
 type Token struct {
-	Kind int16
+	Kind uint16
 	Span Span
 	Text string
 }
+
+// EofKind is the token-kind id reserved for end-of-input. Always 0.
+const EofKind uint16 = 0
+
+// ErrorKind is the token-kind sentinel emitted when the lexer can't match
+// any pattern at the current position. Distinct from any grammar token id
+// (0..0xFFFE), so dispatch arms naturally fall through to the recovery
+// path.
+const ErrorKind uint16 = 0xFFFF
 
 // ParseError is a recoverable parse or lex error with its source span.
 type ParseError struct {
@@ -84,12 +93,12 @@ const Terminated = -1
 // It scans buf[start:] for the longest matching token. Returns
 // (bestLen, bestKind, scanned):
 //   - bestLen: bytes consumed by the longest match (0 means no accept).
-//   - bestKind: token kind of the longest match, or the error-kind sentinel
-//     when no accept state was reached.
+//   - bestKind: token kind of the longest match, or ErrorKind when no
+//     accept state was reached.
 //   - scanned: total bytes walked past start; equals len(buf)-start when
 //     the scan stopped at end of input rather than a dead transition. The
 //     streaming lexer uses this to detect buffer exhaustion mid-token.
-type MatcherFunc func(buf []byte, start int) (int, int16, int)
+type MatcherFunc func(buf []byte, start int) (int, uint16, int)
 
 const lexChunk = 16384
 
@@ -103,14 +112,11 @@ type Lexer struct {
 	offset    uint32
 	line, col uint32
 	matcher   MatcherFunc
-	eofKind   int16
-	errorKind int16
 }
 
-// NewLexer builds a lexer over r. eofKind / errorKind are returned when
-// input ends or a byte matches no pattern.
-func NewLexer(r io.Reader, matcher MatcherFunc, eofKind, errorKind int16) *Lexer {
-	return &Lexer{reader: r, line: 1, col: 1, matcher: matcher, eofKind: eofKind, errorKind: errorKind}
+// NewLexer builds a lexer over r.
+func NewLexer(r io.Reader, matcher MatcherFunc) *Lexer {
+	return &Lexer{reader: r, line: 1, col: 1, matcher: matcher}
 }
 
 func (l *Lexer) pos() Pos { return Pos{Offset: l.offset, Line: l.line, Column: l.col} }
@@ -184,7 +190,7 @@ func (l *Lexer) advance(n int) {
 	}
 }
 
-func (l *Lexer) longestMatch() (int, int16) {
+func (l *Lexer) longestMatch() (int, uint16) {
 	for {
 		bestLen, bestKind, scanned := l.matcher(l.buf, l.bufPos)
 		viewLen := len(l.buf) - l.bufPos
@@ -198,12 +204,12 @@ func (l *Lexer) longestMatch() (int, int16) {
 }
 
 // NextToken produces the next token. Emits repeated EOF once input ends.
-// Lex failures come through with Kind == errorKind (-1 by convention).
+// Lex failures come through with Kind == ErrorKind (0xFFFF).
 func (l *Lexer) NextToken() Token {
 	l.ensure(lexChunk)
 	if len(l.buf)-l.bufPos == 0 {
 		p := l.pos()
-		return Token{Kind: l.eofKind, Span: PointSpan(p)}
+		return Token{Kind: EofKind, Span: PointSpan(p)}
 	}
 	bestLen, bestKind := l.longestMatch()
 	start := l.pos()
@@ -214,7 +220,7 @@ func (l *Lexer) NextToken() Token {
 		}
 		text := string(l.buf[l.bufPos : l.bufPos+n])
 		l.advance(n)
-		return Token{Kind: l.errorKind, Span: Span{Start: start, End: l.pos()}, Text: text}
+		return Token{Kind: ErrorKind, Span: Span{Start: start, End: l.pos()}, Text: text}
 	}
 	text := string(l.buf[l.bufPos : l.bufPos+bestLen])
 	l.advance(bestLen)
@@ -224,10 +230,9 @@ func (l *Lexer) NextToken() Token {
 // Config is the grammar-specific callback bundle a generated parser wires
 // into the runtime.
 type Config struct {
-	K       int
-	EofKind int16
-	IsSkip  func(kind int16) bool
-	Drive   func(p *Parser)
+	K      int
+	IsSkip func(kind uint16) bool
+	Drive  func(p *Parser)
 }
 
 // Parser is the pull-based parser. Obtain one via NewParser, then call
@@ -281,7 +286,7 @@ func (p *Parser) QueueIsEmpty() bool { return len(p.queue) == 0 }
 
 // MatchesFirst reports whether the current lookahead matches any prefix
 // in set. Used by generated dispatch logic with k > 1 lookahead.
-func (p *Parser) MatchesFirst(set [][]int16) bool {
+func (p *Parser) MatchesFirst(set [][]uint16) bool {
 outer:
 	for _, seq := range set {
 		for i, want := range seq {
@@ -294,7 +299,7 @@ outer:
 	return false
 }
 
-func containsKind(set []int16, k int16) bool {
+func containsKind(set []uint16, k uint16) bool {
 	for _, x := range set {
 		if x == k {
 			return true
@@ -326,7 +331,7 @@ func (p *Parser) Consume() {
 
 // TryConsume consumes a token of the given kind; on mismatch, emits an
 // error, recovers to `sync`, and retries once.
-func (p *Parser) TryConsume(kind int16, sync []int16, name string) {
+func (p *Parser) TryConsume(kind uint16, sync []uint16, name string) {
 	if p.lookBuf[0].Kind == kind {
 		p.Consume()
 		return
@@ -339,8 +344,8 @@ func (p *Parser) TryConsume(kind int16, sync []int16, name string) {
 }
 
 // RecoverTo consumes tokens until the lookahead matches sync (or EOF).
-func (p *Parser) RecoverTo(sync []int16) {
-	for p.lookBuf[0].Kind != p.cfg.EofKind {
+func (p *Parser) RecoverTo(sync []uint16) {
+	for p.lookBuf[0].Kind != EofKind {
 		if containsKind(sync, p.lookBuf[0].Kind) {
 			return
 		}
@@ -366,9 +371,9 @@ func (p *Parser) NextEvent() (Event, bool) {
 		if p.state == Terminated {
 			if !p.eofChecked {
 				p.eofChecked = true
-				if p.lookBuf[0].Kind != p.cfg.EofKind {
+				if p.lookBuf[0].Kind != EofKind {
 					p.ErrorHere("expected end of input")
-					for p.lookBuf[0].Kind != p.cfg.EofKind {
+					for p.lookBuf[0].Kind != EofKind {
 						p.emit(Event{Tag: EvToken, Token: p.lookBuf[0]})
 						p.advanceLook()
 					}

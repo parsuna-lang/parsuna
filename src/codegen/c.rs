@@ -142,7 +142,7 @@ fn emit_header(h: &mut String, st: &StateTable, stem: &str, upper: &str) {
     .unwrap();
     writeln!(
         h,
-        "typedef struct {{ int16_t kind; {stem}_Span span; char *text; size_t text_len; }} {stem}_Token;"
+        "typedef struct {{ uint16_t kind; {stem}_Span span; char *text; size_t text_len; }} {stem}_Token;"
     )
     .unwrap();
     writeln!(h).unwrap();
@@ -219,21 +219,48 @@ fn emit_header(h: &mut String, st: &StateTable, stem: &str, upper: &str) {
 
     writeln!(
         h,
-        "/* Token kinds this grammar can emit. TK_EOF/TK_ERROR are runtime"
+        "/* Token kinds this grammar can emit. TK_EOF is the runtime end-of-input"
     )
     .unwrap();
     writeln!(
         h,
-        " * sentinels; the rest come from the grammar's `token` declarations. */"
+        " * sentinel; the rest come from the grammar's `token` declarations. Lex"
+    )
+    .unwrap();
+    writeln!(
+        h,
+        " * failures (no DFA pattern matched) come through as Token instances with"
+    )
+    .unwrap();
+    writeln!(
+        h,
+        " * kind == {upper}_LEX_ERROR. */"
     )
     .unwrap();
     writeln!(h, "typedef enum {{").unwrap();
     writeln!(h, "  {upper}_TK_EOF = 0,").unwrap();
-    writeln!(h, "  {upper}_TK_ERROR = -1,").unwrap();
     for t in &st.tokens {
         writeln!(h, "  {upper}_TK_{} = {},", t.name, t.kind).unwrap();
     }
     writeln!(h, "}} {stem}_TokenKind;").unwrap();
+    writeln!(h).unwrap();
+    writeln!(
+        h,
+        "/* Lex-failure sentinel: Token.kind == {upper}_LEX_ERROR means the lexer"
+    )
+    .unwrap();
+    writeln!(
+        h,
+        " * could not match any pattern at the current position. The token still"
+    )
+    .unwrap();
+    writeln!(
+        h,
+        " * carries the offending byte(s); the parser surfaces a recoverable EV_ERROR"
+    )
+    .unwrap();
+    writeln!(h, " * event alongside. */").unwrap();
+    writeln!(h, "#define {upper}_LEX_ERROR ((uint16_t)0xFFFFu)").unwrap();
     writeln!(h).unwrap();
 
     writeln!(
@@ -356,13 +383,13 @@ fn emit_impl(c: &mut String, st: &StateTable, stem: &str, upper: &str) {
     writeln!(c, "#include <stdlib.h>").unwrap();
     writeln!(c, "#include <string.h>").unwrap();
     writeln!(c).unwrap();
-    /* Monomorphize the runtime: these #defines are consumed inside
-     * parsuna_rt.h so `look_buf`, is_skip, drive, eof_kind, and
-     * error_kind are baked in at compile time rather than dispatched
-     * through a Config vtable. */
+    /* Monomorphize the runtime: PARSUNA_K is consumed inside parsuna_rt.h
+     * so `look_buf`, is_skip, and drive are baked in at compile time rather
+     * than dispatched through a Config vtable. EOF is always token kind 0
+     * (PARSUNA_TK_EOF in the runtime, re-exported as `{upper}_TK_EOF` in
+     * the public header); lex failures use PARSUNA_LEX_ERROR (always 0xFFFF,
+     * re-exported as `{upper}_LEX_ERROR`). */
     writeln!(c, "#define PARSUNA_K {}", st.k).unwrap();
-    writeln!(c, "#define PARSUNA_EOF_KIND   {upper}_TK_EOF").unwrap();
-    writeln!(c, "#define PARSUNA_ERROR_KIND {upper}_TK_ERROR").unwrap();
     writeln!(c, "#include \"parsuna_rt.h\"").unwrap();
     writeln!(c).unwrap();
     /* ABI compatibility between the public `<stem>_*` types exposed in
@@ -411,7 +438,7 @@ fn emit_name_tables(c: &mut String, st: &StateTable, stem: &str, upper: &str) {
     for t in &st.tokens {
         writeln!(c, "    case {upper}_TK_{}: return \"{}\";", t.name, t.name).unwrap();
     }
-    writeln!(c, "    case {upper}_TK_ERROR: return \"ERROR\";").unwrap();
+    writeln!(c, "    case {upper}_LEX_ERROR: return \"ERROR\";").unwrap();
     writeln!(c, "    case {upper}_TK_EOF: return \"EOF\";").unwrap();
     writeln!(c, "    default: return \"?\";").unwrap();
     writeln!(c, "  }}").unwrap();
@@ -445,12 +472,12 @@ fn emit_dfa(c: &mut String, st: &StateTable, upper: &str) {
     .unwrap();
     writeln!(
         c,
-        "                               int16_t *best_kind, size_t *best_len, size_t *scanned) {{"
+        "                               uint16_t *best_kind, size_t *best_len, size_t *scanned) {{"
     )
     .unwrap();
     writeln!(c, "  size_t pos = start;").unwrap();
     writeln!(c, "  size_t bl = 0;").unwrap();
-    writeln!(c, "  int16_t bk = (int16_t){}_TK_ERROR;", upper).unwrap();
+    writeln!(c, "  uint16_t bk = {}_LEX_ERROR;", upper).unwrap();
     writeln!(c, "  uint32_t state = {}u;", START).unwrap();
     writeln!(c, "  for (;;) {{").unwrap();
     writeln!(c, "    switch (state) {{").unwrap();
@@ -495,7 +522,7 @@ fn emit_dfa_state_arm(
             writeln!(c, "        bl = pos - start;").unwrap();
             writeln!(
                 c,
-                "        bk = (int16_t){};",
+                "        bk = (uint16_t){};",
                 c_token_name(st, upper, kind)
             )
             .unwrap();
@@ -517,7 +544,7 @@ fn emit_dfa_state_arm(
         if let Some(kind) = arm.target_accept {
             write!(
                 c,
-                " bl = pos - start; bk = (int16_t){};",
+                " bl = pos - start; bk = (uint16_t){};",
                 c_token_name(st, upper, kind)
             )
             .unwrap();
@@ -574,11 +601,11 @@ fn emit_tables(c: &mut String, st: &StateTable, upper: &str) {
             let sep = if parts.is_empty() { "" } else { ", " };
             writeln!(
                 c,
-                "static const int16_t FIRST_{i}_{j}[] = {{ {joined}{sep}SENTINEL }};"
+                "static const uint16_t FIRST_{i}_{j}[] = {{ {joined}{sep}SENTINEL }};"
             )
             .unwrap();
         }
-        write!(c, "static const int16_t *const FIRST_{i}[] = {{").unwrap();
+        write!(c, "static const uint16_t *const FIRST_{i}[] = {{").unwrap();
         for j in 0..f.seqs.len() {
             write!(c, " FIRST_{i}_{j},").unwrap();
         }
@@ -591,7 +618,7 @@ fn emit_tables(c: &mut String, st: &StateTable, upper: &str) {
         let sep = if s.is_empty() { "" } else { ", " };
         writeln!(
             c,
-            "static const int16_t SYNC_{i}[] = {{ {joined}{sep}SENTINEL }};"
+            "static const uint16_t SYNC_{i}[] = {{ {joined}{sep}SENTINEL }};"
         )
         .unwrap();
     }
@@ -599,7 +626,7 @@ fn emit_tables(c: &mut String, st: &StateTable, upper: &str) {
 }
 
 fn emit_skip(c: &mut String, st: &StateTable, upper: &str) {
-    writeln!(c, "static int is_skip(int16_t kind) {{").unwrap();
+    writeln!(c, "static int is_skip(uint16_t kind) {{").unwrap();
     let skips: Vec<String> = st
         .tokens
         .iter()

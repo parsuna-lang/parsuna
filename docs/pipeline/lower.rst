@@ -25,8 +25,10 @@ The artifact handed to code generation holds:
 * ``tokens: Vec<TokenInfo>`` — non-fragment tokens, each with its
   resolved pattern (fragments inlined), its ``skip`` flag, and a
   stable numeric kind id (1-based; ``0`` is EOF). Lex failures are
-  surfaced as ``Option<TK>`` (``None``) at the runtime boundary,
-  not as a reserved kind id, so kinds stay on a non-negative range.
+  surfaced per-language: ``Option<TK>`` (``None``) for Rust /
+  TypeScript / Python, and the unsigned sentinel ``0xFFFF`` for C /
+  Java / C# / Go. Either way, no grammar-declared kind id collides
+  with the failure marker.
 * ``rule_kinds: Vec<String>`` — names of the non-fragment rules in
   declaration order. A rule's ``RuleKind`` id is its index here.
 * ``first_sets: Vec<FirstSet>`` — the interned FIRST-set pool. Each

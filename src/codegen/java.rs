@@ -96,27 +96,36 @@ fn emit_constants(s: &mut String, st: &StateTable) {
     writeln!(s, "    /**").unwrap();
     writeln!(
         s,
-        "     * Token kinds this grammar can emit. EOF/ERROR are runtime sentinels;"
+        "     * Token kinds this grammar can emit. EOF is the runtime end-of-input"
     )
     .unwrap();
     writeln!(
         s,
-        "     * everything else is a grammar-declared token."
+        "     * sentinel; the rest come from the grammar's `token` declarations."
+    )
+    .unwrap();
+    writeln!(
+        s,
+        "     * Lex failures (no DFA pattern matched) come through as Token instances"
+    )
+    .unwrap();
+    writeln!(
+        s,
+        "     * with kind == {{@link dev.parsuna.runtime.Lexer#ERROR_KIND}} (0xFFFF)."
     )
     .unwrap();
     writeln!(s, "     */").unwrap();
     writeln!(s, "    public static enum TokenKind {{").unwrap();
-    write!(s, "        EOF(0),\n        ERROR(-1)").unwrap();
+    write!(s, "        EOF(0)").unwrap();
     for t in &st.tokens {
         write!(s, ",\n        {}({})", screaming_snake(&t.name), t.kind).unwrap();
     }
     writeln!(s, ";").unwrap();
-    writeln!(s, "        public final short id;").unwrap();
-    writeln!(s, "        TokenKind(int id) {{ this.id = (short) id; }}").unwrap();
+    writeln!(s, "        public final int id;").unwrap();
+    writeln!(s, "        TokenKind(int id) {{ this.id = id; }}").unwrap();
     writeln!(s, "        public String displayName() {{").unwrap();
     writeln!(s, "            switch (this) {{").unwrap();
     writeln!(s, "                case EOF: return \"EOF\";").unwrap();
-    writeln!(s, "                case ERROR: return \"ERROR\";").unwrap();
     for t in &st.tokens {
         writeln!(
             s,
@@ -209,7 +218,7 @@ fn emit_dfa(s: &mut String, st: &StateTable) {
     .unwrap();
     writeln!(s, "        int pos = start;").unwrap();
     writeln!(s, "        int bestLen = 0;").unwrap();
-    writeln!(s, "        int bestKind = TokenKind.ERROR.id;").unwrap();
+    writeln!(s, "        int bestKind = Lexer.ERROR_KIND;").unwrap();
     writeln!(s, "        int state = {};", START).unwrap();
     writeln!(s, "        outer: while (true) {{").unwrap();
     writeln!(s, "            switch (state) {{").unwrap();
@@ -228,7 +237,7 @@ fn emit_dfa(s: &mut String, st: &StateTable) {
     )
     .unwrap();
     writeln!(s).unwrap();
-    write!(s, "    private static boolean isSkip(short k) {{ return ").unwrap();
+    write!(s, "    private static boolean isSkip(int k) {{ return ").unwrap();
     let skip_list: Vec<String> = st
         .tokens
         .iter()
@@ -347,7 +356,7 @@ fn emit_tables(s: &mut String, st: &StateTable) {
             .collect();
         writeln!(
             s,
-            "    private static final short[][] FIRST_{} = new short[][]{{{}}};",
+            "    private static final int[][] FIRST_{} = new int[][]{{{}}};",
             f.id,
             seqs.join(", ")
         )
@@ -356,7 +365,7 @@ fn emit_tables(s: &mut String, st: &StateTable) {
     for f in &st.sync_sets {
         writeln!(
             s,
-            "    private static final short[] SYNC_{} = new short[]{{{}}};",
+            "    private static final int[] SYNC_{} = new int[]{{{}}};",
             f.id,
             f.kinds
                 .iter()
@@ -484,7 +493,7 @@ fn emit_dispatch_tree(
             writeln!(s, "{}switch (p.look({}).kind) {{", ind, depth).unwrap();
             let inner = format!("{}  ", ind);
             for (kind, sub) in arms {
-                let literal = format!("(short) {}", *kind);
+                let literal = format!("{}", *kind);
                 match sub {
                     DispatchTree::Leaf(leaf) => {
                         write!(s, "{}case {}: {{ ", inner, literal).unwrap();
@@ -523,7 +532,7 @@ fn emit_leaf_inline(s: &mut String, leaf: &DispatchLeaf, sync: u32, next: u32) {
 fn emit_public_api(s: &mut String, st: &StateTable) {
     writeln!(
         s,
-        "    private static final ParserConfig CONFIG = new ParserConfig(K, TokenKind.EOF.id, k -> isSkip(k), Grammar::drive);"
+        "    private static final ParserConfig CONFIG = new ParserConfig(K, k -> isSkip(k), Grammar::drive);"
     )
     .unwrap();
     writeln!(s).unwrap();
@@ -534,7 +543,7 @@ fn emit_public_api(s: &mut String, st: &StateTable) {
     .unwrap();
     writeln!(
         s,
-        "        return new Parser(new Lexer(in, MATCHER, TokenKind.EOF.id, TokenKind.ERROR.id), entry, CONFIG);"
+        "        return new Parser(new Lexer(in, MATCHER), entry, CONFIG);"
     )
     .unwrap();
     writeln!(s, "    }}").unwrap();

@@ -84,14 +84,18 @@ fn emit_constants(s: &mut String, st: &StateTable) {
     writeln!(s, "// TokenKind enumerates every token this grammar can emit.").unwrap();
     writeln!(
         s,
-        "// TkEof marks end-of-input and TkError is produced by the lexer when"
+        "// TkEof marks end-of-input. Lex failures (no DFA pattern matched) come"
     )
     .unwrap();
-    writeln!(s, "// no pattern matches at the current position.").unwrap();
-    writeln!(s, "type TokenKind int16").unwrap();
+    writeln!(
+        s,
+        "// through as Tokens with Kind == rt.ErrorKind (0xFFFF) — distinct from"
+    )
+    .unwrap();
+    writeln!(s, "// every grammar token id, so dispatch falls through to recovery.").unwrap();
+    writeln!(s, "type TokenKind uint16").unwrap();
     writeln!(s, "const (").unwrap();
-    writeln!(s, "\tTkEof   TokenKind = 0").unwrap();
-    writeln!(s, "\tTkError TokenKind = -1").unwrap();
+    writeln!(s, "\tTkEof TokenKind = 0").unwrap();
     for t in &st.tokens {
         writeln!(s, "\tTk{} TokenKind = {}", pascal(&t.name), t.kind).unwrap();
     }
@@ -102,11 +106,11 @@ fn emit_constants(s: &mut String, st: &StateTable) {
         "// TokenKindName returns the grammar-declared name of a token kind,"
     )
     .unwrap();
-    writeln!(s, "// or \"?\" if the kind is not recognised.").unwrap();
-    writeln!(s, "func TokenKindName(k TokenKind) string {{").unwrap();
-    writeln!(s, "\tswitch k {{").unwrap();
+    writeln!(s, "// \"ERROR\" for the lex-failure sentinel, or \"?\" if unknown.").unwrap();
+    writeln!(s, "func TokenKindName(k uint16) string {{").unwrap();
+    writeln!(s, "\tif k == rt.ErrorKind {{ return \"ERROR\" }}").unwrap();
+    writeln!(s, "\tswitch TokenKind(k) {{").unwrap();
     writeln!(s, "\tcase TkEof: return \"EOF\"").unwrap();
-    writeln!(s, "\tcase TkError: return \"ERROR\"").unwrap();
     for t in &st.tokens {
         writeln!(s, "\tcase Tk{}: return \"{}\"", pascal(&t.name), t.name).unwrap();
     }
@@ -181,12 +185,12 @@ fn emit_dfa(s: &mut String, st: &StateTable) {
     .unwrap();
     writeln!(
         s,
-        "func longestMatch(buf []byte, start int) (int, int16, int) {{"
+        "func longestMatch(buf []byte, start int) (int, uint16, int) {{"
     )
     .unwrap();
     writeln!(s, "\tpos := start").unwrap();
     writeln!(s, "\tbestLen := 0").unwrap();
-    writeln!(s, "\tbestKind := int16(TkError)").unwrap();
+    writeln!(s, "\tbestKind := rt.ErrorKind").unwrap();
     writeln!(s, "\tstate := uint32({})", START).unwrap();
     writeln!(s, "\tfor {{").unwrap();
     writeln!(s, "\t\tswitch state {{").unwrap();
@@ -200,16 +204,16 @@ fn emit_dfa(s: &mut String, st: &StateTable) {
     writeln!(s, "\t}}").unwrap();
     writeln!(s, "}}").unwrap();
     writeln!(s).unwrap();
-    write!(s, "var skipKinds = map[int16]struct{{}}{{").unwrap();
+    write!(s, "var skipKinds = map[uint16]struct{{}}{{").unwrap();
     let skips: Vec<String> = st
         .tokens
         .iter()
         .filter(|t| t.skip)
-        .map(|t| format!("int16({}): {{}}", token_const(st, t.kind)))
+        .map(|t| format!("uint16({}): {{}}", token_const(st, t.kind)))
         .collect();
     s.push_str(&skips.join(", "));
     writeln!(s, "}}").unwrap();
-    writeln!(s, "func isSkip(k int16) bool {{ _, ok := skipKinds[k]; return ok }}").unwrap();
+    writeln!(s, "func isSkip(k uint16) bool {{ _, ok := skipKinds[k]; return ok }}").unwrap();
     writeln!(s).unwrap();
 }
 
@@ -241,7 +245,7 @@ fn emit_dfa_state_arm(
             writeln!(s, "\t\t\tbestLen = pos - start").unwrap();
             writeln!(
                 s,
-                "\t\t\tbestKind = int16({})",
+                "\t\t\tbestKind = uint16({})",
                 token_const(st, kind)
             )
             .unwrap();
@@ -265,7 +269,7 @@ fn emit_dfa_state_arm(
         if let Some(kind) = arm.target_accept {
             write!(
                 s,
-                "; bestLen = pos - start; bestKind = int16({})",
+                "; bestLen = pos - start; bestKind = uint16({})",
                 token_const(st, kind)
             )
             .unwrap();
@@ -337,22 +341,22 @@ fn emit_tables(s: &mut String, st: &StateTable) {
                 format!(
                     "{{{}}}",
                     seq.iter()
-                        .map(|t| format!("int16({})", token_const(st, *t)))
+                        .map(|t| format!("uint16({})", token_const(st, *t)))
                         .collect::<Vec<_>>()
                         .join(", ")
                 )
             })
             .collect();
-        writeln!(s, "\tfirst_{} = [][]int16{{{}}}", f.id, seqs.join(", ")).unwrap();
+        writeln!(s, "\tfirst_{} = [][]uint16{{{}}}", f.id, seqs.join(", ")).unwrap();
     }
     for f in &st.sync_sets {
         writeln!(
             s,
-            "\tsync_{} = []int16{{{}}}",
+            "\tsync_{} = []uint16{{{}}}",
             f.id,
             f.kinds
                 .iter()
-                .map(|t| format!("int16({})", token_const(st, *t)))
+                .map(|t| format!("uint16({})", token_const(st, *t)))
                 .collect::<Vec<_>>()
                 .join(", ")
         )
@@ -405,7 +409,7 @@ fn emit_op(s: &mut String, st: &StateTable, op: &Op, self_id: u32) {
         } => {
             writeln!(
                 s,
-                "\t\t\tp.TryConsume(int16({}), sync_{}, {:?})",
+                "\t\t\tp.TryConsume(uint16({}), sync_{}, {:?})",
                 token_const(st, *kind),
                 sync,
                 token_name
@@ -458,7 +462,7 @@ fn emit_dispatch_tree(
             for (kind, sub) in arms {
                 writeln!(
                     s,
-                    "{}case int16({}):",
+                    "{}case uint16({}):",
                     inner,
                     token_const(st, *kind)
                 )
@@ -503,7 +507,7 @@ fn emit_leaf_inline(s: &mut String, leaf: &DispatchLeaf, sync: u32, next: u32) {
 fn emit_public_api(s: &mut String, st: &StateTable) {
     writeln!(
         s,
-        "var parserConfig = rt.Config{{K: K, EofKind: int16(TkEof), IsSkip: isSkip, Drive: drive}}"
+        "var parserConfig = rt.Config{{K: K, IsSkip: isSkip, Drive: drive}}"
     )
     .unwrap();
     writeln!(s).unwrap();
@@ -523,7 +527,7 @@ fn emit_public_api(s: &mut String, st: &StateTable) {
         .unwrap();
         writeln!(
             s,
-            "\tlex := rt.NewLexer(r, longestMatch, int16(TkEof), int16(TkError))"
+            "\tlex := rt.NewLexer(r, longestMatch)"
         )
         .unwrap();
         writeln!(

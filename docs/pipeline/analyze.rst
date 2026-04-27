@@ -36,11 +36,12 @@ on a malformed input.
 
 Checks, in order:
 
-* **Reserved token names.** ``EOF`` and ``ERROR`` (case-insensitive)
-  are rejected. ``EOF`` is the end-of-input sentinel (kind id ``0``);
-  ``ERROR`` is reserved so user grammars can't shadow the runtime's
-  diagnostic vocabulary. Lex failures are surfaced via
-  ``Token { kind: None }`` rather than a reserved kind id.
+* **Reserved token names.** ``EOF`` (case-insensitive) is rejected
+  because it is the end-of-input sentinel (kind id ``0``) emitted by
+  the lexer. ``ERROR`` is no longer reserved — lex failures are
+  surfaced via the language-appropriate "no kind" value
+  (``Token { kind: None }`` in Rust/TS/Python; ``Token.kind == 0xFFFF``
+  in C/Java/C#/Go) rather than a special token-kind variant.
 * **Duplicates.** Token names and rule names are checked for
   duplicates independently.
 * **Undefined references.** Every ``Expr::Token(n)`` must name a

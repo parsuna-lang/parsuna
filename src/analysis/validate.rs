@@ -20,7 +20,7 @@ pub fn run(g: &Grammar, issues: &mut Vec<Diagnostic>) {
         if is_reserved_token_name(&t.name) {
             issues.push(
                 Diagnostic::error(format!(
-                    "token name `{}` is reserved (EOF and ERROR are emitted by the runtime)",
+                    "token name `{}` is reserved (EOF is the runtime end-of-input sentinel)",
                     t.name
                 ))
                 .at(t.span),
@@ -72,7 +72,7 @@ pub fn run(g: &Grammar, issues: &mut Vec<Diagnostic>) {
 }
 
 fn is_reserved_token_name(name: &str) -> bool {
-    matches!(name.to_ascii_uppercase().as_str(), "EOF" | "ERROR")
+    name.eq_ignore_ascii_case("EOF")
 }
 
 fn check_expr_refs(
@@ -250,14 +250,21 @@ mod tests {
     }
 
     #[test]
-    fn reserved_token_names_eof_and_error_are_rejected() {
+    fn reserved_token_name_eof_is_rejected() {
         let mut g = Grammar::default();
         g.add_token(tok("EOF", lit("e")));
-        g.add_token(tok("ERROR", lit("r")));
         g.add_rule(rule("main", Expr::Empty));
         let issues = run_collect(&g);
         assert!(issues.iter().any(|d| d.message.contains("`EOF`")));
-        assert!(issues.iter().any(|d| d.message.contains("`ERROR`")));
+    }
+
+    #[test]
+    fn token_name_error_is_no_longer_reserved() {
+        let mut g = Grammar::default();
+        g.add_token(tok("ERROR", lit("r")));
+        g.add_rule(rule("main", Expr::Token("ERROR".into())));
+        let issues = run_collect(&g);
+        assert!(!issues.iter().any(|d| d.message.contains("reserved")));
     }
 
     #[test]

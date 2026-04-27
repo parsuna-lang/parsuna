@@ -75,8 +75,8 @@ Example: declaring identifier, integer, and whitespace tokens::
     INT    = ('0'..'9')+;
     WS     = (' ' | '\t' | '\r' | '\n')+ [skip];
 
-The names ``EOF`` and ``ERROR`` are reserved; the runtime emits them as
-sentinels for end-of-input and no-match respectively.
+The name ``EOF`` is reserved as a token-kind name; the runtime emits it
+as the end-of-input sentinel (kind id ``0``).
 
 Rule expressions
 ----------------

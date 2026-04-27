@@ -90,7 +90,6 @@ but **semantically** unchecked. It may still contain:
 * Left-recursive rules.
 * Token reference cycles.
 * Duplicate declarations.
-* Names that collide with reserved runtime identifiers (``EOF``,
-  ``ERROR``).
+* Names that collide with reserved runtime identifiers (``EOF``).
 
 The next pass, :doc:`analyze`, is what catches those.

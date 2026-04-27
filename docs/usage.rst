@@ -54,8 +54,10 @@ Every backend produces the same five things, spelled in the idioms of
 the target language:
 
 * A **TokenKind** enumeration with one variant per declared token,
-  plus the reserved ``EOF`` and ``ERROR`` sentinels. Skip tokens
-  appear here like any other token; fragments do not.
+  plus the reserved ``EOF`` sentinel (kind id ``0``). Lex failures are
+  not a TokenKind variant — see :doc:`event_model` for the per-language
+  representation. Skip tokens appear in the enum like any other token;
+  fragments do not.
 * A **RuleKind** enumeration with one variant per non-fragment rule.
   Attached to every structural event so consumers can identify
   subtrees.

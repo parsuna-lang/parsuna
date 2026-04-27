@@ -122,9 +122,9 @@ Every backend exposes the same two shapes:
 EOF and lex failures
 --------------------
 
-The names ``EOF`` and ``ERROR`` are reserved — a grammar that
-declares a token with either name is rejected. Only ``EOF`` becomes
-a real token kind:
+``EOF`` is reserved as a token-kind name — a grammar that declares a
+token called ``EOF`` is rejected. ``ERROR`` is **not** reserved: you
+can declare a token called ``ERROR`` if you like.
 
 ``EOF`` (kind id ``0``)
   Emitted once by the lexer when the input is exhausted. The parser
@@ -133,13 +133,14 @@ a real token kind:
   recovery in pathological cases.
 
 Lex failures (no token pattern matches at the current position) are
-not represented as a separate token kind. The lexer emits a normal
-``Token`` event covering one codepoint with the ``kind`` field set
-to the language's "no kind" value — ``None`` in Rust, ``null`` in
-TypeScript, ``Optional[TokenKind]`` ``None`` in Python, and the
-sentinel ``-1`` in Go, Java, C#, and C — so the parser can surface
-an error and keep making progress. The offending position will
-also produce a nearby ``Error`` event explaining what was expected.
+not represented as a separate token kind in the grammar's enum. The
+lexer emits a normal ``Token`` event covering one codepoint with the
+``kind`` field set to the language's "no kind" value — ``None`` in
+Rust, ``null`` in TypeScript, ``Optional[int]`` ``None`` in Python,
+and the unsigned sentinel ``0xFFFF`` in Go, Java, C#, and C — so the
+parser can surface an error and keep making progress. The offending
+position will also produce a nearby ``Error`` event explaining what
+was expected.
 
 Error recovery, observably
 --------------------------

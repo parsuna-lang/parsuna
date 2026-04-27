@@ -30,9 +30,10 @@ target language's idioms:
    plus ``EOF = 0``. Representation per language:
 
    * Rust / TypeScript / Python (PyO3 wraps Rust): ``u16``.
-   * Go / Java / C# / C: signed 16-bit (``int16`` / ``short`` /
-     ``short`` / ``int16_t``) with ``-1`` reserved for the lex-failure
-     sentinel discussed in the next bullet.
+   * Go / C: ``uint16`` / ``uint16_t``.
+   * C#: ``ushort``.
+   * Java: ``int`` (Java has no unsigned 16-bit primitive — values stay
+     in the ``0..0xFFFF`` range).
 
    Lex failures are not a TokenKind variant; they ride the optional /
    sentinel convention chosen per language.
@@ -43,15 +44,27 @@ target language's idioms:
    * TypeScript: ``Token<TK> { kind: TK | null, … }``.
    * Python: ``Optional[int]`` on the PyO3 ``Token`` wrapper.
 
-   Languages where a nullable would cost an allocation or a per
-   comparison branch use a signed 16-bit field with ``-1`` reserved
-   for "no DFA pattern matched":
+   Unsigned-int backends use the in-band sentinel value ``0xFFFF`` for
+   "no DFA pattern matched":
 
-   * Go: ``Token { Kind int16, … }``.
-   * Java: ``Token { short kind, … }``.
-   * C#: ``Token(short Kind, …)``.
-   * C: ``{ int16_t kind; … }``; sync arrays terminate with
-     ``SENTINEL = -2`` (so ``-1`` stays available for the kind).
+   * Go: ``Token { Kind uint16, … }``; the runtime exposes
+     ``parsunart.ErrorKind = 0xFFFF``.
+   * Java: ``Token { int kind, … }``; the runtime exposes
+     ``Lexer.ERROR_KIND = 0xFFFF``.
+   * C#: ``Token(ushort Kind, …)``; the runtime exposes
+     ``Lexer.ErrorKind = 0xFFFF``.
+   * C: ``{ uint16_t kind; … }``; the runtime defines
+     ``PARSUNA_LEX_ERROR = 0xFFFF`` and the public header re-exports it
+     as ``{upper}_LEX_ERROR``. FIRST and SYNC arrays both terminate with
+     ``SENTINEL = 0xFFFF`` — same value as the lex-failure kind, but the
+     two never appear in the same comparison context (sentinels are
+     array terminators only, the kind only appears on a ``Token``).
+
+   No grammar-declared kind id collides with ``0xFFFF`` (or with ``0``,
+   which is reserved for EOF). The user-facing analyzer no longer
+   reserves the name ``ERROR`` — a grammar can declare a token called
+   ``ERROR`` if it likes; the lex-failure sentinel lives outside the
+   ``TokenKind`` enum in every backend.
 
 3. **RuleKind enum.** One variant per entry in
    ``state_table.rule_kinds``, representation ``u16`` (or the

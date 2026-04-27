@@ -11,6 +11,13 @@ import java.nio.charset.StandardCharsets;
 public final class Lexer {
     static final int CHUNK = 16384;
 
+    /**
+     * Token-kind sentinel emitted when no DFA pattern matches at the current
+     * position. Distinct from any grammar token id (0..0xFFFE), so dispatch
+     * arms naturally fall through to the recovery path.
+     */
+    public static final int ERROR_KIND = 0xFFFF;
+
     private final InputStream in;
     private byte[] buf;
     private int bufLen;
@@ -19,16 +26,12 @@ public final class Lexer {
     private int offset;
     private int line = 1, col = 1;
     private final DfaMatcher matcher;
-    private final short eofKind;
-    private final short errorKind;
     private final int[] matchOut = new int[3];
 
-    public Lexer(InputStream in, DfaMatcher matcher, short eofKind, short errorKind) {
+    public Lexer(InputStream in, DfaMatcher matcher) {
         this.in = in;
         this.buf = new byte[CHUNK * 2];
         this.matcher = matcher;
-        this.eofKind = eofKind;
-        this.errorKind = errorKind;
     }
 
     private Pos pos() { return new Pos(offset, line, col); }
@@ -92,13 +95,13 @@ public final class Lexer {
 
     /**
      * Produce the next token. Emits repeated EOF once input ends; lex
-     * failures (no DFA pattern matched) come through with kind == errorKind.
+     * failures (no DFA pattern matched) come through with kind == {@link #ERROR_KIND}.
      */
     public Token nextToken() {
         ensure(CHUNK);
         if (bufLen - bufPos == 0) {
             Pos p = pos();
-            return new Token(eofKind, Span.point(p), "");
+            return new Token(0, Span.point(p), "");
         }
         int[] best = longestMatch();
         Pos start = pos();
@@ -108,10 +111,10 @@ public final class Lexer {
             int n = Math.min(cpLen, bufLen - bufPos);
             String text = new String(buf, bufPos, n, StandardCharsets.UTF_8);
             advance(n);
-            return new Token(errorKind, new Span(start, pos()), text);
+            return new Token(ERROR_KIND, new Span(start, pos()), text);
         }
         String text = new String(buf, bufPos, best[0], StandardCharsets.UTF_8);
         advance(best[0]);
-        return new Token((short) best[1], new Span(start, pos()), text);
+        return new Token(best[1], new Span(start, pos()), text);
     }
 }

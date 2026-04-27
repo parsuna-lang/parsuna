@@ -52,8 +52,8 @@ public final class Parser implements Iterator<Event> {
     public boolean queueIsEmpty() { return queue.isEmpty(); }
 
     /** True iff the current lookahead matches any of the given prefixes. */
-    public boolean matchesFirst(short[][] set) {
-        outer: for (short[] seq : set) {
+    public boolean matchesFirst(int[][] set) {
+        outer: for (int[] seq : set) {
             for (int i = 0; i < seq.length; i++) {
                 if (look(i).kind != seq[i]) continue outer;
             }
@@ -81,7 +81,7 @@ public final class Parser implements Iterator<Event> {
     }
 
     /** Consume a token of `kind`; on mismatch, error, recover to `sync`, retry once. */
-    public void tryConsume(short kind, short[] sync, String name) {
+    public void tryConsume(int kind, int[] sync, String name) {
         if (look(0).kind == kind) { consume(); return; }
         errorHere("expected " + name);
         recoverTo(sync);
@@ -89,8 +89,8 @@ public final class Parser implements Iterator<Event> {
     }
 
     /** Consume tokens until the lookahead matches `sync` (or EOF). */
-    public void recoverTo(short[] sync) {
-        while (look(0).kind != cfg.eofKind && !containsKind(sync, look(0).kind)) {
+    public void recoverTo(int[] sync) {
+        while (look(0).kind != ParserConfig.EOF_KIND && !containsKind(sync, look(0).kind)) {
             emit(new Event.Token(look(0)));
             advanceLook();
         }
@@ -106,9 +106,9 @@ public final class Parser implements Iterator<Event> {
             if (state == TERMINATED) {
                 if (!eofChecked) {
                     eofChecked = true;
-                    if (look(0).kind != cfg.eofKind) {
+                    if (look(0).kind != ParserConfig.EOF_KIND) {
                         errorHere("expected end of input");
-                        while (look(0).kind != cfg.eofKind) { emit(new Event.Token(look(0))); advanceLook(); }
+                        while (look(0).kind != ParserConfig.EOF_KIND) { emit(new Event.Token(look(0))); advanceLook(); }
                     }
                     flushSkipsBefore(look(0).span.end);
                     continue;
@@ -157,8 +157,8 @@ public final class Parser implements Iterator<Event> {
         queue.addLast(ev);
     }
 
-    private static boolean containsKind(short[] set, short k) {
-        for (short x : set) if (x == k) return true;
+    private static boolean containsKind(int[] set, int k) {
+        for (int x : set) if (x == k) return true;
         return false;
     }
 }
