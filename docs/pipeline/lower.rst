@@ -323,8 +323,19 @@ Splicing tends to leave a state whose ops are exactly ``[Op::Ret]``.
 Such a *trampoline* state does nothing observable — when reached, it
 pops the next frame off the return stack — but it still costs a
 dispatch loop iteration each time control bounces through it.
-Eliminating the push that lands on a trampoline lets the called
-code's trailing ``Ret`` pop the caller's continuation directly.
+Eliminating the push that would have landed on the trampoline lets
+the called code's trailing ``Ret`` pop the *next* frame directly,
+skipping the dead bounce.
+
+Crucially, the rewrite does not require the eliminated push to be in
+"tail position" with respect to its enclosing rule call: even if an
+earlier op in the same state already pushed something onto the
+stack, the analysis still holds. The trampoline's only behaviour is
+to immediately re-pop, so whether the calling body's trailing
+``Ret`` pops via "trampoline-then-the-frame-below" or "the-frame-
+below-directly" produces the same end state. The optimisation only
+needs the continuation to be a pure ``Ret``, not the ambient stack
+to be empty.
 
 Four patterns get optimised, all with the same justification:
 
@@ -347,11 +358,12 @@ Four patterns get optimised, all with the same justification:
 4. **``Op::Star`` whose ``cont`` is ``[Op::Ret]``** — only the
    miss / fall-through path is rewritten. ``Star``'s match path
    pushes ``head`` (the loop-back state holding this very ``Star``
-   op), which is therefore never a pure-``Ret`` trampoline. By the
-   time the loop misses, every iteration has already pushed *and*
-   popped its ``head`` frame, so the stack is back to whatever was
-   there when the loop was entered — a direct ``ret()`` lands on
-   the same frame the trampoline-then-ret bounce would have.
+   op), which is therefore never a pure-``Ret`` trampoline. The
+   miss path is just the same shape as ``Opt``'s — by the time we
+   reach it the per-iteration ``head`` pushes have all been
+   popped, so the stack is in the same shape it had on the cycle
+   that decided the lookahead missed, and the reasoning above
+   carries over verbatim.
 
 Safety:
 
