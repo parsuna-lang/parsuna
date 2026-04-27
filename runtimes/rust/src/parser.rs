@@ -130,15 +130,6 @@ struct Recovery<TK> {
 /// lex token, advances recovery by one step, or — when none of those
 /// have anything to do — invokes the generated [`Drive::drive`] to
 /// execute the next state body.
-///
-/// **Skip handling** is now driven by pump-mode rather than a side
-/// queue: when the lexer hands the runtime a skip token it lands
-/// directly in the event queue, ahead of whatever structural event the
-/// next `drive()` call will produce. The lookahead refills one lex
-/// token at a time (yielding between each), so a long comment run
-/// can't grow the queue past `QUEUE_CAP` — at any moment the queue
-/// holds either a single pump push waiting to be drained, a single
-/// recovery push, or the structural burst from one drive body.
 pub struct Parser<
     'a,
     L: LexerBackend<'a, G::TokenKind>,
@@ -162,13 +153,8 @@ pub struct Parser<
     _grammar: PhantomData<fn(&mut Parser<'a, L, K, CAP, G>)>,
 }
 
-impl<
-        'a,
-        L: LexerBackend<'a, G::TokenKind>,
-        const K: usize,
-        const CAP: usize,
-        G: Drive<K>,
-    > Parser<'a, L, K, CAP, G>
+impl<'a, L: LexerBackend<'a, G::TokenKind>, const K: usize, const CAP: usize, G: Drive<K>>
+    Parser<'a, L, K, CAP, G>
 {
     /// Build a parser over `lex`, starting at `entry` (the state id of the
     /// rule you want to parse — generated code exposes `ENTRY_FOO` constants
@@ -476,9 +462,7 @@ impl<
             if self.state == TERMINATED {
                 if !self.eof_checked {
                     self.eof_checked = true;
-                    if self.look[0].as_ref().and_then(|t| t.kind)
-                        != Some(G::TokenKind::EOF)
-                    {
+                    if self.look[0].as_ref().and_then(|t| t.kind) != Some(G::TokenKind::EOF) {
                         // Trailing input past the entry rule. Synthesize
                         // an error and use recovery-mode (with an empty
                         // sync set) to drain the rest as Token events
@@ -499,13 +483,8 @@ impl<
     }
 }
 
-impl<
-        'a,
-        L: LexerBackend<'a, G::TokenKind>,
-        const K: usize,
-        const CAP: usize,
-        G: Drive<K>,
-    > Iterator for Parser<'a, L, K, CAP, G>
+impl<'a, L: LexerBackend<'a, G::TokenKind>, const K: usize, const CAP: usize, G: Drive<K>> Iterator
+    for Parser<'a, L, K, CAP, G>
 {
     type Item = Event<'a, G::TokenKind, G::RuleKind>;
     fn next(&mut self) -> Option<Self::Item> {

@@ -229,38 +229,126 @@ func (l *Lexer) NextToken() Token {
 
 // Config is the grammar-specific callback bundle a generated parser wires
 // into the runtime.
+//
+// QueueCap is the fixed capacity of the parser's event ring — equal to
+// the longest emit burst across every state body in the grammar. The
+// generated code emits this as a constant (`QueueCap`) computed by
+// lowering and passes it here.
 type Config struct {
-	K      int
-	IsSkip func(kind uint16) bool
-	Drive  func(p *Parser)
+	K        int
+	QueueCap int
+	IsSkip   func(kind uint16) bool
+	Drive    func(p *Parser)
+}
+
+// eventRing is a fixed-capacity FIFO ring used as the parser's event
+// queue. Sized at construction by Config.QueueCap. The runtime layer
+// above only pushes inside Drive / pump / recovery and each path is
+// bounded by the lowering pass, so the ring never needs to grow.
+type eventRing struct {
+	buf  []Event
+	head int
+	len  int
+}
+
+func newEventRing(size int) eventRing {
+	return eventRing{buf: make([]Event, size)}
+}
+
+func (r *eventRing) isEmpty() bool { return r.len == 0 }
+
+func (r *eventRing) pushBack(ev Event) {
+	idx := (r.head + r.len) % len(r.buf)
+	r.buf[idx] = ev
+	r.len++
+}
+
+func (r *eventRing) popFront() (Event, bool) {
+	if r.len == 0 {
+		return Event{}, false
+	}
+	ev := r.buf[r.head]
+	// Clear the slot so any string/text data can be GC'd before the
+	// ring loops back over it.
+	r.buf[r.head] = Event{}
+	r.head = (r.head + 1) % len(r.buf)
+	r.len--
+	return ev, true
+}
+
+// recovery is in-flight error recovery. Set by TryConsume's slow path
+// and RecoverTo; cleared once the lookahead lands on a sync token (or
+// EOF). Each call to NextEvent drains exactly one garbage token before
+// yielding, so a long run of unexpected input doesn't pile up in the
+// queue — the consumer sees recovery tokens interleaved with their lex
+// order.
+type recovery struct {
+	// sync is the set of token kinds to recover *to*. The recovery loop
+	// consumes garbage until the lookahead matches one of these (or
+	// EOF).
+	sync []uint16
+	// expected is set when recovery was triggered by a TryConsume for a
+	// specific kind. expectedSet distinguishes "no expected kind" from
+	// "expected kind 0 (EOF)".
+	expected    uint16
+	expectedSet bool
 }
 
 // Parser is the pull-based parser. Obtain one via NewParser, then call
 // NextEvent in a loop.
+//
+// The parser keeps a ring of K lookahead slots (sized to the grammar's
+// LL(k)), a return stack, and a bounded event queue. Each call to
+// NextEvent drains a pending event, pumps one lex token, advances
+// recovery by one step, or — when none of those have anything to do —
+// invokes the generated Drive callback to execute the next state body.
+//
+// Skip handling is driven by pump-mode rather than a side queue: when
+// the lexer hands the runtime a skip token it lands directly in the
+// event queue, ahead of whatever structural event the next Drive call
+// will produce. The lookahead refills one lex token at a time (yielding
+// between each), so a long comment run can't grow the queue past
+// QueueCap — at any moment the queue holds either a single pump push
+// waiting to be drained, a single recovery push, or the structural
+// burst from one drive body.
 type Parser struct {
-	lex          *Lexer
-	lookBuf      []Token
-	prevEnd      Pos
-	state        int
-	ret          []int
-	queue        []Event
-	pendingSkips []Token
-	eofChecked   bool
-	cfg          Config
+	lex *Lexer
+	// look is the lookahead ring, length K. lookFilled[i] reports
+	// whether slot i holds a structural token; empty slots are awaiting
+	// refill via pump-mode in NextEvent.
+	look       []Token
+	lookFilled []bool
+	prevEnd    Pos
+	state      int
+	ret        []int
+	queue      eventRing
+	rec        recovery
+	recActive  bool
+	eofChecked bool
+	cfg        Config
 }
 
 // NewParser builds a parser starting at state `entry`.
+//
+// All K lookahead slots start empty; the first call to NextEvent enters
+// pump-mode and primes them, so any leading skip tokens (e.g. whitespace
+// before the first structural token) are emitted before the entry rule's
+// Enter event.
 func NewParser(lex *Lexer, entry int, cfg Config) *Parser {
-	p := &Parser{lex: lex, state: entry, cfg: cfg, lookBuf: make([]Token, 0, cfg.K)}
-	for i := 0; i < cfg.K; i++ {
-		p.lookBuf = append(p.lookBuf, p.pumpToken())
+	return &Parser{
+		lex:        lex,
+		state:      entry,
+		cfg:        cfg,
+		look:       make([]Token, cfg.K),
+		lookFilled: make([]bool, cfg.K),
+		queue:      newEventRing(cfg.QueueCap),
 	}
-	p.prevEnd = p.lookBuf[0].Span.Start
-	return p
 }
 
-// Look peeks at the i-th lookahead token.
-func (p *Parser) Look(i int) Token { return p.lookBuf[i] }
+// Look peeks at the i-th lookahead token. Generated Drive only runs
+// after pump-mode has filled every slot, so callers can read any slot
+// unconditionally.
+func (p *Parser) Look(i int) Token { return p.look[i] }
 
 // State returns the current state id.
 func (p *Parser) State() int { return p.state }
@@ -281,8 +369,10 @@ func (p *Parser) PopRet() int {
 	return s
 }
 
-// QueueIsEmpty reports whether no events are queued.
-func (p *Parser) QueueIsEmpty() bool { return len(p.queue) == 0 }
+// QueueIsEmpty reports whether no events are queued. Generated Drive
+// loops continue only while this holds — the moment an event lands in
+// the queue, the loop must yield so NextEvent can return it.
+func (p *Parser) QueueIsEmpty() bool { return p.queue.isEmpty() }
 
 // MatchesFirst reports whether the current lookahead matches any prefix
 // in set. Used by generated dispatch logic with k > 1 lookahead.
@@ -290,7 +380,7 @@ func (p *Parser) MatchesFirst(set [][]uint16) bool {
 outer:
 	for _, seq := range set {
 		for i, want := range seq {
-			if p.lookBuf[i].Kind != want {
+			if p.look[i].Kind != want {
 				continue outer
 			}
 		}
@@ -308,120 +398,172 @@ func containsKind(set []uint16, k uint16) bool {
 	return false
 }
 
-// Enter emits an Enter event for the given rule kind.
+// Enter emits an Enter event for the given rule kind. Records the
+// rule's start position as prevEnd so a later Exit without any
+// intervening tokens still produces a zero-width span at the expected
+// place.
 func (p *Parser) Enter(rule uint16) {
-	pos := p.lookBuf[0].Span.Start
+	pos := p.look[0].Span.Start
 	p.prevEnd = pos
-	p.emit(Event{Tag: EvEnter, Rule: rule, Pos: pos})
+	p.queue.pushBack(Event{Tag: EvEnter, Rule: rule, Pos: pos})
 }
 
 // Exit emits an Exit event for the given rule kind, anchored at the end
-// of the previously consumed token.
+// of the previously consumed token (or the rule's start for empty rules).
 func (p *Parser) Exit(rule uint16) {
-	p.emit(Event{Tag: EvExit, Rule: rule, Pos: p.prevEnd})
+	p.queue.pushBack(Event{Tag: EvExit, Rule: rule, Pos: p.prevEnd})
 }
 
 // Consume consumes the current lookahead and emits it as a token event.
+//
+// Slot K-1 is left empty so the runtime's pump-mode can refill it
+// (yielding one skip per call) before the next Drive reads lookahead.
+// The state-splitting invariant in the lowering pass guarantees an
+// Op::Expect is always followed only by control ops in the same state
+// body — so Consume never has to coexist with another lookahead-reading
+// op before the next yield.
 func (p *Parser) Consume() {
-	prev := p.lookBuf[0]
-	p.prevEnd = prev.Span.End
-	p.emit(Event{Tag: EvToken, Token: prev})
-	p.advanceLook()
+	t := p.look[0]
+	p.prevEnd = t.Span.End
+	for i := 0; i < p.cfg.K-1; i++ {
+		p.look[i] = p.look[i+1]
+		p.lookFilled[i] = p.lookFilled[i+1]
+	}
+	// Leave slot K-1 empty for pump-mode to refill.
+	p.look[p.cfg.K-1] = Token{}
+	p.lookFilled[p.cfg.K-1] = false
+	p.queue.pushBack(Event{Tag: EvToken, Token: t})
 }
 
-// TryConsume consumes a token of the given kind; on mismatch, emits an
-// error, recovers to `sync`, and retries once.
+// TryConsume tries to consume a token of `kind`; on mismatch, emits an
+// error and arms recovery-mode with the expected kind so the
+// post-recovery finaliser swallows the matching token if the sync set
+// lands on it. Returns immediately on the slow path — the actual
+// garbage-skipping happens across subsequent NextEvent calls.
 func (p *Parser) TryConsume(kind uint16, sync []uint16, name string) {
-	if p.lookBuf[0].Kind == kind {
+	if p.look[0].Kind == kind {
 		p.Consume()
 		return
 	}
 	p.ErrorHere("expected " + name)
-	p.RecoverTo(sync)
-	if p.lookBuf[0].Kind == kind {
-		p.Consume()
-	}
+	p.rec = recovery{sync: sync, expected: kind, expectedSet: true}
+	p.recActive = true
 }
 
-// RecoverTo consumes tokens until the lookahead matches sync (or EOF).
+// RecoverTo arms recovery-mode without an expected kind. Called from
+// the dispatch error leaf: the caller has already arranged the
+// post-recovery state and the queued Error event makes Drive yield
+// immediately so recovery-mode can take over.
 func (p *Parser) RecoverTo(sync []uint16) {
-	for p.lookBuf[0].Kind != EofKind {
-		if containsKind(sync, p.lookBuf[0].Kind) {
-			return
-		}
-		p.emit(Event{Tag: EvToken, Token: p.lookBuf[0]})
-		p.advanceLook()
-	}
+	p.rec = recovery{sync: sync, expectedSet: false}
+	p.recActive = true
 }
 
 // ErrorHere raises a recoverable error at the current lookahead.
 func (p *Parser) ErrorHere(msg string) {
-	p.queue = append(p.queue, Event{Tag: EvError, Err: ParseError{Message: msg, Span: p.lookBuf[0].Span}})
+	p.queue.pushBack(Event{Tag: EvError, Err: ParseError{Message: msg, Span: p.look[0].Span}})
+}
+
+// pumpPending reports whether some lookahead slot still needs to be
+// filled. Pump-mode runs whenever this holds, so generated Drive code
+// can read any Look(i) unconditionally.
+func (p *Parser) pumpPending() bool {
+	for _, ok := range p.lookFilled {
+		if !ok {
+			return true
+		}
+	}
+	return false
+}
+
+// pumpOne lexes one token. If it's a skip, push it directly onto the
+// event queue and leave pump-mode armed for another call. If it's a
+// structural token, fill the leftmost empty lookahead slot.
+//
+// Yielding per skip is what makes the queue cap honest — a long comment
+// run can't grow the queue past 1 (NextEvent drains the just-pushed
+// skip on the next loop iteration before pumping again).
+func (p *Parser) pumpOne() {
+	t := p.lex.NextToken()
+	if p.cfg.IsSkip(t.Kind) {
+		p.queue.pushBack(Event{Tag: EvToken, Token: t})
+		return
+	}
+	for i, ok := range p.lookFilled {
+		if !ok {
+			p.look[i] = t
+			p.lookFilled[i] = true
+			return
+		}
+	}
+	// Unreachable: NextEvent only calls pumpOne when pumpPending is true.
+}
+
+// recoverOne advances recovery by one step. Either consume one garbage
+// token (one Token push, drive yield) or — if the lookahead is in the
+// sync set / EOF — finalise by clearing recovery and (when a matching
+// expected kind was set) swallowing the synced-to token.
+func (p *Parser) recoverOne() {
+	k := p.look[0].Kind
+	switch {
+	case k == EofKind:
+		p.recActive = false
+	case containsKind(p.rec.sync, k):
+		wasExpected := p.rec.expectedSet && p.rec.expected == k
+		p.recActive = false
+		if wasExpected {
+			p.Consume()
+		}
+	default:
+		p.Consume()
+	}
 }
 
 // NextEvent returns the next parse event and true, or a zero Event and
 // false once input is fully consumed.
+//
+// The loop layers four kinds of progress, ordered so the consumer
+// always sees the soonest-available event:
+//
+//  1. Drain a queued event.
+//  2. Pump one lex token (filling lookahead, or queuing a skip).
+//  3. Advance recovery by one step.
+//  4. Run the generated Drive for one state-machine call.
+//
+// The bound on (2) and (3) per iteration is what keeps the queue
+// honest: each contributes at most one event before yielding, so the
+// queue never grows past QueueCap (the structural burst from a single
+// drive body).
 func (p *Parser) NextEvent() (Event, bool) {
 	for {
-		if len(p.queue) > 0 {
-			ev := p.queue[0]
-			p.queue = p.queue[1:]
+		if ev, ok := p.queue.popFront(); ok {
 			return ev, true
+		}
+		if p.pumpPending() {
+			p.pumpOne()
+			continue
+		}
+		if p.recActive {
+			p.recoverOne()
+			continue
 		}
 		if p.state == Terminated {
 			if !p.eofChecked {
 				p.eofChecked = true
-				if p.lookBuf[0].Kind != EofKind {
+				if p.look[0].Kind != EofKind {
+					// Trailing input past the entry rule. Synthesize an
+					// error and use recovery-mode (with an empty sync
+					// set) to drain the rest as Token events one yield
+					// at a time.
 					p.ErrorHere("expected end of input")
-					for p.lookBuf[0].Kind != EofKind {
-						p.emit(Event{Tag: EvToken, Token: p.lookBuf[0]})
-						p.advanceLook()
-					}
+					p.rec = recovery{sync: nil, expectedSet: false}
+					p.recActive = true
+					continue
 				}
-				p.flushSkipsBefore(p.lookBuf[0].Span.End)
 				continue
 			}
 			return Event{}, false
 		}
 		p.cfg.Drive(p)
 	}
-}
-
-func (p *Parser) pumpToken() Token {
-	for {
-		t := p.lex.NextToken()
-		if p.cfg.IsSkip(t.Kind) {
-			p.pendingSkips = append(p.pendingSkips, t)
-			continue
-		}
-		return t
-	}
-}
-
-func (p *Parser) advanceLook() {
-	p.lookBuf = append(p.lookBuf[1:], p.pumpToken())
-}
-
-// flushSkipsBefore drains skip tokens whose end offset is <= pos.Offset.
-// Called before every event so whitespace/comments appear in source order.
-func (p *Parser) flushSkipsBefore(pos Pos) {
-	for len(p.pendingSkips) > 0 && p.pendingSkips[0].Span.End.Offset <= pos.Offset {
-		t := p.pendingSkips[0]
-		p.pendingSkips = p.pendingSkips[1:]
-		p.queue = append(p.queue, Event{Tag: EvToken, Token: t})
-	}
-}
-
-func (p *Parser) emit(ev Event) {
-	var start Pos
-	switch ev.Tag {
-	case EvEnter, EvExit:
-		start = ev.Pos
-	case EvToken:
-		start = ev.Token.Span.Start
-	default:
-		start = ev.Err.Span.Start
-	}
-	p.flushSkipsBefore(start)
-	p.queue = append(p.queue, ev)
 }

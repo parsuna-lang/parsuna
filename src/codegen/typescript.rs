@@ -165,6 +165,36 @@ fn token_variant(st: &StateTable, kind: u16) -> String {
     }
 }
 
+/// Decide how a `Star`/`Opt` test should read the FIRST set.
+///
+/// For LL(1) the FIRST set is a flat list of single tokens — inline
+/// them as a chain of `look(0).kind === T` comparisons so codegen can
+/// drop the constant table entirely (matching the Rust backend's
+/// `kind_pattern` path). For LL(k>1) we still consult the emitted
+/// FIRST_n constant via `matchesFirst`.
+fn first_set_test(st: &StateTable, first: u32) -> String {
+    if st.k == 1 {
+        let f = &st.first_sets[first as usize];
+        let mut kinds: Vec<u16> = f
+            .seqs
+            .iter()
+            .map(|seq| {
+                debug_assert_eq!(seq.len(), 1, "first_set_test expects LL(1) singletons");
+                seq[0]
+            })
+            .collect();
+        kinds.sort_unstable();
+        kinds.dedup();
+        let parts: Vec<String> = kinds
+            .iter()
+            .map(|k| format!("p.look(0).kind === {}", token_variant(st, *k)))
+            .collect();
+        parts.join(" || ")
+    } else {
+        format!("p.matchesFirst(FIRST_{})", first)
+    }
+}
+
 fn rule_variant(st: &StateTable, kind: u16) -> String {
     let name = st.rule_kinds.get(kind as usize).unwrap_or_else(|| {
         panic!(
@@ -358,6 +388,17 @@ fn byte_cond(ranges: &[(u8, u8)]) -> String {
 
 fn emit_tables(s: &mut String, st: &StateTable) {
     writeln!(s, "const K = {};", st.k).unwrap();
+    writeln!(
+        s,
+        "/** Hard cap on events the parser's fixed-size queue can hold. */"
+    )
+    .unwrap();
+    writeln!(
+        s,
+        "/** Equal to the longest emit burst across every state body in this grammar. */"
+    )
+    .unwrap();
+    writeln!(s, "const QUEUE_CAP = {};", st.queue_size_hint).unwrap();
     for (name, id) in &st.entry_states {
         writeln!(s, "const ENTRY_{} = {};", name.to_uppercase(), id).unwrap();
     }
@@ -468,7 +509,7 @@ fn emit_op(s: &mut String, st: &StateTable, op: &Op) {
             writeln!(s, "        cur = p.popRet();").unwrap();
         }
         Op::Star { first, body, cont, head } => {
-            writeln!(s, "        if (p.matchesFirst(FIRST_{})) {{", first).unwrap();
+            writeln!(s, "        if ({}) {{", first_set_test(st, *first)).unwrap();
             writeln!(s, "          p.pushRet({});", head).unwrap();
             emit_body(s, st, body, "          ");
             writeln!(s, "        }}").unwrap();
@@ -478,7 +519,7 @@ fn emit_op(s: &mut String, st: &StateTable, op: &Op) {
             }
         }
         Op::Opt { first, body, cont } => {
-            writeln!(s, "        if (p.matchesFirst(FIRST_{})) {{", first).unwrap();
+            writeln!(s, "        if ({}) {{", first_set_test(st, *first)).unwrap();
             if let Some(n) = cont {
                 writeln!(s, "          p.pushRet({});", n).unwrap();
             }
@@ -620,7 +661,7 @@ fn emit_leaf_inline(s: &mut String, leaf: &DispatchLeaf, sync: u32, cont: Option
 fn emit_public_api(s: &mut String, st: &StateTable) {
     writeln!(
         s,
-        "const PARSER_CONFIG = {{ k: K, eofKind: TokenKind.Eof, isSkip: (k: TokenKind) => SKIP_KINDS.has(k), drive }};"
+        "const PARSER_CONFIG = {{ k: K, queueCap: QUEUE_CAP, eofKind: TokenKind.Eof, isSkip: (k: TokenKind) => SKIP_KINDS.has(k), drive }};"
     )
     .unwrap();
     writeln!(s).unwrap();

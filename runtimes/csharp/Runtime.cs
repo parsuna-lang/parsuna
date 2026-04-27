@@ -213,9 +213,17 @@ public sealed class Lexer
 }
 
 /// <summary>Grammar-specific callbacks a generated parser wires into the runtime.</summary>
+/// <remarks>
+/// <c>QueueCap</c> is the longest emit burst across every state body in
+/// the grammar — lowering computes it and codegen passes it in so the
+/// runtime can size its fixed-capacity event ring exactly large enough
+/// for the worst case the grammar can produce.
+/// </remarks>
 public sealed record ParserConfig(
     int K,
+    int QueueCap,
     Predicate<ushort> IsSkip,
+    bool HasSkips,
     Action<Parser> Drive)
 {
     /// <summary>End-of-input token kind. Always 0; a constant rather than a
@@ -228,20 +236,79 @@ public sealed record ParserConfig(
 /// Pull-based parser. Obtain one via a generated <c>ParseXxx</c> factory
 /// and iterate it (or call <see cref="NextEvent"/> directly) to walk the parse.
 /// </summary>
+/// <remarks>
+/// The parser keeps a ring of <c>K</c> lookahead slots (sized to the
+/// grammar's LL(k)), a return stack, and a bounded event queue. Each call
+/// to <see cref="NextEvent"/> drains a pending event, pumps one lex
+/// token, advances recovery by one step, or — when none of those have
+/// anything to do — invokes the generated <see cref="ParserConfig.Drive"/>
+/// callback to execute the next state body.
+///
+/// <para><b>Skip handling</b> is driven by pump-mode: when the lexer
+/// hands the runtime a skip token it lands directly on the event queue
+/// ahead of whatever structural event the next <c>Drive</c> call will
+/// produce. The lookahead refills one lex token at a time (yielding
+/// between each), so a long comment run can't grow the queue past
+/// <see cref="ParserConfig.QueueCap"/> — at any moment the queue holds
+/// either a single pump push waiting to be drained, a single recovery
+/// push, or the structural burst from one drive body.</para>
+/// </remarks>
 public sealed class Parser : IEnumerable<Event>, IEnumerator<Event>
 {
     /// <summary>Sentinel state meaning "the parser has terminated".</summary>
     public const int Terminated = -1;
 
+    /// <summary>In-flight error recovery state. Set by <see cref="RecoverTo"/>
+    /// and the slow path of <see cref="TryConsume"/>; cleared once the
+    /// lookahead lands on a sync token (or EOF). Each call to
+    /// <see cref="NextEvent"/> drains exactly one garbage token before
+    /// yielding, so a long run of unexpected input doesn't pile up in
+    /// the queue.</summary>
+    private struct Recovery
+    {
+        /// <summary>Token kinds to recover *to*. Recovery consumes garbage
+        /// until the lookahead matches one of these (or EOF).</summary>
+        public ushort[] Sync;
+        /// <summary>Non-zero when the recovery was triggered by an
+        /// <see cref="TryConsume"/> for that kind: if the sync set lands
+        /// on the expected kind, the recovery finalisation also consumes
+        /// the token (so the surrounding rule proceeds as if it had
+        /// matched). Zero (no expected kind) for the dispatch-error
+        /// path. Stored as a one-past-EOF encoding: 0 means "no
+        /// expected", any other value is the literal expected kind + 1.</summary>
+        public int ExpectedPlusOne;
+    }
+
     private readonly Lexer _lex;
-    private readonly Token[] _lookBuf;
+    // Lookahead ring. Null slots are awaiting refill — pump-mode in
+    // NextEvent pulls lex tokens one-at-a-time until every slot holds a
+    // structural token. Generated Drive code only ever runs when all
+    // slots are filled, so Look(i) can return the value unconditionally.
+    private readonly Token?[] _look;
     private Pos _prevEnd;
     private int _state;
     private readonly Stack<int> _ret = new();
-    private readonly Queue<Event> _queue = new();
-    private readonly Queue<Token> _pendingSkips = new();
+
+    // Fixed-capacity FIFO ring for events. Sized at construction by
+    // ParserConfig.QueueCap — codegen passes the value computed by
+    // lowering from the longest state body's emit burst, so the queue
+    // is exactly large enough for the worst case the grammar can
+    // produce. No List<T>, no Queue<T> growth: just an array of size
+    // CAP plus head/len.
+    //
+    // Invariant: 0 <= _qLen <= _queue.Length. The runtime layer above
+    // only pushes inside Drive/pump/recovery paths, each bounded by the
+    // lowering pass — an overflow is a codegen bug.
+    private readonly Event?[] _queue;
+    private int _qHead;
+    private int _qLen;
+
     private bool _eofChecked;
     private Event? _current;
+
+    private Recovery _recovery;
+    private bool _recoveryActive;
+
     private readonly ParserConfig _cfg;
 
     public Parser(Lexer lex, int entry, ParserConfig cfg)
@@ -249,20 +316,21 @@ public sealed class Parser : IEnumerable<Event>, IEnumerator<Event>
         _lex = lex;
         _cfg = cfg;
         _state = entry;
-        _lookBuf = new Token[cfg.K];
-        for (int i = 0; i < cfg.K; i++) _lookBuf[i] = PumpToken();
-        _prevEnd = _lookBuf[0].Span.Start;
+        _look = new Token?[cfg.K];
+        _queue = new Event?[cfg.QueueCap];
+        _prevEnd = default;
     }
 
-    /// <summary>Peek at the i-th lookahead token.</summary>
-    public Token Look(int i) => _lookBuf[i];
+    /// <summary>Peek at the i-th lookahead token. Generated <c>Drive</c>
+    /// only runs after pump-mode has filled every slot.</summary>
+    public Token Look(int i) => _look[i]!;
 
     /// <summary>Current state id. Read at the top of every driver iteration.</summary>
     public int State() => _state;
     public void SetState(int s) => _state = s;
     public void PushRet(int s) => _ret.Push(s);
     public int PopRet() => _ret.Count > 0 ? _ret.Pop() : Terminated;
-    public bool QueueIsEmpty() => _queue.Count == 0;
+    public bool QueueIsEmpty() => _qLen == 0;
 
     /// <summary>True iff the current lookahead matches any of the given prefixes.</summary>
     public bool MatchesFirst(ushort[][] set)
@@ -272,36 +340,51 @@ public sealed class Parser : IEnumerable<Event>, IEnumerator<Event>
             bool match = true;
             for (int i = 0; i < seq.Length; i++)
             {
-                if (_lookBuf[i].Kind != seq[i]) { match = false; break; }
+                if (_look[i]!.Kind != seq[i]) { match = false; break; }
             }
             if (match) return true;
         }
         return false;
     }
 
+    /// <summary>Emit an Enter event for <paramref name="rule"/>. Records
+    /// the rule's start position so a later Exit without any intervening
+    /// tokens still produces a zero-width span at the expected place.</summary>
     public void Enter(int rule)
     {
-        var pos = _lookBuf[0].Span.Start;
+        var pos = _look[0]!.Span.Start;
         _prevEnd = pos;
-        Emit(new EnterEvent(rule, pos));
+        PushEvent(new EnterEvent(rule, pos));
     }
 
-    public void Exit(int rule) => Emit(new ExitEvent(rule, _prevEnd));
+    /// <summary>Emit an Exit event for <paramref name="rule"/>, positioned
+    /// at the end of the last consumed token (or the rule's start for
+    /// empty rules).</summary>
+    public void Exit(int rule) => PushEvent(new ExitEvent(rule, _prevEnd));
 
+    /// <summary>Consume the current lookahead token, emit it, and shift
+    /// the buffer up by one. Slot K-1 is left null so the runtime's
+    /// pump-mode can refill it (yielding one skip per call) before the
+    /// next Drive reads lookahead.</summary>
     public void Consume()
     {
-        var prev = _lookBuf[0];
-        _prevEnd = prev.Span.End;
-        Emit(new TokenEvent(prev));
-        AdvanceLook();
+        var t = _look[0]!;
+        _prevEnd = t.Span.End;
+        for (int i = 0; i < _cfg.K - 1; i++) _look[i] = _look[i + 1];
+        _look[_cfg.K - 1] = null;
+        PushEvent(new TokenEvent(t));
     }
 
+    /// <summary>Try to consume a token of <paramref name="kind"/>; on
+    /// mismatch, emit an error and arm the runtime's recovery-mode.
+    /// Returns immediately on the slow path — the actual garbage-skipping
+    /// happens across subsequent <see cref="NextEvent"/> calls.</summary>
     public void TryConsume(ushort kind, ushort[] sync, string name)
     {
-        if (Look(0).Kind == kind) { Consume(); return; }
+        if (_look[0]!.Kind == kind) { Consume(); return; }
         ErrorHere($"expected {name}");
-        RecoverTo(sync);
-        if (Look(0).Kind == kind) Consume();
+        _recovery = new Recovery { Sync = sync, ExpectedPlusOne = kind + 1 };
+        _recoveryActive = true;
     }
 
     private static bool ContainsKind(ushort[] set, ushort k)
@@ -310,38 +393,140 @@ public sealed class Parser : IEnumerable<Event>, IEnumerator<Event>
         return false;
     }
 
-    /// <summary>Consume tokens until the lookahead matches <paramref name="sync"/> (or EOF).</summary>
+    /// <summary>Arm recovery-mode without an expected kind. Called from
+    /// the dispatch error leaf: drive() is expected to have already
+    /// transitioned to the post-recovery state, and the queued
+    /// <see cref="ErrorEvent"/> makes Drive yield immediately so
+    /// recovery-mode can take over.</summary>
     public void RecoverTo(ushort[] sync)
     {
-        while (Look(0).Kind != ParserConfig.EofKind && !ContainsKind(sync, Look(0).Kind))
-        {
-            Emit(new TokenEvent(Look(0)));
-            AdvanceLook();
-        }
+        _recovery = new Recovery { Sync = sync, ExpectedPlusOne = 0 };
+        _recoveryActive = true;
     }
 
-    public void ErrorHere(string msg) => Emit(new ErrorEvent(new ParseError(msg, Look(0).Span)));
+    /// <summary>Raise a recoverable error pointing at the current lookahead.</summary>
+    public void ErrorHere(string msg) => PushEvent(new ErrorEvent(new ParseError(msg, _look[0]!.Span)));
 
+    /// <summary>Push a fully-formed event onto the output queue. Used by
+    /// generated dispatch code that wants to emit something other than
+    /// Enter/Exit/Token/Error.</summary>
+    public void Emit(Event ev) => PushEvent(ev);
+
+    private void PushEvent(Event ev)
+    {
+        int idx = (_qHead + _qLen) % _queue.Length;
+        _queue[idx] = ev;
+        _qLen++;
+    }
+
+    private Event? PopEvent()
+    {
+        if (_qLen == 0) return null;
+        var ev = _queue[_qHead];
+        _queue[_qHead] = null;
+        _qHead = (_qHead + 1) % _queue.Length;
+        _qLen--;
+        return ev;
+    }
+
+    // True iff some lookahead slot still needs to be filled. Pump-mode
+    // runs whenever this holds, so generated Drive code can read any
+    // Look(i) unconditionally.
+    private bool PumpPending()
+    {
+        for (int i = 0; i < _look.Length; i++)
+        {
+            if (_look[i] is null) return true;
+        }
+        return false;
+    }
+
+    // Lex one token. If it's a skip, push it directly onto the event
+    // queue and leave pump-mode armed for another call. If it's a
+    // structural token, fill the leftmost empty lookahead slot.
+    //
+    // Yielding per skip is what makes the queue cap honest — a long
+    // comment run can't grow the queue past 1 (NextEvent drains the
+    // just-pushed skip on the next loop iteration before pumping again).
+    private void PumpOne()
+    {
+        var t = _lex.NextToken();
+        if (_cfg.HasSkips && _cfg.IsSkip(t.Kind))
+        {
+            PushEvent(new TokenEvent(t));
+            return;
+        }
+        for (int i = 0; i < _look.Length; i++)
+        {
+            if (_look[i] is null) { _look[i] = t; return; }
+        }
+        throw new InvalidOperationException("PumpOne called with all lookahead slots filled");
+    }
+
+    // Advance recovery by one step. Either consume one garbage token
+    // (one Token push, drive yield) or — if the lookahead is in the
+    // sync set / EOF — finalise by clearing recovery and (when a
+    // matching expected kind was set) swallowing the synced-to token.
+    private void RecoverOne()
+    {
+        ushort look0 = _look[0]!.Kind;
+        if (look0 == ParserConfig.EofKind)
+        {
+            _recoveryActive = false;
+            return;
+        }
+        if (ContainsKind(_recovery.Sync, look0))
+        {
+            bool wasExpected = _recovery.ExpectedPlusOne != 0
+                && (ushort)(_recovery.ExpectedPlusOne - 1) == look0;
+            _recoveryActive = false;
+            if (wasExpected) Consume();
+            return;
+        }
+        Consume();
+    }
+
+    /// <summary>
+    /// Produce the next event from the parse, or <c>null</c> once the
+    /// entire input has been consumed.
+    /// </summary>
+    /// <remarks>
+    /// The loop layers four kinds of progress, ordered so the consumer
+    /// always sees the soonest-available event:
+    /// <list type="number">
+    ///   <item><description>Drain a queued event.</description></item>
+    ///   <item><description>Pump one lex token (filling lookahead, or queuing a skip).</description></item>
+    ///   <item><description>Advance recovery by one step.</description></item>
+    ///   <item><description>Run the generated dispatch for one drive call.</description></item>
+    /// </list>
+    /// The bound on (2) and (3) per iteration is what keeps the queue
+    /// honest: each contributes at most one event before yielding, so
+    /// the queue never grows past <c>QueueCap</c> (the structural burst
+    /// from a single drive body).
+    /// </remarks>
     public Event? NextEvent()
     {
         while (true)
         {
-            if (_queue.Count > 0) return _queue.Dequeue();
+            if (_qLen > 0) return PopEvent();
+            if (PumpPending()) { PumpOne(); continue; }
+            if (_recoveryActive) { RecoverOne(); continue; }
             if (_state == Terminated)
             {
                 if (!_eofChecked)
                 {
                     _eofChecked = true;
-                    if (Look(0).Kind != ParserConfig.EofKind)
+                    if (_look[0]!.Kind != ParserConfig.EofKind)
                     {
+                        // Trailing input past the entry rule. Synthesize
+                        // an error and use recovery-mode (with an empty
+                        // sync set) to drain the rest as Token events
+                        // one yield at a time.
                         ErrorHere("expected end of input");
-                        while (Look(0).Kind != ParserConfig.EofKind)
-                        {
-                            Emit(new TokenEvent(Look(0)));
-                            AdvanceLook();
-                        }
+                        _recovery = new Recovery { Sync = Array.Empty<ushort>(), ExpectedPlusOne = 0 };
+                        _recoveryActive = true;
+                        continue;
                     }
-                    FlushSkipsBefore(Look(0).Span.End);
                     continue;
                 }
                 return null;
@@ -358,42 +543,4 @@ public sealed class Parser : IEnumerable<Event>, IEnumerator<Event>
 
     public IEnumerator<Event> GetEnumerator() => this;
     IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
-
-    private Token PumpToken()
-    {
-        while (true)
-        {
-            var t = _lex.NextToken();
-            if (_cfg.IsSkip(t.Kind)) { _pendingSkips.Enqueue(t); continue; }
-            return t;
-        }
-    }
-
-    private void AdvanceLook()
-    {
-        for (int i = 0; i < _cfg.K - 1; i++) _lookBuf[i] = _lookBuf[i + 1];
-        _lookBuf[_cfg.K - 1] = PumpToken();
-    }
-
-    private void FlushSkipsBefore(Pos pos)
-    {
-        while (_pendingSkips.Count > 0 && _pendingSkips.Peek().Span.End.Offset <= pos.Offset)
-        {
-            _queue.Enqueue(new TokenEvent(_pendingSkips.Dequeue()));
-        }
-    }
-
-    private void Emit(Event ev)
-    {
-        var start = ev switch
-        {
-            EnterEvent e => e.Pos,
-            ExitEvent e => e.Pos,
-            TokenEvent t => t.Token.Span.Start,
-            ErrorEvent x => x.Error.Span.Start,
-            _ => throw new InvalidOperationException("unknown Event subtype"),
-        };
-        FlushSkipsBefore(start);
-        _queue.Enqueue(ev);
-    }
 }

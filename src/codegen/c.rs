@@ -383,13 +383,21 @@ fn emit_impl(c: &mut String, st: &StateTable, stem: &str, upper: &str) {
     writeln!(c, "#include <stdlib.h>").unwrap();
     writeln!(c, "#include <string.h>").unwrap();
     writeln!(c).unwrap();
-    /* Monomorphize the runtime: PARSUNA_K is consumed inside parsuna_rt.h
-     * so `look_buf`, is_skip, and drive are baked in at compile time rather
-     * than dispatched through a Config vtable. EOF is always token kind 0
-     * (PARSUNA_TK_EOF in the runtime, re-exported as `{upper}_TK_EOF` in
-     * the public header); lex failures use PARSUNA_LEX_ERROR (always 0xFFFF,
-     * re-exported as `{upper}_LEX_ERROR`). */
+    /* Monomorphize the runtime: PARSUNA_K and PARSUNA_QUEUE_CAP are
+     * consumed inside parsuna_rt.h so `look_buf`, the event ring,
+     * is_skip, and drive are baked in at compile time rather than
+     * dispatched through a Config vtable. EOF is always token kind 0
+     * (PARSUNA_TK_EOF in the runtime, re-exported as `{upper}_TK_EOF`
+     * in the public header); lex failures use PARSUNA_LEX_ERROR
+     * (always 0xFFFF, re-exported as `{upper}_LEX_ERROR`).
+     *
+     * PARSUNA_QUEUE_CAP equals the longest emit burst across every
+     * state body, computed by lowering — the fixed-size ring is
+     * exactly large enough for the worst case the grammar can
+     * produce, so pump-mode and recovery-mode each yielding after
+     * one push keeps the queue honestly bounded. */
     writeln!(c, "#define PARSUNA_K {}", st.k).unwrap();
+    writeln!(c, "#define PARSUNA_QUEUE_CAP {}", st.queue_size_hint).unwrap();
     writeln!(c, "#include \"parsuna_rt.h\"").unwrap();
     writeln!(c).unwrap();
     /* ABI compatibility between the public `<stem>_*` types exposed in
@@ -591,9 +599,13 @@ fn emit_tables(c: &mut String, st: &StateTable, upper: &str) {
     /* Lookahead width is baked in via PARSUNA_K at the top of the file. */
 
     for f in &st.first_sets {
-        if !f.has_references {
-            continue;
-        }
+        /* The Rust backend gates emission on `has_references` because its
+         * K==1 lookahead uses an inline `match`/`kind_pattern` instead of
+         * a FIRST table. The C backend's emit_op always calls
+         * matches_first(p, FIRST_N) for Op::Star/Opt regardless of K, so
+         * we emit every FIRST set unconditionally — the lowering layer
+         * leaves `has_references` false at K==1 and would otherwise
+         * produce dangling references here. */
         let i = f.id;
         for (j, seq) in f.seqs.iter().enumerate() {
             let parts: Vec<String> = seq.iter().map(|t| c_token_name(st, upper, *t)).collect();

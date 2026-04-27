@@ -323,7 +323,11 @@ fn byte_literal(b: u8) -> String {
 }
 
 fn emit_tables(s: &mut String, st: &StateTable) {
+    writeln!(s, "// K is the lookahead required to disambiguate every alternative (LL(k)).").unwrap();
     writeln!(s, "const K = {}", st.k).unwrap();
+    writeln!(s, "// QueueCap is the hard cap on events the parser's fixed-size queue can hold.").unwrap();
+    writeln!(s, "// Equal to the longest emit burst across every state body in this grammar.").unwrap();
+    writeln!(s, "const QueueCap = {}", st.queue_size_hint).unwrap();
     for (name, id) in &st.entry_states {
         writeln!(s, "const entry{} = {}", capitalize(name), id).unwrap();
     }
@@ -331,9 +335,12 @@ fn emit_tables(s: &mut String, st: &StateTable) {
 
     writeln!(s, "var (").unwrap();
     for f in &st.first_sets {
-        if !f.has_references {
-            continue;
-        }
+        // Emit every FIRST set unconditionally. The Rust backend gates
+        // on `has_references` because its K==1 codegen uses an inline
+        // `match` instead of a FIRST table, but emit_op below always
+        // calls MatchesFirst(first_N) for Op::Star/Opt regardless of
+        // K — the lowering layer leaves `has_references` false at K==1
+        // and would otherwise produce dangling references here.
         let seqs: Vec<String> = f
             .seqs
             .iter()
@@ -581,7 +588,7 @@ fn emit_leaf_inline(s: &mut String, leaf: &DispatchLeaf, sync: u32, cont: Option
 fn emit_public_api(s: &mut String, st: &StateTable) {
     writeln!(
         s,
-        "var parserConfig = rt.Config{{K: K, IsSkip: isSkip, Drive: drive}}"
+        "var parserConfig = rt.Config{{K: K, QueueCap: QueueCap, IsSkip: isSkip, Drive: drive}}"
     )
     .unwrap();
     writeln!(s).unwrap();

@@ -310,6 +310,17 @@ fn byte_cond(ranges: &[(u8, u8)]) -> String {
 fn emit_tables(s: &mut String, st: &StateTable) {
     writeln!(s, "internal static class Tables {{").unwrap();
     writeln!(s, "    public const int K = {};", st.k).unwrap();
+    writeln!(
+        s,
+        "    /// <summary>Hard cap on events the parser's fixed-size queue can hold.\n    /// Equal to the longest emit burst across every state body in this grammar.</summary>"
+    )
+    .unwrap();
+    writeln!(
+        s,
+        "    public const int QueueCap = {};",
+        st.queue_size_hint
+    )
+    .unwrap();
 
     for f in &st.first_sets {
         if !f.has_references {
@@ -356,11 +367,18 @@ fn emit_tables(s: &mut String, st: &StateTable) {
         .filter(|t| t.skip)
         .map(|t| format!("k == {}", token_ushort(st, t.kind)))
         .collect();
+    let has_skips = !skips.is_empty();
     let skip_body = if skips.is_empty() {
         "false".to_string()
     } else {
         skips.join(" || ")
     };
+    writeln!(
+        s,
+        "    /// <summary>True iff this grammar declares any [skip]-annotated tokens.</summary>"
+    )
+    .unwrap();
+    writeln!(s, "    public const bool HasSkips = {};", has_skips).unwrap();
     writeln!(
         s,
         "    public static bool IsSkip(ushort k) => {};",
@@ -391,7 +409,9 @@ fn emit_grammar(s: &mut String, st: &StateTable) {
     )
     .unwrap();
     writeln!(s, "        Tables.K,").unwrap();
+    writeln!(s, "        Tables.QueueCap,").unwrap();
     writeln!(s, "        Tables.IsSkip,").unwrap();
+    writeln!(s, "        Tables.HasSkips,").unwrap();
     writeln!(s, "        Drive);").unwrap();
     writeln!(s).unwrap();
 

@@ -331,6 +331,22 @@ fn byte_cond(ranges: &[(u8, u8)]) -> String {
 
 fn emit_tables(s: &mut String, st: &StateTable) {
     writeln!(s, "    private static final int K = {};", st.k).unwrap();
+    writeln!(
+        s,
+        "    /** Hard cap on events the parser's fixed-size queue can hold. */"
+    )
+    .unwrap();
+    writeln!(
+        s,
+        "    /** Equal to the longest emit burst across every state body in this grammar. */"
+    )
+    .unwrap();
+    writeln!(
+        s,
+        "    private static final int QUEUE_CAP = {};",
+        st.queue_size_hint
+    )
+    .unwrap();
 
     for (name, id) in &st.entry_states {
         writeln!(
@@ -602,7 +618,7 @@ fn emit_leaf_inline(s: &mut String, leaf: &DispatchLeaf, sync: u32, cont: Option
 fn emit_public_api(s: &mut String, st: &StateTable) {
     writeln!(
         s,
-        "    private static final ParserConfig CONFIG = new ParserConfig(K, k -> isSkip(k), Grammar::drive);"
+        "    private static final ParserConfig CONFIG = new ParserConfig(K, QUEUE_CAP, k -> isSkip(k), Grammar::drive);"
     )
     .unwrap();
     writeln!(s).unwrap();

@@ -202,6 +202,14 @@ export const TERMINATED = -1;
 export interface ParserConfig<TK extends number, RK extends number> {
   /** Lookahead required by the grammar (LL(k)). */
   k: number;
+  /**
+   * Hard cap on events the parser's fixed-size queue can hold. Equal to
+   * the longest emit burst across every state body in the grammar — the
+   * runtime sizes its ring at construction so a single drive call's
+   * burst always fits without growth, and the per-yield bound on
+   * pump/recovery keeps the queue from ever exceeding this.
+   */
+  queueCap: number;
   /** EOF kind sentinel (matches the one passed to the `Lexer`). */
   eofKind: TK;
   /** Whether a given token kind is a `[skip]`-annotated skip. */
@@ -211,19 +219,105 @@ export interface ParserConfig<TK extends number, RK extends number> {
 }
 
 /**
+ * Fixed-capacity FIFO ring used as the parser's event queue.
+ *
+ * Sized at construction by the value codegen passes via
+ * [`ParserConfig.queueCap`] — computed by lowering from the longest
+ * state body's emit burst, so the queue is exactly large enough for the
+ * worst case the grammar can produce. No growth, no resize.
+ *
+ * Invariant: `len <= cap`. The runtime layer above only pushes inside
+ * `drive()`/pump/recovery and each path is bounded by lowering, so an
+ * overflow is a codegen bug.
+ */
+class EventRing<T> {
+  private buf: (T | undefined)[];
+  private head = 0;
+  private len = 0;
+
+  constructor(private readonly cap: number) {
+    // `cap` is always >= 1 in practice (lowering rounds up so even a
+    // grammar with no emits has a viable ring), so we can fix the
+    // backing array length up front.
+    this.buf = new Array<T | undefined>(cap);
+  }
+
+  isEmpty(): boolean {
+    return this.len === 0;
+  }
+
+  pushBack(t: T): void {
+    const idx = (this.head + this.len) % this.cap;
+    this.buf[idx] = t;
+    this.len++;
+  }
+
+  popFront(): T | undefined {
+    if (this.len === 0) return undefined;
+    const v = this.buf[this.head] as T;
+    // Drop our reference so the GC can reclaim the event.
+    this.buf[this.head] = undefined;
+    this.head = (this.head + 1) % this.cap;
+    this.len--;
+    return v;
+  }
+}
+
+/**
+ * In-flight error recovery. Set by [`Parser.tryConsume`]'s slow path and
+ * [`Parser.recoverTo`]; cleared once the lookahead lands on a sync
+ * token (or EOF). Each call to [`Parser.nextEvent`] drains exactly one
+ * garbage token before yielding, so a long run of unexpected input
+ * doesn't pile up in the queue — the consumer sees recovery tokens
+ * interleaved with their lex order.
+ */
+interface Recovery<TK> {
+  /** Token kinds to recover *to*. */
+  sync: readonly TK[];
+  /**
+   * Set when the recovery was triggered by an `expect` for `kind`: if
+   * the sync set lands on `kind`, the recovery finalisation also
+   * consumes the token (so the surrounding rule proceeds as if it had
+   * matched). `null` for the dispatch error path, where there's no
+   * expected kind to swallow on exit.
+   */
+  expected: TK | null;
+}
+
+/**
  * Pull-based parser. Iterate to walk the parse as a flat [`Event`] stream,
  * or call [`nextEvent`] directly for manual control.
+ *
+ * Each call to [`nextEvent`] makes one of four kinds of progress: drain
+ * a queued event, pump one lex token (filling lookahead, or queueing a
+ * skip), advance recovery by one step, or run one drive call. Each of
+ * pump/recovery contributes at most one event before yielding, so the
+ * event queue never grows past [`ParserConfig.queueCap`] (the longest
+ * structural burst from a single drive body).
+ *
+ * **Skip handling** is driven by pump-mode rather than a side queue:
+ * when the lexer hands the runtime a skip token it lands directly in
+ * the event queue, ahead of whatever structural event the next
+ * `drive()` will produce. The lookahead refills one lex token at a
+ * time (yielding between each), so a long comment run can't grow the
+ * queue past `queueCap`.
  */
 export class Parser<
   TK extends number,
   RK extends number,
 > implements IterableIterator<Event<TK, RK>> {
-  private lookBuf: Token<TK>[] = [];
+  /**
+   * Lookahead ring. `null` slots are awaiting refill — pump-mode in
+   * [`nextEvent`] pulls lex tokens one-at-a-time until every slot
+   * holds a structural token. Generated `drive()` only ever runs when
+   * all slots are filled, so [`look`] can read unconditionally.
+   */
+  private lookBuf: (Token<TK> | null)[];
   private prevEnd: Pos;
   private state: number;
-  private ret: number[] = [];
-  private queue: Event<TK, RK>[] = [];
-  private pendingSkips: Token<TK>[] = [];
+  private retStack: number[] = [];
+  private queue: EventRing<Event<TK, RK>>;
+  private recovery: Recovery<TK> | null = null;
   private eofChecked = false;
 
   constructor(
@@ -232,13 +326,24 @@ export class Parser<
     private readonly cfg: ParserConfig<TK, RK>,
   ) {
     this.state = entry;
-    for (let i = 0; i < cfg.k; i++) this.lookBuf.push(this.pumpToken());
-    this.prevEnd = this.lookBuf[0].span.start;
+    this.lookBuf = new Array<Token<TK> | null>(cfg.k).fill(null);
+    this.queue = new EventRing<Event<TK, RK>>(cfg.queueCap);
+    // `prevEnd` is overwritten on the first `enter()`/`consume()`. Until
+    // then it just needs to be a valid Pos; pin it at the source origin.
+    this.prevEnd = { offset: 0, line: 1, column: 1 };
   }
 
-  /** Peek at the `i`-th lookahead token (`0 <= i < k`). */
+  /**
+   * Peek at the `i`-th lookahead token (`0 <= i < k`). Generated
+   * `drive()` only runs after pump-mode has filled every slot, so this
+   * never sees a `null`.
+   */
   look(i: number): Token<TK> {
-    return this.lookBuf[i];
+    const t = this.lookBuf[i];
+    if (t === null) {
+      throw new Error("look slot empty inside drive() — pump did not refill before dispatch");
+    }
+    return t;
   }
 
   /** Current state id. Read at the top of every driver iteration. */
@@ -253,17 +358,17 @@ export class Parser<
 
   /** Push a return address onto the call stack. */
   pushRet(s: number): void {
-    this.ret.push(s);
+    this.retStack.push(s);
   }
 
   /** Pop the top return address, or [`TERMINATED`] if the stack is empty. */
   popRet(): number {
-    return this.ret.length ? this.ret.pop()! : TERMINATED;
+    return this.retStack.length ? this.retStack.pop()! : TERMINATED;
   }
 
   /** True if there is nothing queued to emit. */
   queueIsEmpty(): boolean {
-    return this.queue.length === 0;
+    return this.queue.isEmpty();
   }
 
   /**
@@ -273,7 +378,7 @@ export class Parser<
   matchesFirst(set: readonly (readonly TK[])[]): boolean {
     outer: for (const seq of set) {
       for (let i = 0; i < seq.length; i++) {
-        if (this.lookBuf[i].kind !== seq[i]) continue outer;
+        if (this.look(i).kind !== seq[i]) continue outer;
       }
       return true;
     }
@@ -282,73 +387,99 @@ export class Parser<
 
   /** Emit an `Enter` event for `rule`, anchored at the start of lookahead. */
   enter(rule: RK): void {
-    const pos = this.lookBuf[0].span.start;
+    const pos = this.look(0).span.start;
     this.prevEnd = pos;
-    this.emit({ tag: "enter", rule, pos });
+    this.queue.pushBack({ tag: "enter", rule, pos });
   }
 
   /** Emit an `Exit` event for `rule`, anchored at the previous token's end. */
   exit(rule: RK): void {
-    this.emit({ tag: "exit", rule, pos: this.prevEnd });
-  }
-
-  /** Consume the current lookahead and emit it as a token event. */
-  consume(): void {
-    const prev = this.lookBuf[0];
-    this.prevEnd = prev.span.end;
-    this.emit({ tag: "token", token: prev });
-    this.advanceLook();
+    this.queue.pushBack({ tag: "exit", rule, pos: this.prevEnd });
   }
 
   /**
-   * Consume a token of `kind`; on mismatch, raise an error, recover to
-   * `sync`, and try once more. `expectedMsg` is the diagnostic shown to
-   * the user — the generator passes the grammar-declared token name.
+   * Consume the current lookahead token, emit it, and shift the buffer
+   * up by one. Slot `k-1` is left null so pump-mode can refill it
+   * (yielding any skip it pulls along the way) before the next
+   * `drive()` reads lookahead.
+   */
+  consume(): void {
+    const t = this.lookBuf[0];
+    if (t === null) {
+      throw new Error("consume called with empty lookahead");
+    }
+    this.prevEnd = t.span.end;
+    const k = this.cfg.k;
+    for (let i = 0; i < k - 1; i++) {
+      this.lookBuf[i] = this.lookBuf[i + 1];
+    }
+    this.lookBuf[k - 1] = null;
+    this.queue.pushBack({ tag: "token", token: t });
+  }
+
+  /**
+   * Try to consume a token of `kind`; on mismatch, emit an error and
+   * hand recovery off to the runtime's recovery-mode.
+   *
+   * `sync` is typically the caller rule's FOLLOW set: recovery skips
+   * unexpected tokens until the lookahead lands on one of these,
+   * which gives the surrounding rule a reasonable place to resume.
+   * On the slow path we return immediately after staging the error and
+   * recovery — drive's loop sees the queued error and yields, then
+   * [`nextEvent`]'s recovery-mode advances one garbage token per call
+   * until the sync set is hit.
    */
   tryConsume(kind: TK, sync: readonly TK[], expectedMsg: string): void {
-    if (this.lookBuf[0].kind === kind) {
+    if (this.lookBuf[0] !== null && this.lookBuf[0].kind === kind) {
       this.consume();
       return;
     }
     this.errorHere(expectedMsg);
-    this.recoverTo(sync);
-    if (this.lookBuf[0].kind === kind) this.consume();
+    this.recovery = { sync, expected: kind };
   }
 
-  /** Consume tokens until lookahead matches `sync` (or EOF). */
+  /**
+   * Arm recovery-mode without an expected kind. Called from a dispatch
+   * tree's error leaf: the surrounding `cur` was already set to the
+   * post-recovery state by codegen, and the queued `Error` event makes
+   * drive() yield immediately so recovery-mode can take over.
+   */
   recoverTo(sync: readonly TK[]): void {
-    for (;;) {
-      const k = this.lookBuf[0].kind;
-      if (k === this.cfg.eofKind) return;
-      if (k !== null && sync.indexOf(k) >= 0) return;
-      this.emit({ tag: "token", token: this.lookBuf[0] });
-      this.advanceLook();
-    }
+    this.recovery = { sync, expected: null };
   }
 
   /** Raise a recoverable error at the current lookahead. */
   errorHere(msg: string): void {
-    this.emit({
+    this.queue.pushBack({
       tag: "error",
-      error: { message: msg, span: this.lookBuf[0].span },
+      error: { message: msg, span: this.look(0).span },
     });
   }
 
   /** Produce the next event, or `undefined` once the input is fully consumed. */
   nextEvent(): Event<TK, RK> | undefined {
     for (;;) {
-      if (this.queue.length) return this.queue.shift();
+      const queued = this.queue.popFront();
+      if (queued !== undefined) return queued;
+      if (this.pumpPending()) {
+        this.pumpOne();
+        continue;
+      }
+      if (this.recovery !== null) {
+        this.recoverOne();
+        continue;
+      }
       if (this.state === TERMINATED) {
         if (!this.eofChecked) {
           this.eofChecked = true;
-          if (this.lookBuf[0].kind !== this.cfg.eofKind) {
+          if (this.lookBuf[0]?.kind !== this.cfg.eofKind) {
+            // Trailing input past the entry rule. Synthesize an error
+            // and use recovery-mode (with an empty sync set) to drain
+            // the rest as Token events one yield at a time.
             this.errorHere("expected end of input");
-            while (this.lookBuf[0].kind !== this.cfg.eofKind) {
-              this.emit({ tag: "token", token: this.lookBuf[0] });
-              this.advanceLook();
-            }
+            this.recovery = { sync: [], expected: null };
+            continue;
           }
-          this.flushSkipsBefore(this.lookBuf[0].span.end);
           continue;
         }
         return undefined;
@@ -367,42 +498,62 @@ export class Parser<
     return this;
   }
 
-  private pumpToken(): Token<TK> {
-    for (;;) {
-      const t = this.lex.nextToken();
-      if (t.kind !== null && this.cfg.isSkip(t.kind)) {
-        this.pendingSkips.push(t);
-        continue;
+  /**
+   * True iff some lookahead slot still needs to be filled. Pump-mode
+   * runs whenever this holds, so generated `drive()` code can read any
+   * `look(i)` unconditionally.
+   */
+  private pumpPending(): boolean {
+    for (let i = 0; i < this.lookBuf.length; i++) {
+      if (this.lookBuf[i] === null) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Lex one token. If it's a skip, push it directly onto the event
+   * queue and leave pump-mode armed for another call. If it's a
+   * structural token, fill the leftmost empty lookahead slot.
+   *
+   * Yielding per skip is what makes the queue cap honest — a long
+   * comment run can't grow the queue past 1 (nextEvent drains the
+   * just-pushed skip on the next loop iteration before pumping again).
+   */
+  private pumpOne(): void {
+    const t = this.lex.nextToken();
+    if (t.kind !== null && this.cfg.isSkip(t.kind)) {
+      this.queue.pushBack({ tag: "token", token: t });
+      return;
+    }
+    for (let i = 0; i < this.lookBuf.length; i++) {
+      if (this.lookBuf[i] === null) {
+        this.lookBuf[i] = t;
+        return;
       }
-      return t;
     }
+    throw new Error("pumpOne called with all slots filled");
   }
 
-  private advanceLook(): void {
-    this.lookBuf.shift();
-    this.lookBuf.push(this.pumpToken());
-  }
-
-  // Drain pending skip tokens whose end offset is <= `pos.offset`. Called
-  // just before any event so whitespace/comments appear in source order.
-  private flushSkipsBefore(pos: Pos): void {
-    while (
-      this.pendingSkips.length &&
-      this.pendingSkips[0].span.end.offset <= pos.offset
-    ) {
-      const t = this.pendingSkips.shift()!;
-      this.queue.push({ tag: "token", token: t });
+  /**
+   * Advance recovery by one step. Either consume one garbage token
+   * (one Token push, drive yield) or — if the lookahead is in the
+   * sync set / EOF — finalise by clearing recovery and (when a
+   * matching `expected` was set) swallowing the synced-to token.
+   */
+  private recoverOne(): void {
+    const rec = this.recovery!;
+    const look0 = this.lookBuf[0];
+    const k = look0 === null ? null : look0.kind;
+    if (k === this.cfg.eofKind) {
+      this.recovery = null;
+      return;
     }
-  }
-
-  private emit(ev: Event<TK, RK>): void {
-    const start =
-      ev.tag === "enter" || ev.tag === "exit"
-        ? ev.pos
-        : ev.tag === "token"
-          ? ev.token.span.start
-          : ev.error.span.start;
-    this.flushSkipsBefore(start);
-    this.queue.push(ev);
+    if (k !== null && rec.sync.indexOf(k) >= 0) {
+      const wasExpected = rec.expected !== null && rec.expected === k;
+      this.recovery = null;
+      if (wasExpected) this.consume();
+      return;
+    }
+    this.consume();
   }
 }
