@@ -37,6 +37,74 @@ use crate::lowering::{Body, DispatchLeaf, DispatchTree, Op, StateId, StateTable}
 /// file size for chains that would otherwise expand multiplicatively.
 pub const DUPLICATION_BUDGET: usize = 6;
 
+/// True iff `ops` is a yieldable-after-consume state body. The runtime
+/// pump/recovery modes assume that once an `Op::Expect` runs, the very
+/// next thing the dispatcher does is yield — drive() returns, the
+/// runtime refills the lookahead (skip-by-skip) and/or drains a
+/// recovery, then drive() re-enters at the *next* state. That only
+/// holds if no op in the same state body could observe stale lookahead
+/// or push a structural event after the consume. Concretely:
+///
+/// * At most one `Expect` per body: a second `Expect` would read
+///   look[0] before the runtime had a chance to refill it.
+/// * No `Enter`/`Exit`/`Star`/`Opt`/`Dispatch` after an `Expect`:
+///   `Enter`/`Exit` would land in the queue ahead of skips that
+///   should precede them in source order; the branchy ops would read
+///   stale lookahead. Only `PushRet`, `Jump`, and `Ret` (control-only,
+///   no emit, no lookahead read) are allowed in the tail.
+///
+/// Body::Inline ops execute inline at the call site and obey the same
+/// rule, so this checks them recursively. Dispatch arms are validated
+/// per-leaf since each leaf is a separate executable path.
+fn is_valid_state_body(ops: &[Op]) -> bool {
+    let mut seen_expect = false;
+    for op in ops {
+        if seen_expect {
+            match op {
+                Op::PushRet(_) | Op::Jump(_) | Op::Ret => {}
+                _ => return false,
+            }
+        }
+        match op {
+            Op::Expect { .. } => {
+                if seen_expect {
+                    return false;
+                }
+                seen_expect = true;
+            }
+            Op::Star { body, .. } | Op::Opt { body, .. } => {
+                if let Body::Inline(inner) = body {
+                    if !is_valid_state_body(inner) {
+                        return false;
+                    }
+                }
+            }
+            Op::Dispatch { tree, .. } => {
+                if !is_valid_dispatch_tree(tree) {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    true
+}
+
+fn is_valid_dispatch_tree(tree: &DispatchTree) -> bool {
+    match tree {
+        DispatchTree::Leaf(DispatchLeaf::Arm(Body::Inline(ops))) => is_valid_state_body(ops),
+        DispatchTree::Leaf(_) => true,
+        DispatchTree::Switch { arms, default, .. } => {
+            if let DispatchLeaf::Arm(Body::Inline(ops)) = default {
+                if !is_valid_state_body(ops) {
+                    return false;
+                }
+            }
+            arms.iter().all(|(_, sub)| is_valid_dispatch_tree(sub))
+        }
+    }
+}
+
 /// Splice straight-line jump chains, eliminate tail-call trampolines,
 /// mark single-predecessor branch targets for inline emission, then drop
 /// every state no entry can reach.
@@ -165,8 +233,19 @@ fn fuse_ops(
             }
             duplications_used += 1;
         }
-        ops.pop();
-        ops.extend(target_ops.iter().cloned());
+        // Speculatively splice, then validate. The post-Expect-yield
+        // invariant has to hold for every state the runtime dispatches
+        // — if this splice would put a structural emit or
+        // lookahead-reading op after an `Expect`, the consume's
+        // refill-yield would arrive too late to keep the queue in
+        // source order. Refuse such splices and stop the chain.
+        let mut candidate = ops.clone();
+        candidate.pop();
+        candidate.extend(target_ops.iter().cloned());
+        if !is_valid_state_body(&candidate) {
+            break;
+        }
+        ops = candidate;
     }
     ops
 }

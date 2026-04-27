@@ -465,9 +465,12 @@ fn max_arm_events(tree: &DispatchTree) -> usize {
     fn arm(leaf: &DispatchLeaf) -> usize {
         match leaf {
             DispatchLeaf::Arm(b) => events_in_body(b),
-            // Fallthrough/Error transition out of the dispatch state —
-            // 0 events emitted in *this* state's body.
-            DispatchLeaf::Fallthrough | DispatchLeaf::Error => 0,
+            // Fallthrough is a pure state transition — 0 events.
+            DispatchLeaf::Fallthrough => 0,
+            // Error pushes one `Event::Error` before recovery-mode
+            // takes over; that one event is part of this state body's
+            // burst and must fit within `QUEUE_CAP`.
+            DispatchLeaf::Error => 1,
         }
     }
     match tree {

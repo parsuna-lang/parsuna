@@ -1,9 +1,78 @@
-use std::collections::VecDeque;
 use std::marker::PhantomData;
+use std::mem::MaybeUninit;
 
 use crate::events::{Error, Event, RuleKindEnum, Token, TokenKindEnum};
 use crate::lexer::LexerBackend;
-use crate::span::{Pos, Span};
+use crate::span::Pos;
+
+/// Fixed-capacity FIFO ring used as the parser's event queue.
+///
+/// Sized at construction by the `CAP` const generic the parser is
+/// instantiated with — codegen passes the value computed by lowering
+/// from the longest state body's emit burst, so the queue is exactly
+/// large enough for the worst case the grammar can produce. No heap
+/// allocation, no growth, no `VecDeque` bookkeeping.
+///
+/// Invariant: `len <= CAP`. `push_back` debug-asserts the bound; the
+/// runtime layer above only pushes inside `drive()`/pump/recovery and
+/// each path is bounded by the lowering pass, so an overflow is a
+/// codegen bug.
+struct EventRing<T, const CAP: usize> {
+    buf: [MaybeUninit<T>; CAP],
+    head: u32,
+    len: u32,
+}
+
+impl<T, const CAP: usize> EventRing<T, CAP> {
+    fn new() -> Self {
+        // Inline `const` block ensures the slot constructor is
+        // evaluated per-element rather than copied — which would
+        // require `T: Copy` even though every slot is uninitialised.
+        Self {
+            buf: [const { MaybeUninit::uninit() }; CAP],
+            head: 0,
+            len: 0,
+        }
+    }
+
+    #[inline]
+    fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    #[inline]
+    fn push_back(&mut self, t: T) {
+        let idx = (self.head as usize + self.len as usize) % CAP;
+        self.buf[idx].write(t);
+        self.len += 1;
+    }
+
+    #[inline]
+    fn pop_front(&mut self) -> Option<T> {
+        if self.len == 0 {
+            return None;
+        }
+        // SAFETY: `head` always points at an initialised slot when
+        // `len > 0` — `push_back` initialises the slot at
+        // `(head + len - 1) % CAP` and increments `len`; we never
+        // hand out the same slot twice without a `push_back` in
+        // between because `head` advances on every pop.
+        let val = unsafe { self.buf[self.head as usize].assume_init_read() };
+        self.head = ((self.head as usize + 1) % CAP) as u32;
+        self.len -= 1;
+        Some(val)
+    }
+}
+
+impl<T, const CAP: usize> Drop for EventRing<T, CAP> {
+    fn drop(&mut self) {
+        // Drain any in-flight events so their destructors run. A live
+        // queue at parser drop time is not an error — callers may
+        // discard a parser mid-stream — but the contained events still
+        // own their data and need cleanup.
+        while self.pop_front().is_some() {}
+    }
+}
 
 /// Sentinel state for "the parser has reached the end of the program".
 ///
@@ -23,95 +92,105 @@ pub trait Drive<const K: usize>: Sized {
     type TokenKind: TokenKindEnum;
     type RuleKind: RuleKindEnum;
     /// True iff the grammar declares any `[skip]`-annotated tokens. Lets
-    /// the runtime skip the pending-skip bookkeeping when no skips exist.
+    /// the runtime skip the per-pump skip check when no skips exist.
     const HAS_SKIPS: bool;
-    /// Sizing hint for the event queue: the longest *structural*
-    /// event burst one `drive` invocation can push between two
-    /// yields, computed by parsuna's lowering pass from the longest
-    /// state body's event count. The runtime passes this to the
-    /// queue's `with_capacity` so the structural success path never
-    /// pays grow-and-copy.
-    ///
-    /// **Hint, not a hard bound.** The actual queue can grow past
-    /// this for two input-dependent reasons:
-    ///
-    /// * Skip tokens flushed before a structural event must appear
-    ///   ahead of it in the queue (event ordering), and the count of
-    ///   skips between two structural tokens is a property of the
-    ///   input, not the grammar.
-    /// * Error recovery (`recover_to`) emits one Token event per
-    ///   consumed garbage token; the count is bounded by the input,
-    ///   not the grammar.
-    ///
-    /// In both cases the `VecDeque` grows from heap.
-    ///
-    /// Defaults to a small heuristic so older generated code that
-    /// pre-dates this constant still compiles; codegen always emits
-    /// the computed value.
-    const QUEUE_SIZE_HINT: usize = 16;
     /// Does `kind` denote a skip token (dropped from the structural stream
     /// and re-attached around structural events)?
     fn is_skip(kind: Self::TokenKind) -> bool;
     /// Run the generated dispatch loop. Executes states until either the
     /// event queue has something to emit or the parser hits [`TERMINATED`].
-    fn drive<'a, L: LexerBackend<'a, Self::TokenKind>>(p: &mut Parser<'a, L, K, Self>);
+    fn drive<'a, const CAP: usize, L: LexerBackend<'a, Self::TokenKind>>(
+        p: &mut Parser<'a, L, K, CAP, Self>,
+    );
+}
+
+/// In-flight error recovery. Set by [`Parser::expect_slow`] and
+/// [`Parser::recover_to`]; cleared once the lookahead lands on a sync
+/// token (or EOF). Each call to [`Parser::next_event`] drains exactly
+/// one garbage token before yielding, so a long run of unexpected
+/// input doesn't pile up in the queue — the consumer sees recovery
+/// tokens interleaved with their lex order.
+struct Recovery<TK> {
+    /// Token kinds to recover *to*. The recovery loop consumes garbage
+    /// until the lookahead matches one of these (or EOF).
+    sync: Vec<TK>,
+    /// `Some(kind)` when the recovery was triggered by an `expect` for
+    /// `kind`: if the sync set lands on `kind`, the recovery
+    /// finalisation also consumes the token (so the surrounding rule
+    /// proceeds as if it had matched). `None` for `Op::Dispatch`'s
+    /// error path, where there's no expected kind to swallow on exit.
+    expected: Option<TK>,
 }
 
 /// The pull-based parser over a grammar `G`.
 ///
-/// The parser keeps a ring of `K` lookahead tokens (sized to the grammar's
-/// LL(k)), a return stack, and a queue of events waiting to be emitted.
-/// Each call to [`next_event`](Self::next_event) either drains a pending
-/// event from the queue or asks the generated code to execute states until
-/// one is produced. Skip tokens (`[skip]`-annotated in the grammar) are
-/// held in a side queue and flushed into the output stream just before the next
-/// structural event, so consumers see whitespace and comments in the
-/// correct positions without the state machine needing to handle them.
-pub struct Parser<'a, L: LexerBackend<'a, G::TokenKind>, const K: usize, G: Drive<K>> {
+/// The parser keeps a ring of `K` lookahead slots (sized to the grammar's
+/// LL(k)), a return stack, and a bounded event queue. Each call to
+/// [`next_event`](Self::next_event) drains a pending event, pumps one
+/// lex token, advances recovery by one step, or — when none of those
+/// have anything to do — invokes the generated [`Drive::drive`] to
+/// execute the next state body.
+///
+/// **Skip handling** is now driven by pump-mode rather than a side
+/// queue: when the lexer hands the runtime a skip token it lands
+/// directly in the event queue, ahead of whatever structural event the
+/// next `drive()` call will produce. The lookahead refills one lex
+/// token at a time (yielding between each), so a long comment run
+/// can't grow the queue past `QUEUE_CAP` — at any moment the queue
+/// holds either a single pump push waiting to be drained, a single
+/// recovery push, or the structural burst from one drive body.
+pub struct Parser<
+    'a,
+    L: LexerBackend<'a, G::TokenKind>,
+    const K: usize,
+    const CAP: usize,
+    G: Drive<K>,
+> {
     lex: L,
-    look: [Token<'a, G::TokenKind>; K],
+    /// Lookahead ring. `None` slots are awaiting refill — the runtime's
+    /// pump-mode in [`next_event`] pulls lex tokens one-at-a-time until
+    /// every slot holds a structural token. Generated `drive()` code
+    /// only ever runs when all slots are filled, so [`look`](Self::look)
+    /// can unwrap unconditionally.
+    look: [Option<Token<'a, G::TokenKind>>; K],
     prev_end: Pos,
     state: u32,
     ret_stack: Vec<u32>,
-    queue: VecDeque<Event<'a, G::TokenKind, G::RuleKind>>,
-    pending_skips: VecDeque<Token<'a, G::TokenKind>>,
+    queue: EventRing<Event<'a, G::TokenKind, G::RuleKind>, CAP>,
+    recovery: Option<Recovery<G::TokenKind>>,
     eof_checked: bool,
-    _grammar: PhantomData<fn(&mut Parser<'a, L, K, G>)>,
+    _grammar: PhantomData<fn(&mut Parser<'a, L, K, CAP, G>)>,
 }
 
-impl<'a, L: LexerBackend<'a, G::TokenKind>, const K: usize, G: Drive<K>> Parser<'a, L, K, G> {
+impl<
+        'a,
+        L: LexerBackend<'a, G::TokenKind>,
+        const K: usize,
+        const CAP: usize,
+        G: Drive<K>,
+    > Parser<'a, L, K, CAP, G>
+{
     /// Build a parser over `lex`, starting at `entry` (the state id of the
     /// rule you want to parse — generated code exposes `ENTRY_FOO` constants
     /// for each public rule and `parse_foo_from_str` wrappers that call
     /// this).
     ///
-    /// The lookahead buffer is primed by pumping `K` tokens up-front so that
-    /// `look(0)..look(K-1)` is valid from the very first dispatch.
+    /// All `K` lookahead slots start empty; the first call to
+    /// [`next_event`] enters pump-mode and primes them, so any leading
+    /// skip tokens (e.g. whitespace before the first structural token)
+    /// are emitted before the entry rule's `Enter`.
     pub fn new(lex: L, entry: u32) -> Self {
-        let mut parser = Parser {
+        Parser {
             lex,
-            look: std::array::from_fn(|_| Token {
-                kind: Some(G::TokenKind::EOF),
-                span: Span::default(),
-                text: std::borrow::Cow::Borrowed(""),
-            }),
+            look: std::array::from_fn(|_| None),
             prev_end: Pos::default(),
             state: entry,
             ret_stack: Vec::with_capacity(64),
-            // Pre-sized to the structural-event burst hint the
-            // codegen computed via [`Drive::QUEUE_SIZE_HINT`]. The
-            // structural success path never grows past this; long
-            // skip runs and error recovery can.
-            queue: VecDeque::with_capacity(G::QUEUE_SIZE_HINT),
-            pending_skips: VecDeque::with_capacity(16),
+            queue: EventRing::new(),
+            recovery: None,
             eof_checked: false,
             _grammar: PhantomData,
-        };
-        for i in 0..K {
-            parser.look[i] = parser.pump_token();
         }
-        parser.prev_end = parser.look[0].span.start;
-        parser
     }
 
     /// Current state id. Generated dispatch reads this at the start of each
@@ -152,9 +231,14 @@ impl<'a, L: LexerBackend<'a, G::TokenKind>, const K: usize, G: Drive<K>> Parser<
     }
 
     /// Peek at the `i`-th lookahead token. `i` must be `< K`.
+    ///
+    /// Generated `drive()` only runs after [`next_event`]'s pump-mode
+    /// has filled every slot, so the unwrap here is unconditional.
     #[inline]
     pub fn look(&self, i: usize) -> &Token<'a, G::TokenKind> {
-        &self.look[i]
+        self.look[i]
+            .as_ref()
+            .expect("look slot empty inside drive() — pump did not refill before dispatch")
     }
 
     /// Test whether the current lookahead starts with any of the given
@@ -167,7 +251,7 @@ impl<'a, L: LexerBackend<'a, G::TokenKind>, const K: usize, G: Drive<K>> Parser<
     pub fn matches_first(&self, set: &[&[G::TokenKind]]) -> bool {
         'seq: for seq in set {
             for (i, want) in seq.iter().enumerate() {
-                if self.look[i].kind != Some(*want) {
+                if self.look(i).kind != Some(*want) {
                     continue 'seq;
                 }
             }
@@ -176,19 +260,23 @@ impl<'a, L: LexerBackend<'a, G::TokenKind>, const K: usize, G: Drive<K>> Parser<
         false
     }
 
+    /// Append an event to the output queue. The bound is enforced by
+    /// `EventRing::push_back`'s debug-assert; this thin wrapper just
+    /// keeps the call sites small and lets us add policy here later
+    /// without touching every emit path.
+    #[inline(always)]
+    fn push_event(&mut self, ev: Event<'a, G::TokenKind, G::RuleKind>) {
+        self.queue.push_back(ev);
+    }
+
     /// Emit an `Enter` event for `rule`. Records the rule's start position
     /// as `prev_end` so a later `Exit` without any intervening tokens still
     /// produces a zero-width span at the expected place.
     #[inline(always)]
     pub fn enter(&mut self, rule: G::RuleKind) {
-        let pos = self.look[0].span.start;
+        let pos = self.look(0).span.start;
         self.prev_end = pos;
-        // Inline `emit`: we already know the event start, so skip the
-        // `match` on the Event variant.
-        if G::HAS_SKIPS && !self.pending_skips.is_empty() {
-            self.flush_skips_before(pos);
-        }
-        self.queue.push_back(Event::Enter { rule, pos });
+        self.push_event(Event::Enter { rule, pos });
     }
 
     /// Emit an `Exit` event for `rule`, positioned at the end of the last
@@ -196,50 +284,37 @@ impl<'a, L: LexerBackend<'a, G::TokenKind>, const K: usize, G: Drive<K>> Parser<
     #[inline(always)]
     pub fn exit(&mut self, rule: G::RuleKind) {
         let pos = self.prev_end;
-        if G::HAS_SKIPS && !self.pending_skips.is_empty() {
-            self.flush_skips_before(pos);
-        }
-        self.queue.push_back(Event::Exit { rule, pos });
+        self.push_event(Event::Exit { rule, pos });
     }
 
     /// Append an event to the output queue.
     ///
-    /// If skip tokens are pending and the event is positioned past them, we
-    /// flush those skips first — this keeps the consumer-visible order
-    /// faithful (comments before the structural event that follows them).
-    ///
-    /// `consume`/`enter`/`exit` inline this directly so they can avoid the
-    /// per-event `match` on the variant tag; this stays as the fallback for
-    /// callers (e.g. `error_here`) that don't know the start position
-    /// without inspecting the event.
+    /// Skip-token interleaving used to live here (the old design held a
+    /// `pending_skips` side queue and flushed it before any structural
+    /// emit); pump-mode now drains skips one at a time between
+    /// `drive()` calls, so this is a plain push that respects the
+    /// queue cap.
     #[inline(always)]
     pub fn emit(&mut self, ev: Event<'a, G::TokenKind, G::RuleKind>) {
-        if G::HAS_SKIPS && !self.pending_skips.is_empty() {
-            let start = match &ev {
-                Event::Enter { pos, .. } | Event::Exit { pos, .. } => *pos,
-                Event::Token(t) => t.span.start,
-                Event::Error(e) => e.span.start,
-            };
-            self.flush_skips_before(start);
-        }
-        self.queue.push_back(ev);
+        self.push_event(ev);
     }
 
     /// Raise a recoverable error pointing at the current lookahead.
     pub fn error_here(&mut self, msg: impl Into<std::borrow::Cow<'static, str>>) {
-        let span = self.look[0].span;
-        self.emit(Event::Error(Error::new(msg).at(span)));
+        let span = self.look(0).span;
+        self.push_event(Event::Error(Error::new(msg).at(span)));
     }
 
-    /// Try to consume a token of `kind`; on mismatch, emit an error,
-    /// recover to the nearest sync token, and try once more.
+    /// Try to consume a token of `kind`; on mismatch, emit an error and
+    /// hand recovery off to the runtime's recovery-mode.
     ///
-    /// `sync` is typically the caller rule's FOLLOW set: the parser skips
-    /// unexpected tokens until it reaches one of these, which gives the
-    /// surrounding rule a reasonable place to resume. The retry after
-    /// recovery handles the common case where the expected token is what
-    /// we skipped *to* — the caller still wants to swallow it so the rest
-    /// of the rule sees a clean input.
+    /// `sync` is typically the caller rule's FOLLOW set: recovery skips
+    /// unexpected tokens until the lookahead lands on one of these,
+    /// which gives the surrounding rule a reasonable place to resume.
+    /// On the slow path `expect` returns immediately after staging the
+    /// error and recovery — drive's loop sees the queued error and
+    /// yields, then [`next_event`]'s recovery-mode advances one
+    /// garbage token per call until the sync set is hit.
     #[inline(always)]
     pub fn expect(
         &mut self,
@@ -247,17 +322,18 @@ impl<'a, L: LexerBackend<'a, G::TokenKind>, const K: usize, G: Drive<K>> Parser<
         sync: &[G::TokenKind],
         expected_msg: &'static str,
     ) {
-        if self.look[0].kind == Some(kind) {
+        if self.look(0).kind == Some(kind) {
             self.consume();
             return;
         }
         self.expect_slow(kind, sync, expected_msg);
     }
 
-    /// Cold path of [`expect`]: the lookahead didn't match, so we emit
-    /// the error, recover to the sync set, and (if recovery landed on
-    /// the expected kind) retry the consume. Hoisted out of `expect` so
-    /// the hot path is a single compare-and-call.
+    /// Cold path of [`expect`]: stage the error event and arm
+    /// recovery-mode with the expected kind so the post-recovery
+    /// finaliser can swallow the matching token if the sync set lands
+    /// on it. Returns immediately — the actual garbage-skipping happens
+    /// across subsequent [`next_event`] calls.
     #[cold]
     #[inline(never)]
     fn expect_slow(
@@ -267,42 +343,103 @@ impl<'a, L: LexerBackend<'a, G::TokenKind>, const K: usize, G: Drive<K>> Parser<
         expected_msg: &'static str,
     ) {
         self.error_here(expected_msg);
-        self.recover_to(sync);
-        if self.look[0].kind == Some(kind) {
-            self.consume();
-        }
+        self.recovery = Some(Recovery {
+            sync: sync.to_vec(),
+            expected: Some(kind),
+        });
     }
 
     /// Consume the current lookahead token, emit it, and shift the buffer
-    /// up by one. The new slot `K-1` is refilled from the lexer.
+    /// up by one. Slot `K-1` is left empty so the runtime's pump-mode can
+    /// refill it (yielding one skip per call) before the next `drive()`
+    /// reads lookahead.
     ///
-    /// Hand-inlined against the generic `emit` path: the event is always
-    /// a `Token`, so we know the start position directly and can skip
-    /// `emit`'s `match` over Event variants. For K=1 the swap loop is
-    /// empty and folds away; for K>1 it shifts the buffer left so the
-    /// freshly pumped token lands in slot K-1.
+    /// The state-splitting invariant in `fuse` guarantees an `Op::Expect`
+    /// is always followed only by control ops in the same state body —
+    /// so `consume` never has to coexist with another lookahead-reading
+    /// op before the next yield.
     #[inline]
     pub fn consume(&mut self) {
-        self.prev_end = self.look[0].span.end;
-        let next = self.pump_token();
-        let t = std::mem::replace(&mut self.look[0], next);
+        let t = self.look[0]
+            .take()
+            .expect("consume called with empty lookahead");
+        self.prev_end = t.span.end;
         for i in 0..K - 1 {
-            self.look.swap(i, i + 1);
+            self.look[i] = self.look[i + 1].take();
         }
-        if G::HAS_SKIPS && !self.pending_skips.is_empty() {
-            self.flush_skips_before(t.span.start);
-        }
-        self.queue.push_back(Event::Token(t));
+        // After the shifts, slot K-1 is `None` (either freshly None or
+        // moved out by the last `take()`). The runtime's pump-mode in
+        // `next_event` refills it before the next `drive()` runs.
+        self.push_event(Event::Token(t));
     }
 
-    /// Consume tokens until the current lookahead matches `sync` (or EOF).
-    /// Called after an error to skip past garbage.
+    /// Arm recovery-mode without an expected kind. Called from
+    /// `Op::Dispatch`'s error leaf: the surrounding `cur` was already
+    /// set to the post-recovery state by codegen, and the queued
+    /// `Error` event makes drive() yield immediately so recovery-mode
+    /// can take over.
     pub fn recover_to(&mut self, sync: &[G::TokenKind]) {
-        loop {
-            match self.look[0].kind {
-                Some(k) if k == G::TokenKind::EOF => return,
-                Some(k) if sync.contains(&k) => return,
-                _ => self.consume(),
+        self.recovery = Some(Recovery {
+            sync: sync.to_vec(),
+            expected: None,
+        });
+    }
+
+    /// True iff some lookahead slot still needs to be filled. Pump-mode
+    /// runs whenever this holds, so generated `drive()` code can read
+    /// any `look(i)` unconditionally.
+    fn pump_pending(&self) -> bool {
+        self.look.iter().any(|s| s.is_none())
+    }
+
+    /// Lex one token. If it's a skip, push it directly onto the event
+    /// queue and leave pump-mode armed for another call. If it's a
+    /// structural token, fill the leftmost empty lookahead slot.
+    ///
+    /// Yielding per skip is what makes the queue cap honest — a long
+    /// comment run can't grow the queue past 1 (next_event drains the
+    /// just-pushed skip on the next loop iteration before pumping again).
+    fn pump_one(&mut self) {
+        let t = self.lex.next_token();
+        if G::HAS_SKIPS {
+            if let Some(k) = t.kind {
+                if G::is_skip(k) {
+                    self.push_event(Event::Token(t));
+                    return;
+                }
+            }
+        }
+        let slot = self
+            .look
+            .iter()
+            .position(|s| s.is_none())
+            .expect("pump_one called with all slots filled");
+        self.look[slot] = Some(t);
+    }
+
+    /// Advance recovery by one step. Either consume one garbage token
+    /// (one Token push, drive yield) or — if the lookahead is in the
+    /// sync set / EOF — finalise by clearing recovery and (when a
+    /// matching `expected` was set) swallowing the synced-to token.
+    fn recover_one(&mut self) {
+        let rec = self
+            .recovery
+            .as_ref()
+            .expect("recover_one called without active recovery");
+        let look0_kind = self.look[0].as_ref().and_then(|t| t.kind);
+        match look0_kind {
+            Some(k) if k == G::TokenKind::EOF => {
+                self.recovery = None;
+            }
+            Some(k) if rec.sync.contains(&k) => {
+                let was_expected = rec.expected == Some(k);
+                self.recovery = None;
+                if was_expected {
+                    self.consume();
+                }
+            }
+            _ => {
+                self.consume();
             }
         }
     }
@@ -310,27 +447,49 @@ impl<'a, L: LexerBackend<'a, G::TokenKind>, const K: usize, G: Drive<K>> Parser<
     /// Produce the next event from the parse, or `None` once the entire
     /// input has been consumed.
     ///
-    /// On termination the parser performs one extra pass to make sure we
-    /// have reached EOF (if we haven't, it emits a trailing error and
-    /// consumes the remaining tokens so consumers see them as tokens rather
-    /// than silent drops), and then flushes any final pending skip tokens.
+    /// The loop layers four kinds of progress, ordered so the consumer
+    /// always sees the soonest-available event:
+    ///
+    /// 1. Drain a queued event.
+    /// 2. Pump one lex token (filling lookahead, or queuing a skip).
+    /// 3. Advance recovery by one step.
+    /// 4. Run the generated dispatch for one drive call.
+    ///
+    /// The bound on (2) and (3) per iteration is what keeps the queue
+    /// honest: each contributes at most one event before yielding, so
+    /// the queue never grows past `QUEUE_CAP` (the structural burst
+    /// from a single drive body).
     #[inline]
     pub fn next_event(&mut self) -> Option<Event<'a, G::TokenKind, G::RuleKind>> {
         loop {
             if let Some(e) = self.queue.pop_front() {
                 return Some(e);
             }
+            if self.pump_pending() {
+                self.pump_one();
+                continue;
+            }
+            if self.recovery.is_some() {
+                self.recover_one();
+                continue;
+            }
             if self.state == TERMINATED {
                 if !self.eof_checked {
                     self.eof_checked = true;
-                    if self.look[0].kind != Some(G::TokenKind::EOF) {
+                    if self.look[0].as_ref().and_then(|t| t.kind)
+                        != Some(G::TokenKind::EOF)
+                    {
+                        // Trailing input past the entry rule. Synthesize
+                        // an error and use recovery-mode (with an empty
+                        // sync set) to drain the rest as Token events
+                        // one yield at a time.
                         self.error_here("expected end of input");
-                        while self.look[0].kind != Some(G::TokenKind::EOF) {
-                            self.consume();
-                        }
+                        self.recovery = Some(Recovery {
+                            sync: Vec::new(),
+                            expected: None,
+                        });
+                        continue;
                     }
-                    let end = self.look[0].span.end;
-                    self.flush_skips_before(end);
                     continue;
                 }
                 return None;
@@ -338,65 +497,15 @@ impl<'a, L: LexerBackend<'a, G::TokenKind>, const K: usize, G: Drive<K>> Parser<
             G::drive(self);
         }
     }
-
-    /// Pull one token from the lexer, routing skip tokens into a side queue
-    /// so the state machine only sees structural tokens.
-    ///
-    /// The hot path — non-skip token, the common case for every grammar
-    /// that uses skip tokens at all — is straight-line: lex, peek-kind,
-    /// return. Only the cold "this was a skip" branch enters the loop in
-    /// [`pump_token_slow`]. When `HAS_SKIPS` is `false` the entire skip
-    /// check folds away and `pump_token` is just a passthrough to the
-    /// lexer.
-    #[inline(always)]
-    fn pump_token(&mut self) -> Token<'a, G::TokenKind> {
-        let t = self.lex.next_token();
-        if G::HAS_SKIPS {
-            if let Some(k) = t.kind {
-                if G::is_skip(k) {
-                    return self.pump_token_slow(t);
-                }
-            }
-        }
-        t
-    }
-
-    /// Cold path of [`pump_token`]: the lexer just returned a skip token,
-    /// so queue it and keep pulling until we get a structural one. Hoisted
-    /// out of `pump_token` so the hot path stays a single lex-and-return.
-    #[cold]
-    #[inline(never)]
-    fn pump_token_slow(&mut self, first: Token<'a, G::TokenKind>) -> Token<'a, G::TokenKind> {
-        self.pending_skips.push_back(first);
-        loop {
-            let t = self.lex.next_token();
-            if let Some(k) = t.kind {
-                if G::is_skip(k) {
-                    self.pending_skips.push_back(t);
-                    continue;
-                }
-            }
-            return t;
-        }
-    }
-
-    /// Drain pending skip tokens whose end offset is `<= pos.offset`.
-    /// Called just before emitting any event so skips are interleaved with
-    /// structure in source order.
-    fn flush_skips_before(&mut self, pos: Pos) {
-        while let Some(front) = self.pending_skips.front() {
-            if front.span.end.offset <= pos.offset {
-                let t = self.pending_skips.pop_front().unwrap();
-                self.queue.push_back(Event::Token(t));
-            } else {
-                break;
-            }
-        }
-    }
 }
 
-impl<'a, L: LexerBackend<'a, G::TokenKind>, const K: usize, G: Drive<K>> Iterator
-    for Parser<'a, L, K, G>
+impl<
+        'a,
+        L: LexerBackend<'a, G::TokenKind>,
+        const K: usize,
+        const CAP: usize,
+        G: Drive<K>,
+    > Iterator for Parser<'a, L, K, CAP, G>
 {
     type Item = Event<'a, G::TokenKind, G::RuleKind>;
     fn next(&mut self) -> Option<Self::Item> {

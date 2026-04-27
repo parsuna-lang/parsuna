@@ -321,6 +321,17 @@ fn emit_tables(s: &mut String, st: &StateTable) {
     )
     .unwrap();
     writeln!(s, "pub const K: usize = {};", st.k).unwrap();
+    writeln!(
+        s,
+        "/// Hard cap on events the parser's fixed-size queue can hold."
+    )
+    .unwrap();
+    writeln!(
+        s,
+        "/// Equal to the longest emit burst across every state body in this grammar."
+    )
+    .unwrap();
+    writeln!(s, "pub const QUEUE_CAP: usize = {};", st.queue_size_hint).unwrap();
 
     for (name, id) in &st.entry_states {
         writeln!(s, "const ENTRY_{}: u32 = {};", name.to_uppercase(), id).unwrap();
@@ -390,7 +401,7 @@ pub struct Grammar;
 /// Parser alias pinning the grammar and lookahead. `L` is any
 /// [`LexerBackend`]; the generated `parse_*_from_str`/`parse_*_from_reader`
 /// helpers build a parser with either [`Scanner`] or [`StreamingLexer`].
-pub type Parser<'a, L> = parsuna_rt::Parser<'a, L, K, Grammar>;
+pub type Parser<'a, L> = parsuna_rt::Parser<'a, L, K, QUEUE_CAP, Grammar>;
 "#,
     );
 }
@@ -639,7 +650,6 @@ fn emit_step(s: &mut String, st: &StateTable) {
     writeln!(s, "    type TokenKind = TokenKind;").unwrap();
     writeln!(s, "    type RuleKind = RuleKind;").unwrap();
     writeln!(s, "    const HAS_SKIPS: bool = {};", has_skips).unwrap();
-    writeln!(s, "    const QUEUE_SIZE_HINT: usize = {};", st.queue_size_hint).unwrap();
     writeln!(s).unwrap();
     writeln!(s, "    #[inline(always)]").unwrap();
     writeln!(s, "    fn is_skip(kind: TokenKind) -> bool {{").unwrap();
@@ -659,7 +669,7 @@ fn emit_step(s: &mut String, st: &StateTable) {
     writeln!(s, "    #[inline]").unwrap();
     writeln!(
         s,
-        "    fn drive<'a, L: LexerBackend<'a, Self::TokenKind>>(p: &mut parsuna_rt::Parser<'a, L, K, Self>) {{"
+        "    fn drive<'a, const CAP: usize, L: LexerBackend<'a, Self::TokenKind>>(p: &mut parsuna_rt::Parser<'a, L, K, CAP, Self>) {{"
     )
     .unwrap();
     writeln!(s, "        let mut cur = p.state();").unwrap();
