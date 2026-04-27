@@ -106,18 +106,26 @@ pub struct StateTable {
     pub entry_states: Vec<(String, StateId)>,
     /// Lookahead required to disambiguate every alternative (LL(k)).
     pub k: usize,
-    /// Static upper bound on the number of structural events one
-    /// `drive` invocation can push onto the parser's queue between two
-    /// yields, computed by [`max_event_burst`] after fuse runs. The
-    /// dispatch loop only yields between state bodies (not between
-    /// individual emits), so the bound is `max(events_per_state(s))`.
-    /// Backends emit this as a `QUEUE_CAP` const that the runtime
-    /// uses to pre-size the queue, so the success path never pays a
-    /// grow-and-copy. Error recovery (`recover_to` consuming garbage
-    /// until a sync token) can push more, in which case the queue
-    /// grows from heap. Pending skip tokens between structural events
-    /// also pile up dynamically and aren't included.
-    pub queue_cap: usize,
+    /// Sizing hint for the runtime event queue: the longest burst of
+    /// **structural** events one `drive` invocation can push between
+    /// two yields, computed by [`max_event_burst`] after fuse runs.
+    /// Used by backends to emit a `QUEUE_SIZE_HINT` const the runtime
+    /// passes to its queue's `with_capacity` — so the structural
+    /// success path doesn't pay grow-and-copy.
+    ///
+    /// **It is a hint, not a hard bound.** The actual queue can grow
+    /// past it for two input-dependent reasons:
+    ///
+    /// * **Skip tokens** flushed before a structural event must
+    ///   appear in the queue ahead of it (or event order is wrong),
+    ///   and the count of skips between two structural tokens is a
+    ///   property of the input, not the grammar.
+    /// * **Error recovery** (`recover_to` consuming garbage tokens
+    ///   until a sync set is hit) emits a Token event per consumed
+    ///   token; that count is also unbounded in the input.
+    ///
+    /// In both cases the runtime's `VecDeque` grows from heap.
+    pub queue_size_hint: usize,
     /// The compiled lexer DFA.
     pub lexer_dfa: Vec<DfaState>,
 }
@@ -406,7 +414,7 @@ pub fn lower(ag: &AnalyzedGrammar) -> StateTable {
     let program = build::build(ag);
     let mut table = layout::layout(program, ag);
     fuse::fuse(&mut table);
-    table.queue_cap = max_event_burst(&table);
+    table.queue_size_hint = max_event_burst(&table);
     mark_first_set_references(&mut table);
     table
 }

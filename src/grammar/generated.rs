@@ -433,7 +433,7 @@ impl parsuna_rt::Drive<K> for Grammar {
     type TokenKind = TokenKind;
     type RuleKind = RuleKind;
     const HAS_SKIPS: bool = true;
-    const QUEUE_CAP: usize = 5;
+    const QUEUE_SIZE_HINT: usize = 5;
 
     #[inline(always)]
     fn is_skip(kind: TokenKind) -> bool {

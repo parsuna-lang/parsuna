@@ -639,7 +639,7 @@ fn emit_step(s: &mut String, st: &StateTable) {
     writeln!(s, "    type TokenKind = TokenKind;").unwrap();
     writeln!(s, "    type RuleKind = RuleKind;").unwrap();
     writeln!(s, "    const HAS_SKIPS: bool = {};", has_skips).unwrap();
-    writeln!(s, "    const QUEUE_CAP: usize = {};", st.queue_cap).unwrap();
+    writeln!(s, "    const QUEUE_SIZE_HINT: usize = {};", st.queue_size_hint).unwrap();
     writeln!(s).unwrap();
     writeln!(s, "    #[inline(always)]").unwrap();
     writeln!(s, "    fn is_skip(kind: TokenKind) -> bool {{").unwrap();
