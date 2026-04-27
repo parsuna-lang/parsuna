@@ -513,25 +513,33 @@ fn format_op(op: &parsuna::lowering::Op, st: &StateTable) -> Vec<String> {
             body,
             cont,
             head,
-        } => vec![format!(
-            "Star {} body={} {} head={}",
-            format_first_pool(st, *first),
-            state_ref(st, *body),
-            match cont {
-                Some(n) => format!("cont={}", state_ref(st, *n)),
-                None => "tail".into(),
-            },
-            state_ref(st, *head)
-        )],
-        Op::Opt { first, body, cont } => vec![format!(
-            "Opt {} body={} {}",
-            format_first_pool(st, *first),
-            state_ref(st, *body),
-            match cont {
-                Some(n) => format!("cont={}", state_ref(st, *n)),
-                None => "tail".into(),
-            },
-        )],
+        } => {
+            let mut lines = vec![format!(
+                "Star {} body={} {} head={}",
+                format_first_pool(st, *first),
+                format_body(st, body),
+                match cont {
+                    Some(n) => format!("cont={}", state_ref(st, *n)),
+                    None => "tail".into(),
+                },
+                state_ref(st, *head)
+            )];
+            append_body_ops(st, body, "  ", &mut lines);
+            lines
+        }
+        Op::Opt { first, body, cont } => {
+            let mut lines = vec![format!(
+                "Opt {} body={} {}",
+                format_first_pool(st, *first),
+                format_body(st, body),
+                match cont {
+                    Some(n) => format!("cont={}", state_ref(st, *n)),
+                    None => "tail".into(),
+                },
+            )];
+            append_body_ops(st, body, "  ", &mut lines);
+            lines
+        }
         Op::Dispatch { tree, sync, cont } => {
             let mut lines = vec![format!(
                 "Dispatch sync={} {}",
@@ -547,6 +555,30 @@ fn format_op(op: &parsuna::lowering::Op, st: &StateTable) -> Vec<String> {
     }
 }
 
+fn format_body(st: &StateTable, body: &parsuna::lowering::Body) -> String {
+    use parsuna::lowering::Body;
+    match body {
+        Body::State(s) => state_ref(st, *s),
+        Body::Inline(_) => "<inlined>".into(),
+    }
+}
+
+fn append_body_ops(
+    st: &StateTable,
+    body: &parsuna::lowering::Body,
+    indent: &str,
+    out: &mut Vec<String>,
+) {
+    use parsuna::lowering::Body;
+    if let Body::Inline(ops) = body {
+        for op in ops {
+            for line in format_op(op, st) {
+                out.push(format!("{}{}", indent, line));
+            }
+        }
+    }
+}
+
 fn format_dispatch_tree(
     st: &StateTable,
     tree: &parsuna::lowering::DispatchTree,
@@ -556,7 +588,7 @@ fn format_dispatch_tree(
     use parsuna::lowering::{DispatchLeaf, DispatchTree};
     let leaf_str = |leaf: &DispatchLeaf| -> String {
         match leaf {
-            DispatchLeaf::Arm(t) => format!("-> {}", state_ref(st, *t)),
+            DispatchLeaf::Arm(b) => format!("-> {}", format_body(st, b)),
             DispatchLeaf::Fallthrough => "-> fall".into(),
             DispatchLeaf::Error => "-> error".into(),
         }

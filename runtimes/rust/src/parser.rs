@@ -25,6 +25,18 @@ pub trait Drive<const K: usize>: Sized {
     /// True iff the grammar declares any `[skip]`-annotated tokens. Lets
     /// the runtime skip the pending-skip bookkeeping when no skips exist.
     const HAS_SKIPS: bool;
+    /// Static upper bound on the number of structural events the
+    /// dispatch loop can push between two yields, computed by parsuna's
+    /// lowering pass from the longest state body's event count. The
+    /// runtime pre-sizes the event queue with this so the success path
+    /// never grows the buffer. Error recovery (`recover_to` consuming
+    /// garbage) and pending skip-token accumulation can still push
+    /// past it; the queue grows from heap in those cases.
+    ///
+    /// Defaults to a small heuristic so older generated code that
+    /// pre-dates this constant still compiles; codegen always emits
+    /// the computed value.
+    const QUEUE_CAP: usize = 16;
     /// Does `kind` denote a skip token (dropped from the structural stream
     /// and re-attached around structural events)?
     fn is_skip(kind: Self::TokenKind) -> bool;
@@ -74,7 +86,10 @@ impl<'a, L: LexerBackend<'a, G::TokenKind>, const K: usize, G: Drive<K>> Parser<
             prev_end: Pos::default(),
             state: entry,
             ret_stack: Vec::with_capacity(64),
-            queue: VecDeque::with_capacity(16),
+            // Pre-sized to the per-yield burst the codegen statically
+            // bounded via [`Drive::QUEUE_CAP`]. The success path never
+            // grows past this; error recovery and skip-token runs may.
+            queue: VecDeque::with_capacity(G::QUEUE_CAP),
             pending_skips: VecDeque::with_capacity(16),
             eof_checked: false,
             _grammar: PhantomData,

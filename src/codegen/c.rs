@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use crate::codegen::common::screaming_snake;
 use crate::codegen::EmittedFile;
 use crate::lowering::lexer_dfa::{DfaState, START};
-use crate::lowering::{DispatchLeaf, DispatchTree, Op, StateTable};
+use crate::lowering::{Body, DispatchLeaf, DispatchTree, Op, StateTable};
 
 /// Per-backend arguments. Currently empty — kept as a struct (deriving
 /// [`clap::Args`]) so the CLI can flatten any future flags in directly
@@ -717,32 +717,54 @@ fn emit_op(c: &mut String, st: &StateTable, upper: &str, op: &Op) {
         Op::Ret => {
             writeln!(c, "      cur = pop_ret(p);").unwrap();
         }
-        Op::Star { first, body, cont, head } => match cont {
-            Some(n) => writeln!(
+        Op::Star { first, body, cont, head } => {
+            let miss = match cont {
+                Some(n) => format!("cur = {n};"),
+                None => "cur = pop_ret(p);".to_string(),
+            };
+            writeln!(
                 c,
-                "      if (matches_first(p, FIRST_{first})) {{ push_ret(p, {head}); cur = {body}; }} else {{ cur = {n}; }}"
+                "      if (matches_first(p, FIRST_{first})) {{"
             )
-            .unwrap(),
-            None => writeln!(
+            .unwrap();
+            writeln!(c, "        push_ret(p, {head});").unwrap();
+            emit_body(c, st, upper, body);
+            writeln!(c, "      }} else {{ {miss} }}").unwrap();
+        }
+        Op::Opt { first, body, cont } => {
+            let miss = match cont {
+                Some(n) => format!("cur = {n};"),
+                None => "cur = pop_ret(p);".to_string(),
+            };
+            writeln!(
                 c,
-                "      if (matches_first(p, FIRST_{first})) {{ push_ret(p, {head}); cur = {body}; }} else {{ cur = pop_ret(p); }}"
+                "      if (matches_first(p, FIRST_{first})) {{"
             )
-            .unwrap(),
-        },
-        Op::Opt { first, body, cont } => match cont {
-            Some(n) => writeln!(
-                c,
-                "      if (matches_first(p, FIRST_{first})) {{ push_ret(p, {n}); cur = {body}; }} else {{ cur = {n}; }}"
-            )
-            .unwrap(),
-            None => writeln!(
-                c,
-                "      if (matches_first(p, FIRST_{first})) {{ cur = {body}; }} else {{ cur = pop_ret(p); }}"
-            )
-            .unwrap(),
-        },
+            .unwrap();
+            if let Some(n) = cont {
+                writeln!(c, "        push_ret(p, {n});").unwrap();
+            }
+            emit_body(c, st, upper, body);
+            writeln!(c, "      }} else {{ {miss} }}").unwrap();
+        }
         Op::Dispatch { tree, sync, cont } => {
             emit_dispatch_tree(c, st, upper, tree, *sync, *cont, "      ");
+        }
+    }
+}
+
+/// Emit either a `cur = N;` transition or, when the body has been
+/// moved into the op as [`Body::Inline`] by the
+/// [`fuse`](crate::lowering::fuse) branch-inlining pass, the inlined
+/// ops directly. The terminator inside the inlined sequence handles
+/// the post-body transition itself.
+fn emit_body(c: &mut String, st: &StateTable, upper: &str, body: &Body) {
+    match body {
+        Body::State(s) => writeln!(c, "      cur = {s};").unwrap(),
+        Body::Inline(ops) => {
+            for op in ops {
+                emit_op(c, st, upper, op);
+            }
         }
     }
 }
@@ -758,9 +780,15 @@ fn emit_dispatch_tree(
 ) {
     match tree {
         DispatchTree::Leaf(leaf) => {
-            write!(c, "{}{{ ", ind).unwrap();
-            emit_leaf_inline(c, leaf, sync, cont);
-            writeln!(c, "}}").unwrap();
+            if leaf_target_inlined(leaf) {
+                writeln!(c, "{}{{", ind).unwrap();
+                emit_dispatch_leaf_block(c, st, upper, leaf, sync, cont, &format!("{}  ", ind));
+                writeln!(c, "{}}}", ind).unwrap();
+            } else {
+                write!(c, "{}{{ ", ind).unwrap();
+                emit_leaf_inline(c, leaf, sync, cont);
+                writeln!(c, "}}").unwrap();
+            }
         }
         DispatchTree::Switch {
             depth,
@@ -772,7 +800,7 @@ fn emit_dispatch_tree(
             for (kind, sub) in arms {
                 let name = c_token_name(st, upper, *kind);
                 match sub {
-                    DispatchTree::Leaf(leaf) => {
+                    DispatchTree::Leaf(leaf) if !leaf_target_inlined(leaf) => {
                         write!(c, "{}case {}: {{ ", inner, name).unwrap();
                         emit_leaf_inline(c, leaf, sync, cont);
                         writeln!(c, "}} break;").unwrap();
@@ -784,18 +812,71 @@ fn emit_dispatch_tree(
                     }
                 }
             }
-            write!(c, "{}default: {{ ", inner).unwrap();
-            emit_leaf_inline(c, default, sync, cont);
-            writeln!(c, "}} break;").unwrap();
+            if leaf_target_inlined(default) {
+                writeln!(c, "{}default: {{", inner).unwrap();
+                emit_dispatch_leaf_block(c, st, upper, default, sync, cont, &format!("{}  ", inner));
+                writeln!(c, "{}}} break;", inner).unwrap();
+            } else {
+                write!(c, "{}default: {{ ", inner).unwrap();
+                emit_leaf_inline(c, default, sync, cont);
+                writeln!(c, "}} break;").unwrap();
+            }
             writeln!(c, "{}}}", ind).unwrap();
         }
     }
 }
 
-fn emit_leaf_inline(c: &mut String, leaf: &DispatchLeaf, sync: u32, cont: Option<u32>) {
+/// True if a Dispatch leaf is an `Arm` whose body has already been
+/// inlined into the op (`Body::Inline`). Such arms can't fit the
+/// single-line `emit_leaf_inline` form; the dispatch tree switches
+/// to the multi-line block form for them.
+fn leaf_target_inlined(leaf: &DispatchLeaf) -> bool {
+    matches!(leaf, DispatchLeaf::Arm(Body::Inline(_)))
+}
+
+/// Multi-line block-form leaf emission for arms whose body is inlined
+/// (the single-line `emit_leaf_inline` can't host a multi-op body).
+fn emit_dispatch_leaf_block(
+    c: &mut String,
+    st: &StateTable,
+    upper: &str,
+    leaf: &DispatchLeaf,
+    sync: u32,
+    cont: Option<u32>,
+    ind: &str,
+) {
     match (leaf, cont) {
-        (DispatchLeaf::Arm(t), Some(n)) => write!(c, "push_ret(p, {n}); cur = {t}; ").unwrap(),
-        (DispatchLeaf::Arm(t), None) => write!(c, "cur = {t}; ").unwrap(),
+        (DispatchLeaf::Arm(b), Some(n)) => {
+            writeln!(c, "{ind}push_ret(p, {n});").unwrap();
+            emit_body(c, st, upper, b);
+        }
+        (DispatchLeaf::Arm(b), None) => {
+            emit_body(c, st, upper, b);
+        }
+        (DispatchLeaf::Fallthrough, Some(n)) => writeln!(c, "{ind}cur = {n};").unwrap(),
+        (DispatchLeaf::Fallthrough, None) => writeln!(c, "{ind}cur = pop_ret(p);").unwrap(),
+        (DispatchLeaf::Error, Some(n)) => {
+            writeln!(c, "{ind}cur = {n};").unwrap();
+            writeln!(c, "{ind}error_here(p, \"unexpected token\");").unwrap();
+            writeln!(c, "{ind}recover_to(p, SYNC_{sync});").unwrap();
+        }
+        (DispatchLeaf::Error, None) => {
+            writeln!(c, "{ind}error_here(p, \"unexpected token\");").unwrap();
+            writeln!(c, "{ind}recover_to(p, SYNC_{sync});").unwrap();
+            writeln!(c, "{ind}cur = pop_ret(p);").unwrap();
+        }
+    }
+}
+
+fn emit_leaf_inline(c: &mut String, leaf: &DispatchLeaf, sync: u32, cont: Option<u32>) {
+    // Caller (emit_dispatch_tree) ensures any Arm here is `Body::State`
+    // (Body::Inline goes through the multi-line emit_dispatch_leaf_block).
+    match (leaf, cont) {
+        (DispatchLeaf::Arm(Body::State(t)), Some(n)) => {
+            write!(c, "push_ret(p, {n}); cur = {t}; ").unwrap()
+        }
+        (DispatchLeaf::Arm(Body::State(t)), None) => write!(c, "cur = {t}; ").unwrap(),
+        (DispatchLeaf::Arm(Body::Inline(_)), _) => unreachable!("inlined arm in inline-emit path"),
         (DispatchLeaf::Fallthrough, Some(n)) => write!(c, "cur = {n}; ").unwrap(),
         (DispatchLeaf::Fallthrough, None) => write!(c, "cur = pop_ret(p); ").unwrap(),
         (DispatchLeaf::Error, Some(n)) => write!(

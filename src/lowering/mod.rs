@@ -106,6 +106,18 @@ pub struct StateTable {
     pub entry_states: Vec<(String, StateId)>,
     /// Lookahead required to disambiguate every alternative (LL(k)).
     pub k: usize,
+    /// Static upper bound on the number of structural events one
+    /// `drive` invocation can push onto the parser's queue between two
+    /// yields, computed by [`max_event_burst`] after fuse runs. The
+    /// dispatch loop only yields between state bodies (not between
+    /// individual emits), so the bound is `max(events_per_state(s))`.
+    /// Backends emit this as a `QUEUE_CAP` const that the runtime
+    /// uses to pre-size the queue, so the success path never pays a
+    /// grow-and-copy. Error recovery (`recover_to` consuming garbage
+    /// until a sync token) can push more, in which case the queue
+    /// grows from heap. Pending skip tokens between structural events
+    /// also pile up dynamically and aren't included.
+    pub queue_cap: usize,
     /// The compiled lexer DFA.
     pub lexer_dfa: Vec<DfaState>,
 }
@@ -132,7 +144,10 @@ pub struct TokenInfo {
 /// States are small straight-line programs built from these ops; control
 /// flow within a state is explicit (`Jump`, `PushRet`/`Ret`) and inter-state
 /// flow is fall-through to the next numeric id.
-#[derive(Clone, Debug)]
+///
+/// `PartialEq` is derived so the [`fuse`](crate::lowering::fuse) fixpoint
+/// loop can detect when an iteration produced no change.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Op {
     /// Emit an `Enter` event for this rule-kind id.
     Enter(u16),
@@ -162,8 +177,11 @@ pub enum Op {
     Star {
         /// FIRST-set id the body opens with.
         first: FirstSetId,
-        /// Body of one iteration.
-        body: StateId,
+        /// Body of one iteration. Initially [`Body::State`]; the fuse
+        /// branch-inlining pass may move the target state's ops into a
+        /// [`Body::Inline`] when the target's only external reference
+        /// was this `body`. See [`Body`].
+        body: Body,
         /// What to do when the loop exits (lookahead misses `first`).
         /// `Some(state)` is the original lowering shape — `cur = state`.
         /// `None` is a tail call — `cur = ret()` directly. The
@@ -189,8 +207,8 @@ pub enum Op {
     Opt {
         /// FIRST-set id the body opens with.
         first: FirstSetId,
-        /// Body to call when taken.
-        body: StateId,
+        /// Body to call when taken. See [`Body`].
+        body: Body,
         /// Continuation. `Some(state)` is the original lowering shape
         /// — `push_ret(state); cur = body` on match, `cur = state` on
         /// miss. `None` is a tail call: `cur = body` on match (the
@@ -216,12 +234,53 @@ pub enum Op {
     },
 }
 
+/// The "where to call into" half of a branchy op (`Op::Opt`,
+/// `Op::Star`, [`DispatchLeaf::Arm`]).
+///
+/// Layout always emits [`Body::State`] — a normal state-id transition
+/// the dispatch loop bounces through. The fuse branch-inlining pass
+/// may rewrite that to [`Body::Inline`] when the target state had only
+/// one external reference (this op): the target's ops move *into* the
+/// op, and the now-orphan target state is dropped by `eliminate_dead`.
+///
+/// The codegens pattern-match: `State(s)` emits `cur = s;`,
+/// `Inline(ops)` recursively emits the inlined ops at the call site,
+/// saving the dispatch hop into a state that only one place ever
+/// reaches.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Body {
+    /// Transfer control to a separate state (and let the dispatch
+    /// loop pick it up on the next iteration).
+    State(StateId),
+    /// Run these ops directly inside the calling branch arm. The
+    /// final op is the inlined state's terminator (`Ret`/`Jump`/
+    /// another branchy op) and is responsible for the post-body
+    /// transition.
+    Inline(Vec<Op>),
+}
+
+impl Body {
+    /// True iff the body is still a [`Body::State`] — i.e. not yet
+    /// inlined. Convenience for the few sites that just want to know
+    /// whether a state-id is in play.
+    pub fn is_state(&self) -> bool {
+        matches!(self, Body::State(_))
+    }
+    /// The state id this body refers to, if it hasn't been inlined.
+    pub fn state(&self) -> Option<StateId> {
+        match self {
+            Body::State(s) => Some(*s),
+            Body::Inline(_) => None,
+        }
+    }
+}
+
 /// Terminal action at a leaf of a [`DispatchTree`].
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DispatchLeaf {
-    /// Take the arm whose body starts at this state id (push the
+    /// Take the arm whose body starts at this body (push the
     /// dispatch's `next` as the return target first).
-    Arm(StateId),
+    Arm(Body),
     /// No arm matched, but the dispatch is nullable — continue at the
     /// dispatch's `next` without emitting an error.
     Fallthrough,
@@ -237,7 +296,7 @@ pub enum DispatchLeaf {
 /// The flat shape maps cleanly onto nested `switch`/`match` statements in
 /// every target language. Built by [`build_dispatch_tree`] from a set of
 /// `(FIRST-set-id, target-state)` pairs.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DispatchTree {
     /// A terminal action: commit to an arm, fall through, or error.
     Leaf(DispatchLeaf),
@@ -293,7 +352,7 @@ fn build_trie(
     let mut terminal: Option<DispatchLeaf> = None;
     for entry in entries {
         if entry.0.len() == depth {
-            terminal = Some(DispatchLeaf::Arm(entry.1));
+            terminal = Some(DispatchLeaf::Arm(Body::State(entry.1)));
             break;
         }
         surviving.push(entry.clone());
@@ -316,7 +375,7 @@ fn build_trie(
 
     let arms: Vec<(u16, DispatchTree)> = by_kind
         .into_iter()
-        .map(|(k, subentries)| (k, build_trie(&subentries, depth + 1, node_default)))
+        .map(|(k, subentries)| (k, build_trie(&subentries, depth + 1, node_default.clone())))
         .collect();
 
     DispatchTree::Switch {
@@ -347,8 +406,71 @@ pub fn lower(ag: &AnalyzedGrammar) -> StateTable {
     let program = build::build(ag);
     let mut table = layout::layout(program, ag);
     fuse::fuse(&mut table);
+    table.queue_cap = max_event_burst(&table);
     mark_first_set_references(&mut table);
     table
+}
+
+/// Compute the maximum number of structural events that one state
+/// body can push onto the parser's queue when executed end-to-end.
+///
+/// The dispatch loop only yields between state bodies, so this is
+/// the per-yield queue burst on the success path. With branch
+/// inlining ([`fuse::inline_branch_targets`]) inlined `Body::Inline`
+/// ops execute as part of the calling body and therefore contribute
+/// to that body's burst — the recursion handles them.
+///
+/// `Body::State` transitions count as 0 here: the called state runs
+/// in a *different* dispatch iteration and contributes to its own
+/// burst, not ours. Skip tokens accumulating between structural
+/// events also aren't included — they're input-dependent.
+pub fn max_event_burst(table: &StateTable) -> usize {
+    table
+        .states
+        .values()
+        .map(|s| events_in_ops(&s.ops))
+        .max()
+        .unwrap_or(0)
+}
+
+fn events_in_ops(ops: &[Op]) -> usize {
+    ops.iter().map(events_in_op).sum()
+}
+
+fn events_in_op(op: &Op) -> usize {
+    match op {
+        Op::Enter(_) | Op::Exit(_) | Op::Expect { .. } => 1,
+        Op::PushRet(_) | Op::Jump(_) | Op::Ret => 0,
+        Op::Star { body, .. } | Op::Opt { body, .. } => events_in_body(body),
+        Op::Dispatch { tree, .. } => max_arm_events(tree),
+    }
+}
+
+fn events_in_body(body: &Body) -> usize {
+    match body {
+        Body::State(_) => 0,
+        Body::Inline(ops) => events_in_ops(ops),
+    }
+}
+
+fn max_arm_events(tree: &DispatchTree) -> usize {
+    fn arm(leaf: &DispatchLeaf) -> usize {
+        match leaf {
+            DispatchLeaf::Arm(b) => events_in_body(b),
+            // Fallthrough/Error transition out of the dispatch state —
+            // 0 events emitted in *this* state's body.
+            DispatchLeaf::Fallthrough | DispatchLeaf::Error => 0,
+        }
+    }
+    match tree {
+        DispatchTree::Leaf(l) => arm(l),
+        DispatchTree::Switch { arms, default, .. } => arm(default).max(
+            arms.iter()
+                .map(|(_, sub)| max_arm_events(sub))
+                .max()
+                .unwrap_or(0),
+        ),
+    }
 }
 
 /// Set [`FirstSet::has_references`] on every entry the runtime will
@@ -401,9 +523,16 @@ fn format_op(op: &Op) -> String {
         Op::PushRet(r) => format!("PushRet({})", r),
         Op::Jump(n) => format!("Jump({})", n),
         Op::Ret => "Ret".to_string(),
-        Op::Star { body, .. } => format!("Star -> {}", body),
-        Op::Opt { body, .. } => format!("Opt -> {}", body),
+        Op::Star { body, .. } => format!("Star -> {}", body_label(body)),
+        Op::Opt { body, .. } => format!("Opt -> {}", body_label(body)),
         Op::Dispatch { tree, .. } => format!("Dispatch[{}]", dispatch_tree_shape(tree)),
+    }
+}
+
+fn body_label(body: &Body) -> String {
+    match body {
+        Body::State(s) => s.to_string(),
+        Body::Inline(_) => "<inlined>".into(),
     }
 }
 

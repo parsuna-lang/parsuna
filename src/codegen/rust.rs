@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use crate::codegen::common::pascal;
 use crate::codegen::EmittedFile;
 use crate::lowering::lexer_dfa::{DfaState, START};
-use crate::lowering::{DispatchLeaf, DispatchTree, Op, StateTable};
+use crate::lowering::{Body, DispatchLeaf, DispatchTree, Op, StateTable};
 
 /// Per-backend arguments. Currently empty — kept as a struct (deriving
 /// [`clap::Args`]) so the CLI can flatten any future flags in directly
@@ -444,7 +444,8 @@ fn emit_op(s: &mut String, st: &StateTable, op: &Op, ind: &str) {
                 *first,
                 ind,
                 |s, ind| {
-                    writeln!(s, "{}p.push_ret({}); cur = {};", ind, head, body).unwrap();
+                    writeln!(s, "{}p.push_ret({});", ind, head).unwrap();
+                    emit_body(s, st, body, ind);
                 },
                 |s, ind| match cont {
                     Some(n) => writeln!(s, "{}cur = {};", ind, n).unwrap(),
@@ -458,15 +459,11 @@ fn emit_op(s: &mut String, st: &StateTable, op: &Op, ind: &str) {
                 st,
                 *first,
                 ind,
-                |s, ind| match cont {
-                    Some(n) => {
-                        writeln!(s, "{}p.push_ret({}); cur = {};", ind, n, body).unwrap();
+                |s, ind| {
+                    if let Some(n) = cont {
+                        writeln!(s, "{}p.push_ret({});", ind, n).unwrap();
                     }
-                    None => {
-                        // Tail call: body's trailing Ret pops our caller
-                        // directly because the trampoline was elided.
-                        writeln!(s, "{}cur = {};", ind, body).unwrap();
-                    }
+                    emit_body(s, st, body, ind);
                 },
                 |s, ind| match cont {
                     Some(n) => writeln!(s, "{}cur = {};", ind, n).unwrap(),
@@ -476,6 +473,22 @@ fn emit_op(s: &mut String, st: &StateTable, op: &Op, ind: &str) {
         }
         Op::Dispatch { tree, sync, cont } => {
             emit_dispatch_tree(s, st, tree, *sync, *cont, ind);
+        }
+    }
+}
+
+/// Emit a body's transition: `cur = N;` for [`Body::State`], or the
+/// body's ops emitted recursively for [`Body::Inline`]. The inlined
+/// ops include their own terminator (`Ret`/`Jump`/another branchy
+/// op), so the recursive emission settles the post-body transition
+/// without extra glue.
+fn emit_body(s: &mut String, st: &StateTable, body: &Body, ind: &str) {
+    match body {
+        Body::State(t) => writeln!(s, "{}cur = {};", ind, t).unwrap(),
+        Body::Inline(ops) => {
+            for op in ops {
+                emit_op(s, st, op, ind);
+            }
         }
     }
 }
@@ -516,7 +529,7 @@ fn emit_dispatch_tree(
     ind: &str,
 ) {
     match tree {
-        DispatchTree::Leaf(leaf) => emit_dispatch_leaf(s, leaf, sync, cont, ind),
+        DispatchTree::Leaf(leaf) => emit_dispatch_leaf(s, st, leaf, sync, cont, ind),
         DispatchTree::Switch {
             depth,
             arms,
@@ -528,7 +541,7 @@ fn emit_dispatch_tree(
             for (kind, sub) in arms {
                 let pat = format!("Some({})", token_variant(st, *kind));
                 match sub {
-                    DispatchTree::Leaf(leaf) => {
+                    DispatchTree::Leaf(leaf) if !leaf_target_inlined(leaf) => {
                         write!(s, "{}{} => {{ ", inner, pat).unwrap();
                         emit_leaf_inline(s, leaf, sync, cont);
                         writeln!(s, "}}").unwrap();
@@ -540,21 +553,35 @@ fn emit_dispatch_tree(
                     }
                 }
             }
-            write!(s, "{}_ => {{ ", inner).unwrap();
-            emit_leaf_inline(s, default, sync, cont);
-            writeln!(s, "}}").unwrap();
+            if leaf_target_inlined(default) {
+                writeln!(s, "{}_ => {{", inner).unwrap();
+                emit_dispatch_leaf(s, st, default, sync, cont, &inner2);
+                writeln!(s, "{}}}", inner).unwrap();
+            } else {
+                write!(s, "{}_ => {{ ", inner).unwrap();
+                emit_leaf_inline(s, default, sync, cont);
+                writeln!(s, "}}").unwrap();
+            }
             writeln!(s, "{}}}", ind).unwrap();
         }
     }
 }
 
-fn emit_dispatch_leaf(s: &mut String, leaf: &DispatchLeaf, sync: u32, cont: Option<u32>, ind: &str) {
+/// True if the leaf carries an inlined body — those can't fit in
+/// the single-line `emit_leaf_inline` form, so the dispatch tree
+/// switches to the multi-line block form for them.
+fn leaf_target_inlined(leaf: &DispatchLeaf) -> bool {
+    matches!(leaf, DispatchLeaf::Arm(Body::Inline(_)))
+}
+
+fn emit_dispatch_leaf(s: &mut String, st: &StateTable, leaf: &DispatchLeaf, sync: u32, cont: Option<u32>, ind: &str) {
     match (leaf, cont) {
-        (DispatchLeaf::Arm(t), Some(n)) => {
-            writeln!(s, "{}p.push_ret({}); cur = {};", ind, n, t).unwrap();
+        (DispatchLeaf::Arm(b), Some(n)) => {
+            writeln!(s, "{}p.push_ret({});", ind, n).unwrap();
+            emit_body(s, st, b, ind);
         }
-        (DispatchLeaf::Arm(t), None) => {
-            writeln!(s, "{}cur = {};", ind, t).unwrap();
+        (DispatchLeaf::Arm(b), None) => {
+            emit_body(s, st, b, ind);
         }
         (DispatchLeaf::Fallthrough, Some(n)) => {
             writeln!(s, "{}cur = {};", ind, n).unwrap();
@@ -576,9 +603,12 @@ fn emit_dispatch_leaf(s: &mut String, leaf: &DispatchLeaf, sync: u32, cont: Opti
 }
 
 fn emit_leaf_inline(s: &mut String, leaf: &DispatchLeaf, sync: u32, cont: Option<u32>) {
+    // Caller (emit_dispatch_tree) routes inlined arms to the multi-line
+    // emit_dispatch_leaf instead.
     match (leaf, cont) {
-        (DispatchLeaf::Arm(t), Some(n)) => write!(s, "p.push_ret({}); cur = {}; ", n, t).unwrap(),
-        (DispatchLeaf::Arm(t), None) => write!(s, "cur = {}; ", t).unwrap(),
+        (DispatchLeaf::Arm(Body::State(t)), Some(n)) => write!(s, "p.push_ret({}); cur = {}; ", n, t).unwrap(),
+        (DispatchLeaf::Arm(Body::State(t)), None) => write!(s, "cur = {}; ", t).unwrap(),
+        (DispatchLeaf::Arm(Body::Inline(_)), _) => unreachable!("inlined arm in inline-emit path"),
         (DispatchLeaf::Fallthrough, Some(n)) => write!(s, "cur = {}; ", n).unwrap(),
         (DispatchLeaf::Fallthrough, None) => write!(s, "cur = p.ret(); ").unwrap(),
         (DispatchLeaf::Error, Some(n)) => write!(
@@ -609,6 +639,7 @@ fn emit_step(s: &mut String, st: &StateTable) {
     writeln!(s, "    type TokenKind = TokenKind;").unwrap();
     writeln!(s, "    type RuleKind = RuleKind;").unwrap();
     writeln!(s, "    const HAS_SKIPS: bool = {};", has_skips).unwrap();
+    writeln!(s, "    const QUEUE_CAP: usize = {};", st.queue_cap).unwrap();
     writeln!(s).unwrap();
     writeln!(s, "    #[inline(always)]").unwrap();
     writeln!(s, "    fn is_skip(kind: TokenKind) -> bool {{").unwrap();

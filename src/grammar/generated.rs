@@ -433,6 +433,7 @@ impl parsuna_rt::Drive<K> for Grammar {
     type TokenKind = TokenKind;
     type RuleKind = RuleKind;
     const HAS_SKIPS: bool = true;
+    const QUEUE_CAP: usize = 5;
 
     #[inline(always)]
     fn is_skip(kind: TokenKind) -> bool {
@@ -448,7 +449,8 @@ impl parsuna_rt::Drive<K> for Grammar {
                     p.enter(RuleKind::File);
                     match p.look(0).kind {
                         Some(TokenKind::Ident) => {
-                            p.push_ret(2); cur = 5;
+                            p.push_ret(2);
+                            cur = 5;
                         }
                         _ => {
                             cur = 3;
@@ -458,7 +460,8 @@ impl parsuna_rt::Drive<K> for Grammar {
                 2 => { // file:star
                     match p.look(0).kind {
                         Some(TokenKind::Ident) => {
-                            p.push_ret(2); cur = 5;
+                            p.push_ret(2);
+                            cur = 5;
                         }
                         _ => {
                             cur = 3;
@@ -479,7 +482,8 @@ impl parsuna_rt::Drive<K> for Grammar {
                     p.enter(RuleKind::SeqExpr);
                     match p.look(0).kind {
                         Some(TokenKind::Lparen) | Some(TokenKind::Dot) | Some(TokenKind::Bang) | Some(TokenKind::String) | Some(TokenKind::Char) | Some(TokenKind::Ident) => {
-                            p.push_ret(40); cur = 43;
+                            p.push_ret(40);
+                            cur = 43;
                         }
                         _ => {
                             cur = 41;
@@ -496,7 +500,8 @@ impl parsuna_rt::Drive<K> for Grammar {
                     p.enter(RuleKind::SeqExpr);
                     match p.look(0).kind {
                         Some(TokenKind::Lparen) | Some(TokenKind::Dot) | Some(TokenKind::Bang) | Some(TokenKind::String) | Some(TokenKind::Char) | Some(TokenKind::Ident) => {
-                            p.push_ret(40); cur = 43;
+                            p.push_ret(40);
+                            cur = 43;
                         }
                         _ => {
                             cur = 41;
@@ -506,7 +511,14 @@ impl parsuna_rt::Drive<K> for Grammar {
                 11 => { // decl:opt
                     match p.look(0).kind {
                         Some(TokenKind::Lbrack) => {
-                            p.push_ret(12); cur = 15;
+                            p.push_ret(12);
+                            p.enter(RuleKind::Annots);
+                            p.expect(TokenKind::Lbrack, SYNC_1, "expected LBRACK");
+                            p.push_ret(20);
+                            p.enter(RuleKind::Annot);
+                            p.expect(TokenKind::Ident, SYNC_2, "expected IDENT");
+                            p.exit(RuleKind::Annot);
+                            cur = p.ret();
                         }
                         _ => {
                             cur = 12;
@@ -516,15 +528,6 @@ impl parsuna_rt::Drive<K> for Grammar {
                 12 => { // decl:expect:SEMI
                     p.expect(TokenKind::Semi, SYNC_1, "expected SEMI");
                     p.exit(RuleKind::Decl);
-                    cur = p.ret();
-                }
-                15 => { // decl:opt-body:call:annots
-                    p.enter(RuleKind::Annots);
-                    p.expect(TokenKind::Lbrack, SYNC_1, "expected LBRACK");
-                    p.push_ret(20);
-                    p.enter(RuleKind::Annot);
-                    p.expect(TokenKind::Ident, SYNC_2, "expected IDENT");
-                    p.exit(RuleKind::Annot);
                     cur = p.ret();
                 }
                 17 => { // annots:enter
@@ -539,7 +542,12 @@ impl parsuna_rt::Drive<K> for Grammar {
                 20 => { // annots:star
                     match p.look(0).kind {
                         Some(TokenKind::Comma) => {
-                            p.push_ret(20); cur = 24;
+                            p.push_ret(20);
+                            p.expect(TokenKind::Comma, SYNC_1, "expected COMMA");
+                            p.enter(RuleKind::Annot);
+                            p.expect(TokenKind::Ident, SYNC_2, "expected IDENT");
+                            p.exit(RuleKind::Annot);
+                            cur = p.ret();
                         }
                         _ => {
                             cur = 21;
@@ -549,13 +557,6 @@ impl parsuna_rt::Drive<K> for Grammar {
                 21 => { // annots:expect:RBRACK
                     p.expect(TokenKind::Rbrack, SYNC_1, "expected RBRACK");
                     p.exit(RuleKind::Annots);
-                    cur = p.ret();
-                }
-                24 => { // annots:star-body:expect:COMMA
-                    p.expect(TokenKind::Comma, SYNC_1, "expected COMMA");
-                    p.enter(RuleKind::Annot);
-                    p.expect(TokenKind::Ident, SYNC_2, "expected IDENT");
-                    p.exit(RuleKind::Annot);
                     cur = p.ret();
                 }
                 27 => { // annot:enter
@@ -570,7 +571,8 @@ impl parsuna_rt::Drive<K> for Grammar {
                     p.enter(RuleKind::SeqExpr);
                     match p.look(0).kind {
                         Some(TokenKind::Lparen) | Some(TokenKind::Dot) | Some(TokenKind::Bang) | Some(TokenKind::String) | Some(TokenKind::Char) | Some(TokenKind::Ident) => {
-                            p.push_ret(40); cur = 43;
+                            p.push_ret(40);
+                            cur = 43;
                         }
                         _ => {
                             cur = 41;
@@ -580,7 +582,18 @@ impl parsuna_rt::Drive<K> for Grammar {
                 33 => { // alt_expr:star
                     match p.look(0).kind {
                         Some(TokenKind::Pipe) => {
-                            p.push_ret(33); cur = 36;
+                            p.push_ret(33);
+                            p.expect(TokenKind::Pipe, SYNC_3, "expected PIPE");
+                            p.enter(RuleKind::SeqExpr);
+                            match p.look(0).kind {
+                                Some(TokenKind::Lparen) | Some(TokenKind::Dot) | Some(TokenKind::Bang) | Some(TokenKind::String) | Some(TokenKind::Char) | Some(TokenKind::Ident) => {
+                                    p.push_ret(40);
+                                    cur = 43;
+                                }
+                                _ => {
+                                    cur = 41;
+                                }
+                            }
                         }
                         _ => {
                             cur = 34;
@@ -591,23 +604,12 @@ impl parsuna_rt::Drive<K> for Grammar {
                     p.exit(RuleKind::AltExpr);
                     cur = p.ret();
                 }
-                36 => { // alt_expr:star-body:expect:PIPE
-                    p.expect(TokenKind::Pipe, SYNC_3, "expected PIPE");
-                    p.enter(RuleKind::SeqExpr);
-                    match p.look(0).kind {
-                        Some(TokenKind::Lparen) | Some(TokenKind::Dot) | Some(TokenKind::Bang) | Some(TokenKind::String) | Some(TokenKind::Char) | Some(TokenKind::Ident) => {
-                            p.push_ret(40); cur = 43;
-                        }
-                        _ => {
-                            cur = 41;
-                        }
-                    }
-                }
                 39 => { // seq_expr:enter
                     p.enter(RuleKind::SeqExpr);
                     match p.look(0).kind {
                         Some(TokenKind::Lparen) | Some(TokenKind::Dot) | Some(TokenKind::Bang) | Some(TokenKind::String) | Some(TokenKind::Char) | Some(TokenKind::Ident) => {
-                            p.push_ret(40); cur = 43;
+                            p.push_ret(40);
+                            cur = 43;
                         }
                         _ => {
                             cur = 41;
@@ -617,7 +619,8 @@ impl parsuna_rt::Drive<K> for Grammar {
                 40 => { // seq_expr:star
                     match p.look(0).kind {
                         Some(TokenKind::Lparen) | Some(TokenKind::Dot) | Some(TokenKind::Bang) | Some(TokenKind::String) | Some(TokenKind::Char) | Some(TokenKind::Ident) => {
-                            p.push_ret(40); cur = 43;
+                            p.push_ret(40);
+                            cur = 43;
                         }
                         _ => {
                             cur = 41;
@@ -631,7 +634,23 @@ impl parsuna_rt::Drive<K> for Grammar {
                 43 => { // seq_expr:star-body:call:_postfix_expr
                     p.push_ret(46);
                     match p.look(0).kind {
-                        Some(TokenKind::Lparen) => { cur = 60; }
+                        Some(TokenKind::Lparen) => {
+                            p.enter(RuleKind::Group);
+                            p.expect(TokenKind::Lparen, SYNC_3, "expected LPAREN");
+                            p.push_ret(67);
+                            p.enter(RuleKind::AltExpr);
+                            p.push_ret(33);
+                            p.enter(RuleKind::SeqExpr);
+                            match p.look(0).kind {
+                                Some(TokenKind::Lparen) | Some(TokenKind::Dot) | Some(TokenKind::Bang) | Some(TokenKind::String) | Some(TokenKind::Char) | Some(TokenKind::Ident) => {
+                                    p.push_ret(40);
+                                    cur = 43;
+                                }
+                                _ => {
+                                    cur = 41;
+                                }
+                            }
+                        }
                         Some(TokenKind::Dot) => { cur = 62; }
                         Some(TokenKind::Bang) => { cur = 62; }
                         Some(TokenKind::String) => { cur = 62; }
@@ -643,19 +662,17 @@ impl parsuna_rt::Drive<K> for Grammar {
                 46 => { // _postfix_expr:star
                     match p.look(0).kind {
                         Some(TokenKind::Question) | Some(TokenKind::Star) | Some(TokenKind::Plus) => {
-                            p.push_ret(46); cur = 48;
+                            p.push_ret(46);
+                            match p.look(0).kind {
+                                Some(TokenKind::Question) => { cur = 52; }
+                                Some(TokenKind::Star) => { cur = 54; }
+                                Some(TokenKind::Plus) => { cur = 56; }
+                                _ => { p.error_here("unexpected token"); p.recover_to(SYNC_3); cur = p.ret(); }
+                            }
                         }
                         _ => {
                             cur = p.ret();
                         }
-                    }
-                }
-                48 => { // _postfix_expr:star-body:call:_quant_op
-                    match p.look(0).kind {
-                        Some(TokenKind::Question) => { cur = 52; }
-                        Some(TokenKind::Star) => { cur = 54; }
-                        Some(TokenKind::Plus) => { cur = 56; }
-                        _ => { p.error_here("unexpected token"); p.recover_to(SYNC_3); cur = p.ret(); }
                     }
                 }
                 52 => { // _quant_op:alt0:expect:QUESTION
@@ -669,22 +686,6 @@ impl parsuna_rt::Drive<K> for Grammar {
                 56 => { // _quant_op:alt2:expect:PLUS
                     p.expect(TokenKind::Plus, SYNC_3, "expected PLUS");
                     cur = p.ret();
-                }
-                60 => { // _primary_expr:alt0:call:group
-                    p.enter(RuleKind::Group);
-                    p.expect(TokenKind::Lparen, SYNC_3, "expected LPAREN");
-                    p.push_ret(67);
-                    p.enter(RuleKind::AltExpr);
-                    p.push_ret(33);
-                    p.enter(RuleKind::SeqExpr);
-                    match p.look(0).kind {
-                        Some(TokenKind::Lparen) | Some(TokenKind::Dot) | Some(TokenKind::Bang) | Some(TokenKind::String) | Some(TokenKind::Char) | Some(TokenKind::Ident) => {
-                            p.push_ret(40); cur = 43;
-                        }
-                        _ => {
-                            cur = 41;
-                        }
-                    }
                 }
                 62 => { // _primary_expr:alt1:call:atom
                     p.enter(RuleKind::Atom);
@@ -706,7 +707,8 @@ impl parsuna_rt::Drive<K> for Grammar {
                     p.enter(RuleKind::SeqExpr);
                     match p.look(0).kind {
                         Some(TokenKind::Lparen) | Some(TokenKind::Dot) | Some(TokenKind::Bang) | Some(TokenKind::String) | Some(TokenKind::Char) | Some(TokenKind::Ident) => {
-                            p.push_ret(40); cur = 43;
+                            p.push_ret(40);
+                            cur = 43;
                         }
                         _ => {
                             cur = 41;
@@ -775,7 +777,9 @@ impl parsuna_rt::Drive<K> for Grammar {
                     p.expect(TokenKind::Char, SYNC_3, "expected CHAR");
                     match p.look(0).kind {
                         Some(TokenKind::Dotdot) => {
-                            cur = 91;
+                            p.expect(TokenKind::Dotdot, SYNC_3, "expected DOTDOT");
+                            p.expect(TokenKind::Char, SYNC_3, "expected CHAR");
+                            cur = p.ret();
                         }
                         _ => {
                             cur = p.ret();
@@ -784,11 +788,6 @@ impl parsuna_rt::Drive<K> for Grammar {
                 }
                 89 => { // char_primary:alt1:expect:DOT
                     p.expect(TokenKind::Dot, SYNC_3, "expected DOT");
-                    cur = p.ret();
-                }
-                91 => { // char_primary:alt0:opt-body:expect:DOTDOT
-                    p.expect(TokenKind::Dotdot, SYNC_3, "expected DOTDOT");
-                    p.expect(TokenKind::Char, SYNC_3, "expected CHAR");
                     cur = p.ret();
                 }
                 94 => { // neg_class:enter
@@ -826,7 +825,14 @@ impl parsuna_rt::Drive<K> for Grammar {
                 103 => { // neg_class:alt1:star
                     match p.look(0).kind {
                         Some(TokenKind::Pipe) => {
-                            p.push_ret(103); cur = 106;
+                            p.push_ret(103);
+                            p.expect(TokenKind::Pipe, SYNC_3, "expected PIPE");
+                            p.enter(RuleKind::CharPrimary);
+                            match p.look(0).kind {
+                                Some(TokenKind::Dot) => { p.push_ret(84); cur = 89; }
+                                Some(TokenKind::Char) => { p.push_ret(84); cur = 86; }
+                                _ => { cur = 84; p.error_here("unexpected token"); p.recover_to(SYNC_3); }
+                            }
                         }
                         _ => {
                             cur = 104;
@@ -836,15 +842,6 @@ impl parsuna_rt::Drive<K> for Grammar {
                 104 => { // neg_class:alt1:expect:RPAREN
                     p.expect(TokenKind::Rparen, SYNC_3, "expected RPAREN");
                     cur = p.ret();
-                }
-                106 => { // neg_class:alt1:star-body:expect:PIPE
-                    p.expect(TokenKind::Pipe, SYNC_3, "expected PIPE");
-                    p.enter(RuleKind::CharPrimary);
-                    match p.look(0).kind {
-                        Some(TokenKind::Dot) => { p.push_ret(84); cur = 89; }
-                        Some(TokenKind::Char) => { p.push_ret(84); cur = 86; }
-                        _ => { cur = 84; p.error_here("unexpected token"); p.recover_to(SYNC_3); }
-                    }
                 }
                 _ => unreachable!("unknown state"),
             }

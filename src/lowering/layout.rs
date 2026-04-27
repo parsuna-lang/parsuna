@@ -97,6 +97,8 @@ pub fn layout(prog: Program, ag: &AnalyzedGrammar) -> StateTable {
         states,
         entry_states,
         k: ag.k,
+        // Filled in by lower() after fuse via max_event_burst.
+        queue_cap: 0,
         lexer_dfa,
     }
 }
@@ -184,7 +186,7 @@ fn lower_op(
         ],
         Op::Opt { first, body } => vec![StateOp::Opt {
             first: *first,
-            body: resolve(body, entry, rules),
+            body: super::Body::State(resolve(body, entry, rules)),
             // Layout always emits the push-and-jump shape. The fuse
             // tail-call pass rewrites this to `None` when `fall`
             // turns out to be a pure-`Ret` trampoline.
@@ -192,7 +194,7 @@ fn lower_op(
         }],
         Op::Star { first, body } => vec![StateOp::Star {
             first: *first,
-            body: resolve(body, entry, rules),
+            body: super::Body::State(resolve(body, entry, rules)),
             cont: Some(fall),
             // Loop-head defaults to the state we're being placed in.
             // If the fuse pass later splices this Star elsewhere, the
