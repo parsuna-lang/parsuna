@@ -131,10 +131,26 @@ statements in the target language. The mapping is direct:
 ``Ret``
   ``parser.state = parser.ret()``.
 
-``Star { first, body, next }`` / ``Opt { first, body, next }``
-  A predicated branch: on lookahead match, push the appropriate
-  return state and jump into ``body``; on miss, jump to ``next``.
-  The form depends on ``state_table.k``:
+``Star { first, body, cont, head }`` / ``Opt { first, body, cont }``
+  A predicated branch. The lookahead test is the same in both ops;
+  the match-path push and the miss-path transfer differ slightly:
+
+  * ``Star`` match path: ``parser.push_ret(head); cur = body``. The
+    ``head`` push is what makes the body return back to the
+    loop-condition state for the next iteration.
+  * ``Opt`` match path: depends on ``cont``.
+
+  ``cont`` is ``Some(state)`` for the original push-and-jump shape
+  or ``None`` after :ref:`tail-call elimination
+  <tail-call-elimination>` — the codegen pattern-matches:
+
+  * ``Some(s)`` — ``Opt`` match emits ``parser.push_ret(s); cur =
+    body``; both ops' miss path emits ``cur = s``.
+  * ``None`` — ``Opt`` match emits ``cur = body`` (no push, the
+    body's trailing ``Ret`` returns to *our* caller); both ops'
+    miss path emits ``cur = parser.ret()``.
+
+  The form of the lookahead test depends on ``state_table.k``:
 
   * ``k = 1`` — the FIRST set is inlined into a ``match`` arm
     pattern (one alternative per token kind it accepts). No
@@ -142,12 +158,19 @@ statements in the target language. The mapping is direct:
   * ``k > 1`` — emits ``parser.matches_first(FIRST_N)``, the
     only place the FIRST intern pool is consulted at runtime.
 
-``Dispatch { tree, sync, next }``
+``Dispatch { tree, sync, cont }``
   A nested ``switch``. Each ``DispatchTree::Switch`` becomes one
   level of ``switch (parser.look(depth).kind)``; each ``Leaf``
-  becomes an action — take an arm (push ``next``, jump to the arm's
-  body), fall through to ``next``, or ``error+recover(sync)``. The
-  trie structure is what lets a k-token lookahead compile to k
+  becomes an action whose form depends on ``cont``:
+
+  * ``Some(s)`` — ``Arm`` leaves emit ``parser.push_ret(s); cur =
+    arm_body``; ``Fallthrough`` emits ``cur = s``; ``Error`` emits
+    ``cur = s; error+recover(sync)``.
+  * ``None`` — ``Arm`` leaves emit ``cur = arm_body`` (no push);
+    ``Fallthrough`` emits ``cur = parser.ret()``; ``Error`` runs
+    the recovery and then emits ``cur = parser.ret()``.
+
+  The trie structure is what lets a k-token lookahead compile to k
   nested switches rather than a linear scan. ``Dispatch`` consumes
   its FIRST sets at lowering time when the tree is built; the
   emitted switch arms carry concrete token kinds, so no

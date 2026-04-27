@@ -145,17 +145,25 @@ Each state is a small straight-line program over these ops:
 ``Ret``
   Pop the top return address (or terminate if the stack is empty).
 
-``Star { first, body, next }``
-  While the lookahead matches ``first``, call ``body`` and re-enter
-  this state. Otherwise fall through to ``next``.
+``Star { first, body, cont, head }``
+  While the lookahead matches ``first``, push ``head`` (the loop-back
+  state, normally the state hosting this op) and call ``body``.
+  Otherwise transfer to ``cont``: if ``Some(s)``, ``cur = s``; if
+  ``None``, ``cur = ret()`` directly — see :ref:`tail-call-elimination`.
 
-``Opt { first, body, next }``
-  If the lookahead matches ``first``, call ``body`` once and
-  continue at ``next``. Otherwise skip straight to ``next``.
+``Opt { first, body, cont }``
+  If the lookahead matches ``first``, push the continuation and call
+  ``body``; otherwise transfer to it directly. ``cont`` is
+  ``Some(state)`` for the original push-and-jump shape, or ``None``
+  for a tail call (``cur = body`` on match, ``cur = ret()`` on miss).
 
-``Dispatch { tree, sync, next }``
+``Dispatch { tree, sync, cont }``
   Pick one ``Alt`` arm using a ``DispatchTree`` over up to ``k``
-  tokens of lookahead, or recover via ``sync`` on no match.
+  tokens of lookahead, or recover via ``sync`` on no match. ``cont``
+  carries the same encoding as ``Opt``: ``Some(state)`` means each
+  arm pushes that state before jumping to its body and the
+  ``Fallthrough``/``Error`` paths jump to it; ``None`` means tail
+  call across the board.
 
 ``DispatchTree`` is a flat decision tree: ``Leaf(action)`` or
 ``Switch { depth, arms, default }``. Each ``Switch`` inspects
@@ -239,8 +247,11 @@ Steps:
      are followed by an explicit ``Jump(fall)`` so each state has a
      visible exit.
    * A ``Call { target }`` becomes ``PushRet(fall); Jump(resolve(target))``.
-   * Branchy ops (``Opt``, ``Star``, ``Dispatch``) encode ``next``
-     directly inside the op and do not need a trailing jump.
+   * Branchy ops (``Opt``, ``Star``, ``Dispatch``) encode the
+     fall-through inside the op (``cont``, initially
+     ``Some(fall)``) and do not need a trailing jump. The
+     :ref:`tail-call-elimination` pass may later rewrite ``cont`` to
+     ``None``.
 
 4. **Dispatch-tree construction.** The block-level ``Op::Dispatch``
    carries a flat list of ``(first_set_id, target)`` arms. Layout
@@ -261,20 +272,29 @@ Sub-pass 3c — Fuse
 
 File: ``src/lowering/fuse.rs``.
 
-Fuse performs two small but important clean-ups:
+Fuse runs three small clean-ups in order:
 
 * **Jump-chain splicing.** A state whose last op is ``Jump(T)`` can
   often absorb ``T``'s ops directly, turning ``A → B → C → D`` into
   a single ``A``. The trailing ``Jump`` is popped and ``T``'s ops are
-  appended in its place. Splicing stops only when ``T``'s first op is
-  branchy (``Dispatch``, ``Opt``, or ``Star``) — those states are
-  usually shared entry points and inlining them would duplicate the
-  control-flow structure — otherwise any successor is fair game, so
-  ``Ret``, ``Enter``, ``Exit``, ``Expect``, and ``PushRet`` all get
-  absorbed when they lead a target state. A visited-set guards
-  against jump chains that loop back on themselves, and a
-  ``DEFAULT_MAX_DEPTH`` bound limits how many successors a single
-  splice absorbs.
+  appended in its place. Two splice regimes:
+
+  - **Single-predecessor splice.** ``T`` is referenced from exactly
+    one place (this very ``Jump``). Inlining moves ``T``'s ops into
+    the predecessor and leaves ``T`` dead, so dead-state elimination
+    drops it. Pure code motion: unbounded depth, allowed even when
+    ``T``'s first op is branchy because no other caller depends on a
+    shared dispatch entry.
+  - **Multi-predecessor splice.** ``T`` has other callers, so
+    inlining duplicates its ops at this call site while keeping the
+    original. Bounded by ``DUPLICATION_BUDGET`` (currently ``6``) and
+    gated to non-branchy first ops to avoid splintering a shared
+    ``Dispatch``/``Opt``/``Star`` entry across callers.
+
+  Reference counting is *external* — a state's self-references
+  (e.g. an ``Op::Star`` whose ``head`` points back to its containing
+  state) don't pin it in place. A visited-set guards against jump
+  chains that loop back on themselves.
 
   One consequence worth calling out: the ``[PushRet(fall),
   Jump(callee)]`` pair that ``Call`` layouts into is a normal splice
@@ -282,10 +302,68 @@ Fuse performs two small but important clean-ups:
   and the callee's leading ops are pasted directly after the
   ``PushRet``. The return address still sits on the stack before any
   of the absorbed ops run, so the semantics are unchanged.
+
+* **Tail-call elimination.** See :ref:`tail-call-elimination` below
+  for the rewrite that drops ``PushRet``\ s and rewires
+  ``Opt``/``Dispatch``/``Star`` continuations whose target is a
+  pure-``Ret`` trampoline.
+
 * **Dead-state elimination.** BFS from the public entry points,
   following every reachable target (``Jump``, ``PushRet``,
-  ``Opt.body``, ``Opt.next``, every leaf of every ``DispatchTree``).
-  Any state not reached is removed from the table.
+  ``Opt.body``, ``Opt.cont`` *when ``Some``*, every leaf of every
+  ``DispatchTree``, ``Star.body``/``Star.cont``/``Star.head``). Any
+  state not reached is removed from the table.
+
+.. _tail-call-elimination:
+
+Tail-call elimination
+~~~~~~~~~~~~~~~~~~~~~
+
+Splicing tends to leave a state whose ops are exactly ``[Op::Ret]``.
+Such a *trampoline* state does nothing observable — when reached, it
+pops the next frame off the return stack — but it still costs a
+dispatch loop iteration each time control bounces through it.
+Eliminating the push that lands on a trampoline lets the called
+code's trailing ``Ret`` pop the caller's continuation directly.
+
+Four patterns get optimised, all with the same justification:
+
+1. **Explicit ``Op::PushRet(B)``** where ``B = [Op::Ret]`` — the
+   push is dropped outright. Typical post-splice shape:
+
+   .. code-block:: text
+
+      state A: [PushRet(B), Enter(R), Expect(...), Jump(C)]
+      state B: [Ret]
+
+2. **``Op::Opt`` whose ``cont`` is ``[Op::Ret]``** — the codegen
+   would have emitted ``push_ret(cont); cur = body`` on match and
+   ``cur = cont`` on miss. After this pass ``cont`` is ``None``;
+   backends emit ``cur = body`` (no push) on match and ``cur =
+   ret()`` on miss.
+3. **``Op::Dispatch`` whose ``cont`` is ``[Op::Ret]``** — same
+   shape as ``Opt``, applied across every ``Arm`` leaf and the
+   ``Fallthrough`` / post-recovery ``Error`` paths.
+4. **``Op::Star`` whose ``cont`` is ``[Op::Ret]``** — only the
+   miss / fall-through path is rewritten. ``Star``'s match path
+   pushes ``head`` (the loop-back state holding this very ``Star``
+   op), which is therefore never a pure-``Ret`` trampoline. By the
+   time the loop misses, every iteration has already pushed *and*
+   popped its ``head`` frame, so the stack is back to whatever was
+   there when the loop was entered — a direct ``ret()`` lands on
+   the same frame the trampoline-then-ret bounce would have.
+
+Safety:
+
+* The trampoline state must be exactly ``[Op::Ret]``. ``Enter`` /
+  ``Exit`` / ``Expect`` are observable and can't be skipped.
+* Entry states are never optimised away — they must remain
+  callable from outside the dispatch even if their body has been
+  spliced down to a single ``Ret``.
+
+Once ``cont`` flips to ``None``, dead-state elimination's
+reachability walk no longer follows the field, so the trampoline
+state goes unreferenced and is removed on the same pass.
 
 Sub-pass 3d — Mark FIRST-set references
 ---------------------------------------
@@ -331,7 +409,9 @@ A few design notes that matter when reading the source:
   construction would obscure the control-flow shape the tree is
   built around; splicing after eliminates the single-op, single-exit
   states that the naïve layout produces so the emitted ``switch``
-  has fewer labels without changing the semantics.
+  has fewer labels without changing the semantics. Tail-call
+  elimination then runs on the spliced output — splicing is what
+  exposes most of the ``[Op::Ret]`` trampolines TCE removes.
 
 What comes out
 --------------
