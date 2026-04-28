@@ -100,7 +100,7 @@ pub fn layout(prog: Program, ag: &AnalyzedGrammar, dopts: DfaOpts) -> StateTable
         entry_states,
         k: ag.k,
         // Filled in by lower() after fuse via max_event_burst.
-        queue_size_hint: 0,
+        queue_cap: 0,
         lexer_dfa,
     }
 }

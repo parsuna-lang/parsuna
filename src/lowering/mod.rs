@@ -106,26 +106,19 @@ pub struct StateTable {
     pub entry_states: Vec<(String, StateId)>,
     /// Lookahead required to disambiguate every alternative (LL(k)).
     pub k: usize,
-    /// Sizing hint for the runtime event queue: the longest burst of
-    /// **structural** events one `drive` invocation can push between
-    /// two yields, computed by [`max_event_burst`] after fuse runs.
-    /// Used by backends to emit a `QUEUE_SIZE_HINT` const the runtime
-    /// passes to its queue's `with_capacity` — so the structural
-    /// success path doesn't pay grow-and-copy.
+    /// Hard cap on the runtime event queue: the longest burst of
+    /// events any single `drive` invocation can push between two
+    /// yields, computed by [`max_event_burst`] after fuse runs.
+    /// Backends emit this as a `QUEUE_CAP` constant and the runtime
+    /// pre-allocates a fixed-size ring sized to exactly this many
+    /// slots. No growth, no fallback path.
     ///
-    /// **It is a hint, not a hard bound.** The actual queue can grow
-    /// past it for two input-dependent reasons:
-    ///
-    /// * **Skip tokens** flushed before a structural event must
-    ///   appear in the queue ahead of it (or event order is wrong),
-    ///   and the count of skips between two structural tokens is a
-    ///   property of the input, not the grammar.
-    /// * **Error recovery** (`recover_to` consuming garbage tokens
-    ///   until a sync set is hit) emits a Token event per consumed
-    ///   token; that count is also unbounded in the input.
-    ///
-    /// In both cases the runtime's `VecDeque` grows from heap.
-    pub queue_size_hint: usize,
+    /// Skip tokens and recovery garbage do **not** add to the burst:
+    /// each is emitted one event per `next_event` iteration via
+    /// pump-mode / recovery-mode, which yield to the consumer
+    /// between pushes. So the cap holds even on input-dependent
+    /// long comment runs and long error-recovery skips.
+    pub queue_cap: usize,
     /// The compiled lexer DFA.
     pub lexer_dfa: Vec<DfaState>,
 }
@@ -468,7 +461,7 @@ pub fn lower_with_opts(
     let program = build::build(ag);
     let mut table = layout::layout(program, ag, dopts);
     fuse::fuse_with_opts(&mut table, lopts);
-    table.queue_size_hint = max_event_burst(&table);
+    table.queue_cap = max_event_burst(&table);
     mark_first_set_references(&mut table);
     table
 }

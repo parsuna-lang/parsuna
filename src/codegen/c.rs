@@ -397,7 +397,7 @@ fn emit_impl(c: &mut String, st: &StateTable, stem: &str, upper: &str) {
      * produce, so pump-mode and recovery-mode each yielding after
      * one push keeps the queue honestly bounded. */
     writeln!(c, "#define PARSUNA_K {}", st.k).unwrap();
-    writeln!(c, "#define PARSUNA_QUEUE_CAP {}", st.queue_size_hint).unwrap();
+    writeln!(c, "#define PARSUNA_QUEUE_CAP {}", st.queue_cap).unwrap();
     writeln!(c, "#include \"parsuna_rt.h\"").unwrap();
     writeln!(c).unwrap();
     /* ABI compatibility between the public `<stem>_*` types exposed in

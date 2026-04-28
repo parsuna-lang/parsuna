@@ -630,7 +630,7 @@ mod tests {
             states,
             entry_states: vec![("main".into(), entry)],
             k: 1,
-            queue_size_hint: 0,
+            queue_cap: 0,
             lexer_dfa: empty_dfa(),
         }
     }

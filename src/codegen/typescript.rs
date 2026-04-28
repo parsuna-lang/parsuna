@@ -398,7 +398,7 @@ fn emit_tables(s: &mut String, st: &StateTable) {
         "/** Equal to the longest emit burst across every state body in this grammar. */"
     )
     .unwrap();
-    writeln!(s, "const QUEUE_CAP = {};", st.queue_size_hint).unwrap();
+    writeln!(s, "const QUEUE_CAP = {};", st.queue_cap).unwrap();
     for (name, id) in &st.entry_states {
         writeln!(s, "const ENTRY_{} = {};", name.to_uppercase(), id).unwrap();
     }

@@ -318,7 +318,7 @@ fn emit_tables(s: &mut String, st: &StateTable) {
     writeln!(
         s,
         "    public const int QueueCap = {};",
-        st.queue_size_hint
+        st.queue_cap
     )
     .unwrap();
 

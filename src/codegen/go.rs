@@ -327,7 +327,7 @@ fn emit_tables(s: &mut String, st: &StateTable) {
     writeln!(s, "const K = {}", st.k).unwrap();
     writeln!(s, "// QueueCap is the hard cap on events the parser's fixed-size queue can hold.").unwrap();
     writeln!(s, "// Equal to the longest emit burst across every state body in this grammar.").unwrap();
-    writeln!(s, "const QueueCap = {}", st.queue_size_hint).unwrap();
+    writeln!(s, "const QueueCap = {}", st.queue_cap).unwrap();
     for (name, id) in &st.entry_states {
         writeln!(s, "const entry{} = {}", capitalize(name), id).unwrap();
     }
