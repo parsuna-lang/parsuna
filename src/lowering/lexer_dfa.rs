@@ -73,11 +73,47 @@ pub struct ByteArm {
 /// determinises the combined machine, partitioning each state's outgoing
 /// byte ranges into the disjoint sub-intervals on which the destination
 /// is constant.
+/// Toggle bag for the lexer-DFA optimizer passes. Defaults to "all
+/// on"; turning a flag off skips that pass without affecting
+/// correctness. Kept separate from
+/// [`crate::lowering::LoweringOpts`] so the two halves of the
+/// pipeline don't share fields they have no use for.
+#[derive(Clone, Copy, Debug)]
+pub struct DfaOpts {
+    /// Run partition-refinement minimization on the subset-construction
+    /// output. Off: many duplicate near-identical states stay alive
+    /// (e.g. one per UTF-8 byte arrival path through whitespace).
+    pub minimize: bool,
+    /// Compute per-state self-loop byte ranges so backends can emit
+    /// a vectorizable scan-past prologue. Off: each byte goes through
+    /// the per-byte switch one at a time.
+    pub self_loop: bool,
+}
+
+impl Default for DfaOpts {
+    fn default() -> Self {
+        Self {
+            minimize: true,
+            self_loop: true,
+        }
+    }
+}
+
 pub fn compile(tokens: &[TokenInfo]) -> Vec<DfaState> {
+    compile_with_opts(tokens, DfaOpts::default())
+}
+
+/// Compile the lexer DFA with explicit optimizer toggles. See
+/// [`DfaOpts`] for what each flag turns off.
+pub fn compile_with_opts(tokens: &[TokenInfo], opts: DfaOpts) -> Vec<DfaState> {
     let nfa = build_nfa(tokens);
-    let dfa = subset_construct(&nfa);
-    let mut dfa = minimize(dfa);
-    detect_self_loops(&mut dfa);
+    let mut dfa = subset_construct(&nfa);
+    if opts.minimize {
+        dfa = minimize(dfa);
+    }
+    if opts.self_loop {
+        detect_self_loops(&mut dfa);
+    }
     dfa
 }
 

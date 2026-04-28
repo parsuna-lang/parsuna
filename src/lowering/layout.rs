@@ -11,13 +11,15 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::analysis::AnalyzedGrammar;
 use crate::lowering::build::{Block, BlockId, Op, Program, Target};
-use crate::lowering::lexer_dfa;
+use crate::lowering::lexer_dfa::{self, DfaOpts};
 use crate::lowering::{build_dispatch_tree, FirstSet, Op as StateOp, State, StateId, StateTable};
 
 /// Assign state ids to every op in every block, resolve inter-block
-/// targets, and compile the lexer DFA. Produces the [`StateTable`] that
-/// downstream passes (`fuse`, backends) operate on.
-pub fn layout(prog: Program, ag: &AnalyzedGrammar) -> StateTable {
+/// targets, and compile the lexer DFA. Produces the [`StateTable`]
+/// that downstream passes (`fuse`, backends) operate on. `dopts`
+/// controls the lexer-DFA optimization passes; layout itself has no
+/// per-pass knobs of its own.
+pub fn layout(prog: Program, ag: &AnalyzedGrammar, dopts: DfaOpts) -> StateTable {
     // BFS from each public rule's entry to order the blocks. This keeps a
     // rule and everything it transitively reaches adjacent in the state
     // numbering, which makes debug dumps and generated switch tables
@@ -86,7 +88,7 @@ pub fn layout(prog: Program, ag: &AnalyzedGrammar) -> StateTable {
         .map(|n| (n.clone(), entry[&prog.rule_entry[n]]))
         .collect();
 
-    let lexer_dfa = lexer_dfa::compile(&prog.tokens);
+    let lexer_dfa = lexer_dfa::compile_with_opts(&prog.tokens, dopts);
 
     StateTable {
         grammar_name: ag.grammar.name.clone(),
@@ -256,7 +258,7 @@ mod tests {
     fn lay(src: &str) -> (AnalyzedGrammar, StateTable) {
         let ag = analyze_src(src);
         let prog = build(&ag);
-        let st = layout(prog, &ag);
+        let st = layout(prog, &ag, DfaOpts::default());
         (ag, st)
     }
 
@@ -334,7 +336,7 @@ mod tests {
         let outcome = analyze(g);
         let ag = outcome.grammar.unwrap();
         let prog = build(&ag);
-        let st = layout(prog, &ag);
+        let st = layout(prog, &ag, DfaOpts::default());
         assert_eq!(st.grammar_name, "custom_name");
     }
 

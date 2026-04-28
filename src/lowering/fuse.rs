@@ -30,7 +30,7 @@
 
 use std::collections::{BTreeMap, HashSet, VecDeque};
 
-use crate::lowering::{Body, DispatchLeaf, DispatchTree, Op, StateId, StateTable};
+use crate::lowering::{Body, DispatchLeaf, DispatchTree, LoweringOpts, Op, StateId, StateTable};
 
 /// Max chain depth to absorb when each step duplicates the target's
 /// ops (i.e. the target has multiple predecessors). Bounds generated
@@ -125,12 +125,34 @@ fn is_valid_dispatch_tree(tree: &DispatchTree) -> bool {
 /// produces no changes — because any of those rewrites can expose new
 /// opportunities for the others.
 pub fn fuse(table: &mut StateTable) {
+    fuse_with_opts(table, LoweringOpts::default());
+}
+
+/// Fuse with explicit optimizer toggles. Each pass guards on a flag
+/// in [`LoweringOpts`]; flags off mean the corresponding pass is
+/// skipped entirely. The fixpoint loop still runs so passes that
+/// *are* enabled compose, but if every pass is off the loop
+/// terminates on the first iteration (no change).
+///
+/// Note: the post-Expect-yield invariant `splice_chains` enforces
+/// only matters when splicing is on. With `splice_chains = false`
+/// initial layout's one-op-per-state output already satisfies the
+/// invariant trivially.
+pub fn fuse_with_opts(table: &mut StateTable, opts: LoweringOpts) {
     loop {
         let snapshot = ops_snapshot(table);
-        splice_chains(table);
-        eliminate_tail_pushes(table);
-        inline_branch_targets(table);
-        eliminate_dead(table);
+        if opts.splice_chains {
+            splice_chains(table);
+        }
+        if opts.tce {
+            eliminate_tail_pushes(table);
+        }
+        if opts.branch_inline {
+            inline_branch_targets(table);
+        }
+        if opts.dce {
+            eliminate_dead(table);
+        }
         if ops_snapshot(table) == snapshot {
             break;
         }

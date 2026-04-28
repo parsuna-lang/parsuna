@@ -4,12 +4,12 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use parsuna::grammar::ir::{CharClass, ClassItem};
-use parsuna::lowering::lexer_dfa::{DfaState, START};
+use parsuna::lowering::lexer_dfa::{DfaOpts, DfaState, START};
 use parsuna::{
     analysis::{analyze, EOF_MARKER},
     codegen::{EmittedFile, GenerateTarget},
     grammar::parse_grammar,
-    lowering::{self, StateTable},
+    lowering::{self, LoweringOpts, StateTable},
     tree_sitter, Diagnostic, Expr, TokenPattern,
 };
 
@@ -29,13 +29,70 @@ struct Cli {
     #[arg(long = "name", global = true)]
     name: Option<String>,
 
-    /// How to treat warnings. `warn` prints them and continues; `error`
-    /// promotes every warning to a hard error so the build fails.
+    /// How to treat warnings.
     #[arg(long = "warnings", default_value = "warn", global = true)]
     warnings: WarningPolicy,
 
+    #[command(flatten)]
+    opt_flags: OptArgs,
+
     #[command(subcommand)]
     op: Op,
+}
+
+/// Global optimizer toggles, flattened into [`Cli`] so each `--no-*`
+/// flag stays a top-level CLI option but the `Cli` struct doesn't get
+/// cluttered with the bookkeeping. Every flag is `global = true` so
+/// it works on any subcommand (`generate`, `debug`, …).
+#[derive(clap::Args, Clone, Copy, Debug)]
+struct OptArgs {
+    /// Disable straight-line `Jump`-chain splicing in `fuse`.
+    /// One block-level op stays in one state.
+    #[arg(long = "no-splice-chains", global = true, help_heading = "Optimizer")]
+    no_splice_chains: bool,
+
+    /// Disable tail-call elimination of pure-`Ret` trampolines.
+    #[arg(long = "no-tce", global = true, help_heading = "Optimizer")]
+    no_tce: bool,
+
+    /// Disable inlining of single-predecessor branchy targets into
+    /// the calling `Op::Opt`/`Op::Star`/dispatch arm.
+    #[arg(long = "no-branch-inline", global = true, help_heading = "Optimizer")]
+    no_branch_inline: bool,
+
+    /// Disable dead-state elimination. Unreachable states linger in
+    /// the table.
+    #[arg(long = "no-dce", global = true, help_heading = "Optimizer")]
+    no_dce: bool,
+
+    /// Disable lexer-DFA partition-refinement minimization. Keeps
+    /// the raw subset-construction output.
+    #[arg(long = "no-dfa-minimize", global = true, help_heading = "Optimizer")]
+    no_dfa_minimize: bool,
+
+    /// Disable per-DFA-state self-loop range computation. Backends
+    /// that can vectorize a scan-past prologue won't have the data
+    /// to do so.
+    #[arg(long = "no-dfa-self-loop", global = true, help_heading = "Optimizer")]
+    no_dfa_self_loop: bool,
+}
+
+impl OptArgs {
+    fn lowering_opts(&self) -> LoweringOpts {
+        LoweringOpts {
+            splice_chains: !self.no_splice_chains,
+            tce: !self.no_tce,
+            branch_inline: !self.no_branch_inline,
+            dce: !self.no_dce,
+        }
+    }
+
+    fn dfa_opts(&self) -> DfaOpts {
+        DfaOpts {
+            minimize: !self.no_dfa_minimize,
+            self_loop: !self.no_dfa_self_loop,
+        }
+    }
 }
 
 /// What to do with warnings emitted by the analysis lints.
@@ -139,14 +196,16 @@ fn write_file(path: &Path, contents: &[u8]) -> Result<(), ExitCode> {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    let lopts = cli.opt_flags.lowering_opts();
+    let dopts = cli.opt_flags.dfa_opts();
     let grammar = cli.grammar.as_path();
     let name = cli.name.as_deref();
     let warnings = cli.warnings;
     match cli.op {
         Op::Check => cmd_check(grammar, name, warnings),
-        Op::Generate(cmd) => cmd_generate(grammar, name, warnings, cmd),
+        Op::Generate(cmd) => cmd_generate(grammar, name, warnings, lopts, dopts, cmd),
         Op::TreeSitter { out } => cmd_tree_sitter(grammar, name, warnings, out),
-        Op::Debug(sub) => cmd_debug(grammar, name, warnings, sub),
+        Op::Debug(sub) => cmd_debug(grammar, name, warnings, lopts, dopts, sub),
     }
 }
 
@@ -154,10 +213,12 @@ fn cmd_debug(
     grammar: &Path,
     name: Option<&str>,
     warnings: WarningPolicy,
+    lopts: LoweringOpts,
+    dopts: DfaOpts,
     cmd: DebugCmd,
 ) -> ExitCode {
     match cmd {
-        DebugCmd::Stats => dbg_load_lowered(grammar, name, warnings, print_stats),
+        DebugCmd::Stats => dbg_load_lowered(grammar, name, warnings, lopts, dopts, print_stats),
         DebugCmd::Tokens => dbg_load_analyzed(grammar, name, warnings, print_tokens),
         DebugCmd::Rules { format } => {
             dbg_load_analyzed(grammar, name, warnings, |ag| match format {
@@ -166,13 +227,20 @@ fn cmd_debug(
             })
         }
         DebugCmd::Analysis => dbg_load_analyzed(grammar, name, warnings, print_analysis),
-        DebugCmd::Lowering => dbg_load_lowered(grammar, name, warnings, print_lowering),
-        DebugCmd::Dfa { format } => {
-            dbg_load_lowered(grammar, name, warnings, move |_, st| match format {
+        DebugCmd::Lowering => {
+            dbg_load_lowered(grammar, name, warnings, lopts, dopts, print_lowering)
+        }
+        DebugCmd::Dfa { format } => dbg_load_lowered(
+            grammar,
+            name,
+            warnings,
+            lopts,
+            dopts,
+            move |_, st| match format {
                 OutputFormat::Plain => print_dfa(st),
                 OutputFormat::Dot => print_dfa_dot(st),
-            })
-        }
+            },
+        ),
     }
 }
 
@@ -195,11 +263,13 @@ fn dbg_load_lowered(
     path: &Path,
     name: Option<&str>,
     warnings: WarningPolicy,
+    lopts: LoweringOpts,
+    dopts: DfaOpts,
     f: impl FnOnce(&parsuna::AnalyzedGrammar, &StateTable),
 ) -> ExitCode {
     match load_and_analyze(path, name, warnings) {
         Ok(ag) => {
-            let st = lowering::lower(&ag);
+            let st = lowering::lower_with_opts(&ag, lopts, dopts);
             f(&ag, &st);
             ExitCode::SUCCESS
         }
@@ -981,13 +1051,15 @@ fn cmd_generate(
     grammar: &Path,
     name: Option<&str>,
     warnings: WarningPolicy,
+    lopts: LoweringOpts,
+    dopts: DfaOpts,
     cmd: GenerateCmd,
 ) -> ExitCode {
     let ag = match load_and_analyze(grammar, name, warnings) {
         Ok(ag) => ag,
         Err(code) => return code,
     };
-    let st = lowering::lower(&ag);
+    let st = lowering::lower_with_opts(&ag, lopts, dopts);
     let files = cmd.target.emit(&st);
 
     let base = cmd.out.unwrap_or_else(|| PathBuf::from("."));

@@ -409,11 +409,65 @@ pub struct State {
     pub ops: Vec<Op>,
 }
 
-/// Lower an analyzed grammar into a [`StateTable`]: build → layout → fuse.
+/// Toggle bag for the parser-state-table optimizer passes that run
+/// inside `fuse`. Defaults to "all on"; turning a flag off skips
+/// that pass and is safe in the sense that the generated parser
+/// still works, just less optimized (larger state count, more
+/// dispatch hops). Backed by the CLI's global `--no-*` flags so
+/// every command (`generate`, `debug`, …) sees the same lowering.
+///
+/// DFA-level toggles live in [`lexer_dfa::DfaOpts`] — they're a
+/// separate concern (the lexer pipeline doesn't care about state
+/// splicing or TCE, and `fuse` doesn't care about DFA minimization).
+#[derive(Clone, Copy, Debug)]
+pub struct LoweringOpts {
+    /// Splice straight-line `Jump` chains into their predecessors.
+    /// Off: every block-level op stays in its own state.
+    pub splice_chains: bool,
+    /// Eliminate `PushRet`/`Opt`/`Dispatch`/`Star` continuations whose
+    /// target is a pure-`Ret` trampoline. Off: trampolines stay live
+    /// and the dispatch loop bounces through them.
+    pub tce: bool,
+    /// Move single-predecessor branchy targets into the calling
+    /// `Op::Opt`/`Op::Star`/dispatch arm as `Body::Inline`. Off: every
+    /// branch target stays a separate state.
+    pub branch_inline: bool,
+    /// Drop states no entry can reach after fuse runs. Off: dead
+    /// states linger in the table; the generated parser still works
+    /// (they're just never entered) but the emitted source is bigger.
+    pub dce: bool,
+}
+
+impl Default for LoweringOpts {
+    fn default() -> Self {
+        Self {
+            splice_chains: true,
+            tce: true,
+            branch_inline: true,
+            dce: true,
+        }
+    }
+}
+
+/// Lower an analyzed grammar into a [`StateTable`] with all
+/// optimizer passes enabled. Convenience wrapper over
+/// [`lower_with_opts`] for callers that don't care to tune
+/// optimization.
 pub fn lower(ag: &AnalyzedGrammar) -> StateTable {
+    lower_with_opts(ag, LoweringOpts::default(), lexer_dfa::DfaOpts::default())
+}
+
+/// Lower an analyzed grammar into a [`StateTable`]: build → layout → fuse.
+/// `lopts` controls fuse's parser-state passes; `dopts` controls the
+/// lexer DFA passes inside layout.
+pub fn lower_with_opts(
+    ag: &AnalyzedGrammar,
+    lopts: LoweringOpts,
+    dopts: lexer_dfa::DfaOpts,
+) -> StateTable {
     let program = build::build(ag);
-    let mut table = layout::layout(program, ag);
-    fuse::fuse(&mut table);
+    let mut table = layout::layout(program, ag, dopts);
+    fuse::fuse_with_opts(&mut table, lopts);
     table.queue_size_hint = max_event_burst(&table);
     mark_first_set_references(&mut table);
     table
