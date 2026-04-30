@@ -1,5 +1,3 @@
-use std::marker::PhantomData;
-
 use crate::events::{Error, Event, RuleKindEnum, Token, TokenKindEnum};
 use crate::lexer::LexerBackend;
 use crate::span::Pos;
@@ -100,8 +98,6 @@ pub struct Parser<'a, L: LexerBackend<'a, G::TokenKind>, const K: usize, G: Gram
     state: u32,
     ret_stack: Vec<u32>,
     recovery: Option<Recovery<G::TokenKind>>,
-    eof_checked: bool,
-    _grammar: PhantomData<fn(&mut Parser<'a, L, K, G>)>,
 }
 
 impl<'a, L: LexerBackend<'a, G::TokenKind>, const K: usize, G: Grammar<K>> Parser<'a, L, K, G> {
@@ -122,8 +118,6 @@ impl<'a, L: LexerBackend<'a, G::TokenKind>, const K: usize, G: Grammar<K>> Parse
             state: entry,
             ret_stack: Vec::with_capacity(64),
             recovery: None,
-            eof_checked: false,
-            _grammar: PhantomData,
         }
     }
 
@@ -373,21 +367,19 @@ impl<'a, L: LexerBackend<'a, G::TokenKind>, const K: usize, G: Grammar<K>> Itera
                 return Some(Event::Garbage(self.take_token()));
             }
 
-            // EOF gate at the top of TERMINATED. If trailing input
-            // remains, raise an error and arm a sync-empty recovery so
-            // the rest of the input is drained as garbage Tokens, one
-            // per call.
+            // EOF gate. On the first visit with trailing input, raise
+            // an error and arm a sync-empty recovery so the rest of the
+            // input is drained as garbage Tokens, one per call. Once
+            // recovery has eaten its way to EOF the lookahead pins at
+            // EOF (the lexer keeps yielding it), so this is naturally
+            // idempotent — subsequent visits just return `None`.
             if self.state == TERMINATED {
-                if !self.eof_checked {
-                    self.eof_checked = true;
-                    if self.look[0].as_ref().and_then(|t| t.kind) != Some(G::TokenKind::EOF) {
-                        let event = self.error_here("expected end of input");
-                        self.arm_recovery(&[], None);
-                        return Some(event);
-                    }
-                    continue;
+                if self.look[0].as_ref().and_then(|t| t.kind) == Some(G::TokenKind::EOF) {
+                    return None;
                 }
-                return None;
+                let event = self.error_here("expected end of input");
+                self.arm_recovery(&[], None);
+                return Some(event);
             }
 
             // Drive mode: run one state body. If that body emitted,
