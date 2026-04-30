@@ -383,7 +383,7 @@ fn emit_parser(s: &mut String) {
     s.push_str(
         r#"
 /// Zero-sized marker type that carries the generated dispatch logic via
-/// [`parsuna_rt::Drive`]. You never construct one directly — it's a
+/// [`parsuna_rt::Grammar`]. You never construct one directly — it's a
 /// type-level parameter to [`Parser`].
 pub struct Grammar;
 
@@ -595,7 +595,7 @@ fn emit_step(s: &mut String, st: &StateTable) {
         .collect();
     let has_skips = !skip_kinds.is_empty();
 
-    writeln!(s, "impl parsuna_rt::Drive<K> for Grammar {{").unwrap();
+    writeln!(s, "impl parsuna_rt::Grammar<K> for Grammar {{").unwrap();
     writeln!(s, "    type TokenKind = TokenKind;").unwrap();
     writeln!(s, "    type RuleKind = RuleKind;").unwrap();
     writeln!(s, "    const HAS_SKIPS: bool = {};", has_skips).unwrap();
@@ -618,7 +618,7 @@ fn emit_step(s: &mut String, st: &StateTable) {
     writeln!(s, "    #[inline]").unwrap();
     writeln!(
         s,
-        "    fn step<'a, L: LexerBackend<'a, Self::TokenKind>>(p: &mut parsuna_rt::Parser<'a, L, K, Self>) -> Option<parsuna_rt::Event<'a, TokenKind, RuleKind>> {{"
+        "    fn step<'a, 'p, L: LexerBackend<'a, Self::TokenKind>>(p: &mut parsuna_rt::Cursor<'p, 'a, L, K, Self>) -> Option<parsuna_rt::Event<'a, TokenKind, RuleKind>> {{"
     )
     .unwrap();
     // One match arm per call. Each arm runs a state body's ops —

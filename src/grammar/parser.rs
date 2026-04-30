@@ -250,9 +250,7 @@ fn read_decl<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>, g: &mut G
     }
 }
 
-fn read_annots<'a, I: Iterator<Item = Event<'a>>>(
-    r: &mut Reader<'a, I>,
-) -> Vec<(String, Span)> {
+fn read_annots<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>) -> Vec<(String, Span)> {
     if r.peek_enter() != Some(RuleKind::Annots) {
         return Vec::new();
     }
@@ -718,10 +716,7 @@ mod tests {
 
     #[test]
     fn underscore_prefix_marks_fragment() {
-        let g = parse_grammar(
-            "_DIGIT = '0'..'9'; NUM = _DIGIT+; main = NUM;",
-        )
-        .expect("ok");
+        let g = parse_grammar("_DIGIT = '0'..'9'; NUM = _DIGIT+; main = NUM;").expect("ok");
         let frag = g.tokens.get("_DIGIT").expect("_DIGIT");
         assert!(frag.is_fragment);
         assert!(!frag.skip);
@@ -741,8 +736,12 @@ mod tests {
     #[test]
     fn skip_on_rule_is_rejected() {
         // `[skip]` is only valid on tokens, not rules.
-        let errs = parse_grammar("T = \"t\"; main = T [skip];").err().expect("err");
-        assert!(errs.iter().any(|e| e.message.contains("only applies to tokens")));
+        let errs = parse_grammar("T = \"t\"; main = T [skip];")
+            .err()
+            .expect("err");
+        assert!(errs
+            .iter()
+            .any(|e| e.message.contains("only applies to tokens")));
     }
 
     #[test]
@@ -825,7 +824,9 @@ mod tests {
     #[test]
     fn string_atom_in_rule_body_is_rejected() {
         // String literals are token-only.
-        let errs = parse_grammar("T = \"t\"; main = \"t\";").err().expect("err");
+        let errs = parse_grammar("T = \"t\"; main = \"t\";")
+            .err()
+            .expect("err");
         assert!(errs
             .iter()
             .any(|e| e.message.contains("string literal atoms")));
@@ -870,10 +871,7 @@ mod tests {
 
     #[test]
     fn multiple_decls_preserve_source_order() {
-        let g = parse_grammar(
-            "Z = \"z\"; A = \"a\"; second = A; first = Z;",
-        )
-        .expect("ok");
+        let g = parse_grammar("Z = \"z\"; A = \"a\"; second = A; first = Z;").expect("ok");
         let token_names: Vec<&str> = g.tokens.values().map(|t| t.name.as_str()).collect();
         let rule_names: Vec<&str> = g.rules.values().map(|r| r.name.as_str()).collect();
         assert_eq!(token_names, vec!["Z", "A"]);

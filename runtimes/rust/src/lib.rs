@@ -9,7 +9,7 @@
 //! Generated code supplies the grammar-specific parts (token kinds, rule
 //! kinds, the compiled DFA, and the state-dispatch function) by
 //! implementing [`TokenKindEnum`], [`RuleKindEnum`], [`lexer::DfaMatcher`],
-//! and [`Drive`]. The runtime itself is agnostic of any particular grammar.
+//! and [`Grammar`]. The runtime itself is agnostic of any particular grammar.
 
 pub mod events;
 pub mod lexer;
@@ -18,5 +18,5 @@ pub mod span;
 
 pub use events::{Error, Event, RuleKindEnum, Token, TokenKindEnum, TOKEN_EOF};
 pub use lexer::{utf8_char_len, DfaMatch, DfaMatcher, LexerBackend, Scanner, StreamingLexer};
-pub use parser::{Drive, Parser, TERMINATED};
+pub use parser::{Cursor, Grammar, Parser, TERMINATED};
 pub use span::{Pos, Span};

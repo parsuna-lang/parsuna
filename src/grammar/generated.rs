@@ -421,7 +421,7 @@ static SYNC_3: &[TokenKind] = &[TokenKind::Eof, TokenKind::Lparen, TokenKind::Rp
 
 
 /// Zero-sized marker type that carries the generated dispatch logic via
-/// [`parsuna_rt::Drive`]. You never construct one directly — it's a
+/// [`parsuna_rt::Grammar`]. You never construct one directly — it's a
 /// type-level parameter to [`Parser`].
 pub struct Grammar;
 
@@ -429,7 +429,7 @@ pub struct Grammar;
 /// [`LexerBackend`]; the generated `parse_*_from_str`/`parse_*_from_reader`
 /// helpers build a parser with either [`Scanner`] or [`StreamingLexer`].
 pub type Parser<'a, L> = parsuna_rt::Parser<'a, L, K, Grammar>;
-impl parsuna_rt::Drive<K> for Grammar {
+impl parsuna_rt::Grammar<K> for Grammar {
     type TokenKind = TokenKind;
     type RuleKind = RuleKind;
     const HAS_SKIPS: bool = true;
@@ -440,7 +440,7 @@ impl parsuna_rt::Drive<K> for Grammar {
     }
 
     #[inline]
-    fn step<'a, L: LexerBackend<'a, Self::TokenKind>>(p: &mut parsuna_rt::Parser<'a, L, K, Self>) -> Option<parsuna_rt::Event<'a, TokenKind, RuleKind>> {
+    fn step<'a, 'p, L: LexerBackend<'a, Self::TokenKind>>(p: &mut parsuna_rt::Cursor<'p, 'a, L, K, Self>) -> Option<parsuna_rt::Event<'a, TokenKind, RuleKind>> {
         let mut cur = p.state();
         let mut event: Option<parsuna_rt::Event<'a, TokenKind, RuleKind>> = None;
         match cur {
