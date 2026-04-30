@@ -49,24 +49,44 @@ impl Grammar {
 
 /// A single token declaration.
 ///
-/// `skip` comes from a `[skip]` annotation in the grammar and causes the runtime to
+/// `skip` comes from a `-> skip` action in the grammar and causes the runtime to
 /// drop the token from the structural event stream (while still surfacing
 /// it alongside neighbouring events). `is_fragment` comes from a `_`-prefix
 /// and means "usable in other token patterns but not itself a token kind".
+/// `mode` comes from an enclosing `@mode(name) ...` pre-annotation and binds
+/// the token to a lexer mode; `mode_action` comes from a `-> push(name)` or
+/// `-> pop` action and fires when the token is matched.
 #[derive(Clone, Debug)]
 pub struct TokenDef {
     /// Grammar-declared token name (e.g. `IDENT`).
     pub name: String,
     /// Regular-expression-style body that matches this token.
     pub pattern: TokenPattern,
-    /// Marked `[skip]`: matched but dropped from the structural event
-    /// stream (whitespace, comments, etc.).
+    /// Has a `-> skip` action: matched but dropped from the structural
+    /// event stream (whitespace, comments, etc.).
     pub skip: bool,
     /// Marked `_TOKEN`: usable inside other token patterns but not itself
     /// a real token kind at run time.
     pub is_fragment: bool,
+    /// Lexer mode this token belongs to. `None` means the default mode.
+    /// Set by an enclosing `@mode(name)` pre-annotation.
+    pub mode: Option<String>,
+    /// Mode-stack actions that fire in source order when this token
+    /// matches. Each `-> push(name)` / `-> pop` action contributes one
+    /// entry, so e.g. `-> pop, push(b)` swaps the top of the stack.
+    pub mode_actions: Vec<ModeAction>,
     /// Source span of the whole declaration, for diagnostics.
     pub span: Span,
+}
+
+/// Lexer mode-stack action attached to a token via the `-> push(...)` or
+/// `-> pop` action. Fires on a successful match of the token.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ModeAction {
+    /// Push the named mode onto the lexer mode stack.
+    Push(String),
+    /// Pop the topmost mode off the lexer mode stack.
+    Pop,
 }
 
 /// A regular expression over characters that defines how a token is lexed.
@@ -227,6 +247,8 @@ mod tests {
             pattern: TokenPattern::Empty,
             skip: false,
             is_fragment: false,
+            mode: None,
+            mode_actions: Vec::new(),
             span: Span::default(),
         }
     }

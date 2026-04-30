@@ -194,34 +194,74 @@ fn rule_id(st: &StateTable, kind: u16) -> String {
 }
 
 fn emit_dfa(s: &mut String, st: &StateTable) {
-    let dfa = &st.lexer_dfa;
-
     writeln!(
         s,
-        "/// <summary>Compiled lexer DFA: one switch arm per DFA state.</summary>"
+        "/// <summary>Compiled lexer DFA: one helper per declared lexer mode.</summary>"
     )
     .unwrap();
     writeln!(s, "internal static class DfaImpl {{").unwrap();
+
+    /* Mode-dispatch entry point. Single-mode grammars collapse to a
+     * direct call so the dispatcher inlines away. */
     writeln!(
         s,
-        "    public static void LongestMatch(byte[] buf, int start, int bufLen, int[] output) {{"
+        "    public static void LongestMatch(byte[] buf, int start, int bufLen, int mode, int[] output) {{"
     )
     .unwrap();
-    writeln!(s, "        int pos = start;").unwrap();
-    writeln!(s, "        int bestLen = 0;").unwrap();
-    writeln!(s, "        int bestKind = Lexer.ErrorKind;").unwrap();
-    writeln!(s, "        int state = {};", START).unwrap();
-    writeln!(s, "        while (true) {{").unwrap();
-    writeln!(s, "            switch (state) {{").unwrap();
-    for ds in dfa { emit_dfa_state_arm(s, st, ds); }
-    writeln!(s, "                default: goto done;").unwrap();
-    writeln!(s, "            }}").unwrap();
-    writeln!(s, "        }}").unwrap();
-    writeln!(s, "        done:").unwrap();
-    writeln!(s, "        output[0] = bestLen;").unwrap();
-    writeln!(s, "        output[1] = bestKind;").unwrap();
-    writeln!(s, "        output[2] = pos - start;").unwrap();
+    if st.modes.len() == 1 {
+        writeln!(s, "        _ = mode;").unwrap();
+        writeln!(s, "        LongestMatchMode0(buf, start, bufLen, output);").unwrap();
+    } else {
+        writeln!(s, "        switch (mode) {{").unwrap();
+        for m in &st.modes {
+            writeln!(
+                s,
+                "            case {}: LongestMatchMode{}(buf, start, bufLen, output); return;",
+                m.id, m.id
+            )
+            .unwrap();
+        }
+        writeln!(
+            s,
+            "            default: output[0] = 0; output[1] = Lexer.ErrorKind; output[2] = 0; return;"
+        )
+        .unwrap();
+        writeln!(s, "        }}").unwrap();
+    }
     writeln!(s, "    }}").unwrap();
+    writeln!(s).unwrap();
+
+    for m in &st.modes {
+        writeln!(
+            s,
+            "    /// <summary>Longest-match helper for lexer mode `{}` (id {}).</summary>",
+            m.name, m.id
+        )
+        .unwrap();
+        writeln!(
+            s,
+            "    private static void LongestMatchMode{}(byte[] buf, int start, int bufLen, int[] output) {{",
+            m.id
+        )
+        .unwrap();
+        writeln!(s, "        int pos = start;").unwrap();
+        writeln!(s, "        int bestLen = 0;").unwrap();
+        writeln!(s, "        int bestKind = Lexer.ErrorKind;").unwrap();
+        writeln!(s, "        int state = {};", START).unwrap();
+        writeln!(s, "        while (true) {{").unwrap();
+        writeln!(s, "            switch (state) {{").unwrap();
+        for ds in &m.dfa { emit_dfa_state_arm(s, st, ds); }
+        writeln!(s, "                default: goto done;").unwrap();
+        writeln!(s, "            }}").unwrap();
+        writeln!(s, "        }}").unwrap();
+        writeln!(s, "        done:").unwrap();
+        writeln!(s, "        output[0] = bestLen;").unwrap();
+        writeln!(s, "        output[1] = bestKind;").unwrap();
+        writeln!(s, "        output[2] = pos - start;").unwrap();
+        writeln!(s, "    }}").unwrap();
+        writeln!(s).unwrap();
+    }
+
     writeln!(
         s,
         "    public static readonly DfaMatcher Matcher = LongestMatch;"
@@ -241,7 +281,8 @@ fn emit_dfa_state_arm(
         return;
     }
     writeln!(s, "                case {}: {{", ds.id).unwrap();
-    if !ds.self_loop.is_empty() {
+    let self_loop = ds.self_loop_ranges();
+    if !self_loop.is_empty() {
         // Self-loop scan-skip prologue. RyuJIT recognises this loop
         // shape and lifts it to vectorised byte tests on x86/Arm.
         writeln!(s, "                    while (pos < bufLen) {{").unwrap();
@@ -249,7 +290,7 @@ fn emit_dfa_state_arm(
         writeln!(
             s,
             "                        if (!({})) break;",
-            byte_cond(&ds.self_loop)
+            byte_cond(self_loop)
         )
         .unwrap();
         writeln!(s, "                        pos++;").unwrap();
@@ -364,7 +405,7 @@ fn emit_tables(s: &mut String, st: &StateTable) {
     };
     writeln!(
         s,
-        "    /// <summary>True iff this grammar declares any [skip]-annotated tokens.</summary>"
+        "    /// <summary>True iff this grammar declares any tokens with a `-> skip` action.</summary>"
     )
     .unwrap();
     writeln!(s, "    public const bool HasSkips = {};", has_skips).unwrap();
@@ -375,6 +416,46 @@ fn emit_tables(s: &mut String, st: &StateTable) {
     )
     .unwrap();
     writeln!(s, "}}").unwrap();
+    writeln!(s).unwrap();
+}
+
+fn emit_apply_actions(s: &mut String, st: &StateTable) {
+    use crate::lowering::ModeActionInfo;
+
+    let action_tokens: Vec<&crate::lowering::TokenInfo> = st
+        .tokens
+        .iter()
+        .filter(|t| !t.mode_actions.is_empty())
+        .collect();
+
+    writeln!(s, "    /// <summary>Apply per-token mode-stack actions to <paramref name=\"lex\"/>. Generated as a switch over token kinds; tokens without `-> push/pop` fall through.</summary>").unwrap();
+    writeln!(
+        s,
+        "    private static void ApplyActions(ushort kind, Lexer lex) {{"
+    )
+    .unwrap();
+    if action_tokens.is_empty() {
+        writeln!(s, "        _ = kind; _ = lex;").unwrap();
+    } else {
+        writeln!(s, "        switch (kind) {{").unwrap();
+        for t in &action_tokens {
+            writeln!(s, "            case {}:", token_ushort(st, t.kind)).unwrap();
+            for action in &t.mode_actions {
+                match action {
+                    ModeActionInfo::Push(id) => {
+                        writeln!(s, "                lex.PushMode({});", id).unwrap();
+                    }
+                    ModeActionInfo::Pop => {
+                        writeln!(s, "                lex.PopMode();").unwrap();
+                    }
+                }
+            }
+            writeln!(s, "                break;").unwrap();
+        }
+        writeln!(s, "            default: break;").unwrap();
+        writeln!(s, "        }}").unwrap();
+    }
+    writeln!(s, "    }}").unwrap();
     writeln!(s).unwrap();
 }
 
@@ -392,6 +473,7 @@ fn emit_grammar(s: &mut String, st: &StateTable) {
         .unwrap();
     }
     writeln!(s).unwrap();
+    emit_apply_actions(s, st);
     writeln!(
         s,
         "    private static readonly ParserConfig Config = new ParserConfig("
@@ -400,27 +482,29 @@ fn emit_grammar(s: &mut String, st: &StateTable) {
     writeln!(s, "        Tables.K,").unwrap();
     writeln!(s, "        Tables.IsSkip,").unwrap();
     writeln!(s, "        Tables.HasSkips,").unwrap();
-    writeln!(s, "        Step);").unwrap();
+    writeln!(s, "        Step,").unwrap();
+    writeln!(s, "        ApplyActions);").unwrap();
     writeln!(s).unwrap();
 
-    writeln!(s, "    private static Parser FromStream(Stream stream, int entry) =>").unwrap();
+    writeln!(s, "    private static Parser FromStream(Stream stream, int entry, ParserOptions? options = null) =>").unwrap();
     writeln!(
         s,
-        "        new Parser(new Lexer(stream, DfaImpl.Matcher), entry, Config);"
+        "        new Parser(new Lexer(stream, DfaImpl.Matcher), entry, Config, options ?? new ParserOptions());"
     )
     .unwrap();
     writeln!(s).unwrap();
 
     for (name, _) in &st.entry_states {
+        let cap = pascal_case(name);
+
         writeln!(
             s,
-            "    /// <summary>Parse the <c>{name}</c> rule from a byte <c>Stream</c>.</summary>",
+            "    /// <summary>Parse the <c>{name}</c> rule from a byte <c>Stream</c>. Skip tokens are surfaced as <see cref=\"TokenEvent\"/>; pass a <see cref=\"ParserOptions\"/> with <c>DropSkips = true</c> (or call <c>Parse{cap}NoSkips</c>) to silently consume them.</summary>",
         )
         .unwrap();
         writeln!(
             s,
-            "    public static Parser Parse{cap}(Stream stream) => FromStream(stream, Entry{cap});",
-            cap = pascal_case(name)
+            "    public static Parser Parse{cap}(Stream stream, ParserOptions? options = null) => FromStream(stream, Entry{cap}, options);"
         )
         .unwrap();
         writeln!(
@@ -430,9 +514,29 @@ fn emit_grammar(s: &mut String, st: &StateTable) {
         .unwrap();
         writeln!(
             s,
-            "    public static Parser Parse{cap}(string src) => Parse{cap}(new MemoryStream(Encoding.UTF8.GetBytes(src)));",
-            cap = pascal_case(name)
-        ).unwrap();
+            "    public static Parser Parse{cap}(string src, ParserOptions? options = null) => Parse{cap}(new MemoryStream(Encoding.UTF8.GetBytes(src)), options);"
+        )
+        .unwrap();
+        writeln!(
+            s,
+            "    /// <summary>Parse the <c>{name}</c> rule from a byte <c>Stream</c>, silently consuming skip tokens.</summary>",
+        )
+        .unwrap();
+        writeln!(
+            s,
+            "    public static Parser Parse{cap}NoSkips(Stream stream) => FromStream(stream, Entry{cap}, new ParserOptions {{ DropSkips = true }});"
+        )
+        .unwrap();
+        writeln!(
+            s,
+            "    /// <summary>Parse the <c>{name}</c> rule from a UTF-8 string, silently consuming skip tokens.</summary>",
+        )
+        .unwrap();
+        writeln!(
+            s,
+            "    public static Parser Parse{cap}NoSkips(string src) => Parse{cap}NoSkips(new MemoryStream(Encoding.UTF8.GetBytes(src)));"
+        )
+        .unwrap();
         writeln!(s).unwrap();
     }
 

@@ -14,7 +14,8 @@ use std::collections::{BTreeSet, HashMap};
 use crate::analysis::{self, AnalyzedGrammar, EOF_MARKER};
 use crate::grammar::ir::*;
 use crate::lowering::{
-    FirstSet, FirstSetId, FirstSetPool, LookaheadSeq, SyncSet, SyncSetId, SyncSetPool, TokenInfo,
+    FirstSet, FirstSetId, FirstSetPool, LookaheadSeq, ModeActionInfo, SyncSet, SyncSetId,
+    SyncSetPool, TokenInfo,
 };
 
 /// Index into [`Program::blocks`]. Used wherever a block needs to refer to
@@ -142,6 +143,10 @@ pub struct Program {
     /// Interned SYNC-set pool. Each entry is a flat `Vec<u16>` of token
     /// ids. Index by [`SyncSetId`].
     pub sync_sets: SyncSetPool,
+    /// Lexer mode names indexed by id. `mode_names[0]` is always
+    /// `"default"`; further entries come from `@mode(name)` annotations
+    /// in declaration order.
+    pub mode_names: Vec<String>,
 }
 
 /// Mutable state carried through the recursive descent over rule bodies.
@@ -169,6 +174,12 @@ pub fn build(ag: &AnalyzedGrammar) -> Program {
     let g = &ag.grammar;
     let rules = collect_rules(g);
 
+    // Mode-name → numeric id. Default mode is always 0; further entries
+    // come from `@mode(name)` pre-annotations in declaration order. The
+    // map is built up-front so token mode_ids and mode_action targets
+    // resolve with a single pass.
+    let mode_ids = collect_mode_ids(g);
+
     // Assign dense kind ids starting at 1 — EOF (0) is reserved. Lex
     // failures are surfaced as `Option<TK>` (`None`) at the runtime
     // boundary, so they consume no kind id. Fragments are filtered out
@@ -183,6 +194,30 @@ pub fn build(ag: &AnalyzedGrammar) -> Program {
             pattern: resolve_pattern(&t.pattern, g),
             skip: t.skip,
             kind: (i + 1) as u16,
+            mode_id: t
+                .mode
+                .as_deref()
+                .map(|name| mode_ids[name])
+                .unwrap_or(0),
+            mode_actions: t
+                .mode_actions
+                .iter()
+                .map(|a| match a {
+                    ModeAction::Push(name) => {
+                        let id = mode_ids.get(name.as_str()).copied().unwrap_or_else(|| {
+                            // The grammar parser doesn't emit a synthetic
+                            // mode-name table, so a `push(unknown)` would
+                            // never resolve here. Bake in `0` (default) as
+                            // a fallback so codegen still succeeds; any
+                            // misuse should already have surfaced as an
+                            // analysis-stage error.
+                            0
+                        });
+                        ModeActionInfo::Push(id)
+                    }
+                    ModeAction::Pop => ModeActionInfo::Pop,
+                })
+                .collect(),
         })
         .collect();
     let mut b = Builder {
@@ -238,6 +273,10 @@ pub fn build(ag: &AnalyzedGrammar) -> Program {
         sync_sets,
         ..
     } = b;
+    let mut mode_names: Vec<String> = vec!["default".to_string(); mode_ids.len()];
+    for (name, id) in &mode_ids {
+        mode_names[*id as usize] = name.clone();
+    }
     Program {
         blocks,
         rule_entry,
@@ -247,7 +286,39 @@ pub fn build(ag: &AnalyzedGrammar) -> Program {
         rules,
         first_sets,
         sync_sets,
+        mode_names,
     }
+}
+
+/// Walk every token declaration and assign a numeric mode id to each
+/// distinct `@mode(name)` annotation. Mode `"default"` (= unannotated)
+/// always maps to id 0; further modes get ids 1.. in the order their
+/// first occurrence appears in the grammar source. Mode names referenced
+/// from `-> push(name)` actions are also recorded so action resolution
+/// can find them, even if no token actually lives in the named mode.
+fn collect_mode_ids(g: &Grammar) -> HashMap<String, u32> {
+    let mut ids: HashMap<String, u32> = HashMap::new();
+    ids.insert("default".to_string(), 0);
+    let mut next: u32 = 1;
+    for t in g.tokens.values() {
+        if let Some(name) = t.mode.as_deref() {
+            ids.entry(name.to_string()).or_insert_with(|| {
+                let id = next;
+                next += 1;
+                id
+            });
+        }
+        for a in &t.mode_actions {
+            if let ModeAction::Push(name) = a {
+                ids.entry(name.clone()).or_insert_with(|| {
+                    let id = next;
+                    next += 1;
+                    id
+                });
+            }
+        }
+    }
+    ids
 }
 
 impl Builder<'_> {
@@ -714,6 +785,8 @@ mod tests {
             pattern: TokenPattern::Literal("x".into()),
             skip: false,
             is_fragment: true,
+            mode: None,
+            mode_actions: Vec::new(),
             span: Default::default(),
         };
         leaf.is_fragment = true;
@@ -723,6 +796,8 @@ mod tests {
             pattern: TokenPattern::Ref("_LEAF".into()),
             skip: false,
             is_fragment: true,
+            mode: None,
+            mode_actions: Vec::new(),
             span: Default::default(),
         };
         mid.is_fragment = true;

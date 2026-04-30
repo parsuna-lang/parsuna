@@ -45,12 +45,15 @@ pub struct DfaMatch<TK: TokenKindEnum> {
     pub scanned: usize,
 }
 
-/// Grammar-specific lexer DFA. Generated code implements this with a
-/// compiled state machine — one branch per state — so the hot loop avoids
-/// the per-byte data-dependent table load that a table-driven DFA pays.
+/// Grammar-specific lexer DFA. Generated code implements this with one
+/// compiled state machine per declared lexer mode — a single
+/// `longest_match` branches on the mode id and falls into the matcher
+/// for the active mode. Grammars without `@mode(...)` pre-annotations
+/// have one mode (id 0) and the dispatch collapses to a single arm.
 pub trait DfaMatcher<TK: TokenKindEnum> {
-    /// Scan `buf[start..]` for the longest matching token.
-    fn longest_match(buf: &[u8], start: usize) -> DfaMatch<TK>;
+    /// Scan `buf[start..]` for the longest matching token in `mode`.
+    /// `mode` must be a mode id the grammar declared (0 = default).
+    fn longest_match(buf: &[u8], start: usize, mode: u32) -> DfaMatch<TK>;
 }
 
 /// Abstraction over anything that can hand tokens to the parser one at a
@@ -59,8 +62,19 @@ pub trait DfaMatcher<TK: TokenKindEnum> {
 /// custom lexer if the DFA-based one is insufficient.
 pub trait LexerBackend<'a, TK: TokenKindEnum> {
     /// Produce the next token. Must return [`Token`] with kind `TK::EOF`
-    /// once the input is exhausted (and every subsequent call).
+    /// once the input is exhausted (and every subsequent call). The
+    /// matcher used is determined by the mode currently on top of the
+    /// lexer's mode stack.
     fn next_token(&mut self) -> Token<'a, TK>;
+    /// Push `mode` onto the mode stack. Subsequent [`Self::next_token`]
+    /// calls scan with that mode's DFA until a matching [`Self::pop_mode`].
+    /// Default mode (id 0) is what the lexer starts in; calling
+    /// [`Self::pop_mode`] when only the default is on the stack is a
+    /// no-op so a stray `pop` action can't underflow.
+    fn push_mode(&mut self, mode: u32);
+    /// Pop the topmost mode off the stack, leaving at least the default
+    /// mode in place. Underflow is silently ignored.
+    fn pop_mode(&mut self);
 }
 
 /// In-memory, zero-copy lexer that runs the generated DFA over a `&str`.
@@ -75,13 +89,19 @@ pub struct Scanner<'a, TK: TokenKindEnum, D: DfaMatcher<TK>> {
     pos: usize,
     line: u32,
     col: u32,
+    /// Mode stack — top of stack is the active mode. Always non-empty;
+    /// initialised with the default mode (id 0). Push/pop happens via
+    /// [`LexerBackend::push_mode`] / [`LexerBackend::pop_mode`], typically
+    /// driven by `-> push(name)` / `-> pop` token actions.
+    modes: Vec<u32>,
     _tk: std::marker::PhantomData<fn() -> TK>,
     _dfa: std::marker::PhantomData<fn() -> D>,
 }
 
 impl<'a, TK: TokenKindEnum, D: DfaMatcher<TK>> Scanner<'a, TK, D> {
     /// Build a scanner over `src`. The scanner starts at the beginning of
-    /// the string at line 1, column 1.
+    /// the string at line 1, column 1, with the default lexer mode (id 0)
+    /// on the mode stack.
     pub fn new(src: &'a str) -> Self {
         Self {
             src,
@@ -89,9 +109,17 @@ impl<'a, TK: TokenKindEnum, D: DfaMatcher<TK>> Scanner<'a, TK, D> {
             pos: 0,
             line: 1,
             col: 1,
+            modes: vec![0],
             _tk: std::marker::PhantomData,
             _dfa: std::marker::PhantomData,
         }
+    }
+
+    #[inline]
+    fn current_mode(&self) -> u32 {
+        // `modes` is initialised non-empty and `pop_mode` refuses to
+        // underflow, so this is always safe.
+        *self.modes.last().expect("mode stack underflow")
     }
 
     #[inline]
@@ -146,7 +174,7 @@ impl<'a, TK: TokenKindEnum, D: DfaMatcher<TK>> LexerBackend<'a, TK> for Scanner<
                 text: Cow::Borrowed(""),
             };
         }
-        let m = D::longest_match(self.buf, self.pos);
+        let m = D::longest_match(self.buf, self.pos, self.current_mode());
         let start = self.cur_pos();
         if m.best_len > 0 {
             let text: Cow<'a, str> = Cow::Borrowed(&self.src[self.pos..self.pos + m.best_len]);
@@ -165,6 +193,18 @@ impl<'a, TK: TokenKindEnum, D: DfaMatcher<TK>> LexerBackend<'a, TK> for Scanner<
                 span: Span::new(start, self.cur_pos()),
                 text,
             }
+        }
+    }
+
+    #[inline]
+    fn push_mode(&mut self, mode: u32) {
+        self.modes.push(mode);
+    }
+
+    #[inline]
+    fn pop_mode(&mut self) {
+        if self.modes.len() > 1 {
+            self.modes.pop();
         }
     }
 }
@@ -187,6 +227,8 @@ pub struct StreamingLexer<R: Read, TK: TokenKindEnum, D: DfaMatcher<TK>> {
     offset: u32,
     line: u32,
     col: u32,
+    /// Mode stack — see [`Scanner::modes`]. Always non-empty.
+    modes: Vec<u32>,
     _tk: std::marker::PhantomData<fn() -> TK>,
     _dfa: std::marker::PhantomData<fn() -> D>,
 }
@@ -202,16 +244,22 @@ impl<R: Read, TK: TokenKindEnum, D: DfaMatcher<TK>> StreamingLexer<R, TK, D> {
             offset: 0,
             line: 1,
             col: 1,
+            modes: vec![0],
             _tk: std::marker::PhantomData,
             _dfa: std::marker::PhantomData,
         }
+    }
+
+    fn current_mode(&self) -> u32 {
+        *self.modes.last().expect("mode stack underflow")
     }
 
     fn longest_match(&mut self) -> (usize, Option<TK>) {
         loop {
             let view_slice = &self.buf[self.buf_pos..];
             let view_len = view_slice.len();
-            let m = D::longest_match(view_slice, 0);
+            let mode = self.current_mode();
+            let m = D::longest_match(view_slice, 0, mode);
             if m.scanned == view_len && !self.eof && self.read_more() {
                 continue;
             }
@@ -321,6 +369,18 @@ impl<R: Read, TK: TokenKindEnum, D: DfaMatcher<TK>> LexerBackend<'static, TK>
                 span: Span::new(start, self.pos()),
                 text,
             }
+        }
+    }
+
+    #[inline]
+    fn push_mode(&mut self, mode: u32) {
+        self.modes.push(mode);
+    }
+
+    #[inline]
+    fn pop_mode(&mut self) {
+        if self.modes.len() > 1 {
+            self.modes.pop();
         }
     }
 }

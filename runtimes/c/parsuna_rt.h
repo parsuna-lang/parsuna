@@ -105,12 +105,19 @@ typedef int (*ReadFn)(void *ctx, char *out, int max);
  *   static int  is_skip(uint16_t kind);
  *   static int  step(Parser *p, Event *out);
  *   static void longest_match_impl(const char *buf, size_t buf_len,
- *                                  size_t start, uint16_t *best_kind,
- *                                  size_t *best_len, size_t *scanned);
+ *                                  size_t start, uint32_t mode,
+ *                                  uint16_t *best_kind, size_t *best_len,
+ *                                  size_t *scanned);
+ *   static void apply_actions(uint16_t kind, struct Parser *p);
  *
  * `step` runs one state body and either fills `*out` and returns 1
  * (the state body emitted an event) or returns 0 (a pure transition
- * step — parser_next loops and calls `step` again). */
+ * step — parser_next loops and calls `step` again).
+ *
+ * `apply_actions` runs the per-token mode-stack actions declared via
+ * `-> push(name)` / `-> pop`. It's called once per token immediately
+ * after the lexer hands it to the runtime, before the skip / lookahead
+ * decision; grammars that declare no modes get an empty body. */
 #ifndef PARSUNA_K
 #  error "define PARSUNA_K before including parsuna_rt.h"
 #endif
@@ -118,13 +125,17 @@ typedef int (*ReadFn)(void *ctx, char *out, int max);
 struct Parser;  /* fwd decl */
 static int  is_skip(uint16_t kind);
 static int  step(struct Parser *p, Event *out);
-/* Compiled DFA: scans buf[start..buf_len] for the longest token. On return,
- * *best_kind/*best_len hold the longest match (best_len == 0 means no
- * accept), and *scanned is the total bytes walked past start. The runtime
- * uses `scanned == buf_len - start` to detect that the scan ran out of
- * buffer rather than hitting a real dead transition. */
+/* Compiled DFA: scans buf[start..buf_len] for the longest token in the
+ * given lexer `mode`. On return, *best_kind/*best_len hold the longest
+ * match (best_len == 0 means no accept), and *scanned is the total bytes
+ * walked past start. The runtime uses `scanned == buf_len - start` to
+ * detect that the scan ran out of buffer rather than hitting a real dead
+ * transition. `mode` is `0` for the default (anonymous) mode; further ids
+ * correspond to `@mode(name)` pre-annotations in declaration order. */
 static void longest_match_impl(const char *buf, size_t buf_len, size_t start,
-                               uint16_t *best_kind, size_t *best_len, size_t *scanned);
+                               uint32_t mode, uint16_t *best_kind,
+                               size_t *best_len, size_t *scanned);
+static void apply_actions(uint16_t kind, struct Parser *p);
 
 /* In-flight error recovery. Armed by `try_consume`'s slow path and by
  * `recover_to`; cleared once the lookahead lands on a sync token (or
@@ -166,6 +177,21 @@ typedef struct Parser {
     int   *ret; size_t ret_len, ret_cap;
 
     Recovery recovery;
+
+    /* Lexer mode stack — top-of-stack is the active mode. Initialised
+     * with the default mode (id 0) and never empty; `parser_pop_mode`
+     * is a no-op when only the default remains, so a stray `-> pop`
+     * action can't underflow. Push/pop is driven by the generated
+     * `apply_actions` callback after each lex token. */
+    uint32_t *mode_stack;
+    size_t mode_top, mode_cap;
+
+    /* When non-zero, skip tokens (whitespace, comments) are silently
+     * consumed instead of yielded as EV_TOKEN events. The lexer still
+     * matches them — they delimit structural tokens — but the
+     * parser_next loop never returns them. Default 0, matching the
+     * historic behaviour. */
+    int drop_skips;
 
     /* Strings owned by the last yielded event. Freed at the top of the
      * next parser_next call so the caller can keep reading them until
@@ -265,7 +291,8 @@ static inline void longest_match(Parser *p, uint16_t *best_kind, int *best_len) 
     for (;;) {
         uint16_t bk;
         size_t bl, scanned;
-        longest_match_impl(p->buf, p->buf_len, p->buf_pos, &bk, &bl, &scanned);
+        uint32_t mode = p->mode_stack[p->mode_top];
+        longest_match_impl(p->buf, p->buf_len, p->buf_pos, mode, &bk, &bl, &scanned);
         size_t view_len = p->buf_len - p->buf_pos;
         if (!p->eof && scanned == view_len) {
             if (lex_read_more(p)) continue;
@@ -310,6 +337,25 @@ static inline Token lex_next(Parser *p) {
     Pos end = { p->offset, p->line, p->col };
     Token t = { best_kind, { start, end }, text, (size_t)best_len };
     return t;
+}
+
+/* ---------- mode stack ----------
+ * Push/pop functions exposed to generated `apply_actions` so per-token
+ * `-> push(name)` / `-> pop` annotations can swap which DFA `lex_next`
+ * runs against. Push grows the backing array on demand; pop refuses to
+ * underflow past the default mode (id 0) so a malformed grammar can't
+ * crash the runtime. */
+static inline void parser_push_mode(Parser *p, uint32_t mode) {
+    if (p->mode_top + 1 >= p->mode_cap) {
+        size_t new_cap = p->mode_cap ? p->mode_cap * 2 : 8;
+        p->mode_stack = (uint32_t*)realloc(p->mode_stack, new_cap * sizeof(uint32_t));
+        p->mode_cap = new_cap;
+    }
+    p->mode_stack[++p->mode_top] = mode;
+}
+
+static inline void parser_pop_mode(Parser *p) {
+    if (p->mode_top > 0) p->mode_top--;
 }
 
 /* ---------- return stack ---------- */
@@ -486,6 +532,13 @@ static inline void parser_init_common(Parser *p, int entry_state) {
      * exits without consuming anything. */
     Pos zero = { 0, 1, 1 };
     p->prev_end = zero;
+    /* Mode stack starts with just the default mode (id 0). Grammars
+     * without `@mode(...)` pre-annotations only ever see this single
+     * entry; mode-using grammars push/pop via `apply_actions`. */
+    p->mode_cap = 8;
+    p->mode_stack = (uint32_t*)malloc(p->mode_cap * sizeof(uint32_t));
+    p->mode_stack[0] = 0;
+    p->mode_top = 0;
 }
 
 /* Initialize `p` for streaming over a `ReadFn` callback. */
@@ -533,11 +586,25 @@ static inline int parser_next(Parser *p, Event *out) {
     for (;;) {
         if (pump_pending(p)) {
             Token t = lex_next(p);
+            /* Apply per-token mode-stack actions before deciding skip vs.
+             * structural — the parser-level check forbids `-> skip`
+             * combined with `-> push/pop` so a skip token never has
+             * actions, but calling unconditionally keeps the call site
+             * simple and the default impl is empty for action-free
+             * grammars. */
+            apply_actions(t.kind, p);
             if (is_skip(t.kind)) {
-                Event e = {0};
-                e.tag = EV_TOKEN;
-                e.token = t;
-                return yield_event(p, e, out);
+                if (!p->drop_skips) {
+                    Event e = {0};
+                    e.tag = EV_TOKEN;
+                    e.token = t;
+                    return yield_event(p, e, out);
+                }
+                /* Skip-drop mode: free the token text we just allocated
+                 * (in owned-buffer mode) and loop without filling the
+                 * lookahead. Borrowed-buffer mode never allocates here. */
+                if (!p->borrow_buf) free(t.text);
+                continue;
             }
             for (int i = 0; i < PARSUNA_K; i++) {
                 if (!p->look_filled[i]) {
@@ -587,6 +654,7 @@ static inline void parser_destroy(Parser *p) {
     if (!p) return;
     if (!p->borrow_buf) free(p->buf);
     free(p->ret);
+    free(p->mode_stack);
 
     /* look_buf is an inline fixed-size array — no free. Free each
      * filled slot's owned text (skipped in borrow mode). */

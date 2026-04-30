@@ -161,8 +161,6 @@ fn emit_reexports(s: &mut String) {
 }
 
 fn emit_compiled_dfa(s: &mut String, st: &StateTable) {
-    let dfa = &st.lexer_dfa;
-
     writeln!(s).unwrap();
     writeln!(s, "/// Compiled lexer DFA for this grammar.").unwrap();
     writeln!(s, "///").unwrap();
@@ -173,10 +171,19 @@ fn emit_compiled_dfa(s: &mut String, st: &StateTable) {
     .unwrap();
     writeln!(
         s,
-        "/// per-state `match` rather than a transition table. Generated code"
+        "/// per-state `match` rather than a transition table. One helper"
     )
     .unwrap();
-    writeln!(s, "/// supplies this to [`Scanner`]/[`StreamingLexer`].").unwrap();
+    writeln!(
+        s,
+        "/// is emitted per declared lexer mode; `longest_match` dispatches"
+    )
+    .unwrap();
+    writeln!(
+        s,
+        "/// on the active mode id and falls through to the matching helper."
+    )
+    .unwrap();
     writeln!(s, "pub struct LexerDfa;").unwrap();
     writeln!(s).unwrap();
 
@@ -184,31 +191,65 @@ fn emit_compiled_dfa(s: &mut String, st: &StateTable) {
     writeln!(s, "    #[inline]").unwrap();
     writeln!(
         s,
-        "    fn longest_match(buf: &[u8], start: usize) -> DfaMatch<TokenKind> {{"
+        "    fn longest_match(buf: &[u8], start: usize, mode: u32) -> DfaMatch<TokenKind> {{"
     )
     .unwrap();
-    writeln!(s, "        let mut pos = start;").unwrap();
-    writeln!(s, "        let mut best_len: usize = 0;").unwrap();
-    writeln!(s, "        let mut best_kind: Option<TokenKind> = None;").unwrap();
-    writeln!(s, "        let mut state: u32 = {};", START).unwrap();
-    writeln!(s, "        loop {{").unwrap();
-    writeln!(s, "            match state {{").unwrap();
-
-    for ds in dfa {
-        emit_dfa_state_arm(s, st, ds, "                ");
+    if st.modes.len() == 1 {
+        writeln!(s, "        let _ = mode;").unwrap();
+        writeln!(s, "        longest_match_mode_0(buf, start)").unwrap();
+    } else {
+        writeln!(s, "        match mode {{").unwrap();
+        for m in &st.modes {
+            writeln!(
+                s,
+                "            {} => longest_match_mode_{}(buf, start),",
+                m.id, m.id
+            )
+            .unwrap();
+        }
+        writeln!(s, "            _ => DfaMatch {{ best_len: 0, best_kind: None, scanned: 0 }},").unwrap();
+        writeln!(s, "        }}").unwrap();
     }
-
-    writeln!(s, "                _ => break,").unwrap();
-    writeln!(s, "            }}").unwrap();
-    writeln!(s, "        }}").unwrap();
-    writeln!(
-        s,
-        "        DfaMatch {{ best_len, best_kind, scanned: pos - start }}"
-    )
-    .unwrap();
     writeln!(s, "    }}").unwrap();
     writeln!(s, "}}").unwrap();
     writeln!(s).unwrap();
+
+    for m in &st.modes {
+        writeln!(
+            s,
+            "/// Longest-match helper for lexer mode `{}` (id {}).",
+            m.name, m.id
+        )
+        .unwrap();
+        writeln!(s, "#[inline]").unwrap();
+        writeln!(
+            s,
+            "fn longest_match_mode_{}(buf: &[u8], start: usize) -> DfaMatch<TokenKind> {{",
+            m.id
+        )
+        .unwrap();
+        writeln!(s, "    let mut pos = start;").unwrap();
+        writeln!(s, "    let mut best_len: usize = 0;").unwrap();
+        writeln!(s, "    let mut best_kind: Option<TokenKind> = None;").unwrap();
+        writeln!(s, "    let mut state: u32 = {};", START).unwrap();
+        writeln!(s, "    loop {{").unwrap();
+        writeln!(s, "        match state {{").unwrap();
+
+        for ds in &m.dfa {
+            emit_dfa_state_arm(s, st, ds, "            ");
+        }
+
+        writeln!(s, "            _ => break,").unwrap();
+        writeln!(s, "        }}").unwrap();
+        writeln!(s, "    }}").unwrap();
+        writeln!(
+            s,
+            "    DfaMatch {{ best_len, best_kind, scanned: pos - start }}"
+        )
+        .unwrap();
+        writeln!(s, "}}").unwrap();
+        writeln!(s).unwrap();
+    }
 }
 
 fn emit_dfa_state_arm(s: &mut String, st: &StateTable, ds: &DfaState, ind: &str) {
@@ -224,10 +265,11 @@ fn emit_dfa_state_arm(s: &mut String, st: &StateTable, ds: &DfaState, ind: &str)
     // (whitespace runs, identifier bodies, comment / string contents).
     // The byte that breaks the inner loop falls through to the regular
     // dispatch below, so non-self-loop transitions are unchanged.
-    let inner_ind = if ds.self_loop.is_empty() {
+    let self_loop = ds.self_loop_ranges();
+    let inner_ind = if self_loop.is_empty() {
         ind.to_string()
     } else {
-        let pat = format_byte_pattern(&ds.self_loop);
+        let pat = format_byte_pattern(self_loop);
         writeln!(s, "{}{} => {{", ind, ds.id).unwrap();
         writeln!(s, "{}    while let Some(&b) = buf.get(pos) {{", ind).unwrap();
         writeln!(s, "{}        if !matches!(b, {}) {{ break; }}", ind, pat).unwrap();
@@ -246,7 +288,7 @@ fn emit_dfa_state_arm(s: &mut String, st: &StateTable, ds: &DfaState, ind: &str)
         format!("{}    ", ind)
     };
 
-    let prefix = if ds.self_loop.is_empty() {
+    let prefix = if self_loop.is_empty() {
         format!("{}{} => ", ind, ds.id)
     } else {
         inner_ind.clone()
@@ -278,7 +320,7 @@ fn emit_dfa_state_arm(s: &mut String, st: &StateTable, ds: &DfaState, ind: &str)
         writeln!(s, " }}").unwrap();
     }
     writeln!(s, "{}    _ => break,", inner_ind).unwrap();
-    if ds.self_loop.is_empty() {
+    if self_loop.is_empty() {
         writeln!(s, "{}}},", ind).unwrap();
     } else {
         writeln!(s, "{}}}", inner_ind).unwrap();
@@ -388,9 +430,14 @@ fn emit_parser(s: &mut String) {
 pub struct Grammar;
 
 /// Parser alias pinning the grammar and lookahead. `L` is any
-/// [`LexerBackend`]; the generated `parse_*_from_str`/`parse_*_from_reader`
-/// helpers build a parser with either [`Scanner`] or [`StreamingLexer`].
-pub type Parser<'a, L> = parsuna_rt::Parser<'a, L, K, Grammar>;
+/// [`LexerBackend`]; `C` is a [`parsuna_rt::ParserConfig`] (defaults to
+/// [`parsuna_rt::EmitSkips`], which surfaces skip tokens in the event
+/// stream — pass [`parsuna_rt::DropSkips`] to silently consume them).
+/// The generated `parse_*_from_str`/`parse_*_from_reader` helpers build a
+/// parser with either [`Scanner`] or [`StreamingLexer`]; their `_with`
+/// counterparts let the caller pin a custom config via turbofish, e.g.
+/// `parse_foo_from_str_with::<_, parsuna_rt::DropSkips>(src)`.
+pub type Parser<'a, L, C = parsuna_rt::EmitSkips> = parsuna_rt::Parser<'a, L, K, Grammar, C>;
 "#,
     );
 }
@@ -624,7 +671,7 @@ fn emit_step(s: &mut String, st: &StateTable) {
     writeln!(s, "    #[inline]").unwrap();
     writeln!(
         s,
-        "    fn step<'a, 'p, L: LexerBackend<'a, Self::TokenKind>>(p: &mut parsuna_rt::Cursor<'p, 'a, L, K, Self>) -> Option<parsuna_rt::Event<'a, TokenKind, RuleKind>> {{"
+        "    fn step<'a, 'p, L: LexerBackend<'a, Self::TokenKind>, C: parsuna_rt::ParserConfig>(p: &mut parsuna_rt::Cursor<'p, 'a, L, K, Self, C>) -> Option<parsuna_rt::Event<'a, TokenKind, RuleKind>> {{"
     )
     .unwrap();
     // One match arm per call. Each arm runs a state body's ops —
@@ -649,8 +696,49 @@ fn emit_step(s: &mut String, st: &StateTable) {
     writeln!(s, "        p.set_state(cur);").unwrap();
     writeln!(s, "        event").unwrap();
     writeln!(s, "    }}").unwrap();
+    writeln!(s).unwrap();
+    emit_apply_actions(s, st);
     writeln!(s, "}}").unwrap();
     writeln!(s).unwrap();
+}
+
+fn emit_apply_actions(s: &mut String, st: &StateTable) {
+    use crate::lowering::ModeActionInfo;
+
+    let action_tokens: Vec<&crate::lowering::TokenInfo> = st
+        .tokens
+        .iter()
+        .filter(|t| !t.mode_actions.is_empty())
+        .collect();
+
+    writeln!(s, "    #[inline]").unwrap();
+    writeln!(
+        s,
+        "    fn apply_actions<'a, L: parsuna_rt::LexerBackend<'a, Self::TokenKind>>(kind: Option<TokenKind>, lex: &mut L) {{"
+    )
+    .unwrap();
+    if action_tokens.is_empty() {
+        writeln!(s, "        let _ = (kind, lex);").unwrap();
+    } else {
+        writeln!(s, "        match kind {{").unwrap();
+        for t in &action_tokens {
+            writeln!(s, "            Some({}) => {{", token_variant(st, t.kind)).unwrap();
+            for action in &t.mode_actions {
+                match action {
+                    ModeActionInfo::Push(id) => {
+                        writeln!(s, "                lex.push_mode({});", id).unwrap();
+                    }
+                    ModeActionInfo::Pop => {
+                        writeln!(s, "                lex.pop_mode();").unwrap();
+                    }
+                }
+            }
+            writeln!(s, "            }}").unwrap();
+        }
+        writeln!(s, "            _ => {{ let _ = lex; }}").unwrap();
+        writeln!(s, "        }}").unwrap();
+    }
+    writeln!(s, "    }}").unwrap();
 }
 
 fn emit_public_api(s: &mut String, st: &StateTable) {
@@ -659,21 +747,50 @@ fn emit_public_api(s: &mut String, st: &StateTable) {
         writeln!(s).unwrap();
 
         for (name, _) in &st.entry_states {
+            let upper = name.to_uppercase();
+
             writeln!(s, "/// Parse the `{name}` rule from an in-memory string.").unwrap();
             writeln!(s, "///").unwrap();
             writeln!(s, "/// Zero-copy: tokens borrow their text from `src`.").unwrap();
+            writeln!(s, "/// Skip tokens (whitespace, comments) are surfaced as").unwrap();
+            writeln!(s, "/// `Event::Token`. Use [`parse_{name}_from_str_with`] to pick a").unwrap();
+            writeln!(s, "/// different [`parsuna_rt::ParserConfig`].").unwrap();
             writeln!(
                 s,
                 "pub fn parse_{name}_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>> {{",
-                name = name
+            )
+            .unwrap();
+            writeln!(s, "    Parser::new(Scanner::new(src), ENTRY_{upper})").unwrap();
+            writeln!(s, "}}").unwrap();
+            writeln!(s).unwrap();
+
+            writeln!(
+                s,
+                "/// Parse the `{name}` rule from an in-memory string with a caller-chosen config."
+            )
+            .unwrap();
+            writeln!(s, "///").unwrap();
+            writeln!(
+                s,
+                "/// Pin the config via turbofish: `parse_{name}_from_str_with::<_, parsuna_rt::DropSkips>(src)`"
             )
             .unwrap();
             writeln!(
                 s,
-                "    Parser::new(Scanner::new(src), ENTRY_{upper})",
-                upper = name.to_uppercase()
+                "/// to silently consume skip tokens. Monomorphization removes the skip-emit"
             )
             .unwrap();
+            writeln!(
+                s,
+                "/// branch for any config whose `EMIT_SKIPS` is `false`."
+            )
+            .unwrap();
+            writeln!(
+                s,
+                "pub fn parse_{name}_from_str_with<'a, C: parsuna_rt::ParserConfig>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>, C> {{",
+            )
+            .unwrap();
+            writeln!(s, "    Parser::new(Scanner::new(src), ENTRY_{upper})").unwrap();
             writeln!(s, "}}").unwrap();
             writeln!(s).unwrap();
 
@@ -684,19 +801,33 @@ fn emit_public_api(s: &mut String, st: &StateTable) {
                 "/// Streaming: tokens own their text; memory use stays bounded regardless of"
             )
             .unwrap();
-            writeln!(s, "/// input size.").unwrap();
+            writeln!(s, "/// input size. See [`parse_{name}_from_reader_with`] to pick a config.").unwrap();
             writeln!(
                 s,
                 "pub fn parse_{name}_from_reader<R: Read>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>> {{",
-                name = name
+            )
+            .unwrap();
+            writeln!(s, "    Parser::new(StreamingLexer::new(reader), ENTRY_{upper})").unwrap();
+            writeln!(s, "}}").unwrap();
+            writeln!(s).unwrap();
+
+            writeln!(
+                s,
+                "/// Parse the `{name}` rule from any [`Read`] source with a caller-chosen config."
+            )
+            .unwrap();
+            writeln!(s, "///").unwrap();
+            writeln!(
+                s,
+                "/// See [`parse_{name}_from_str_with`] for how to pick a [`parsuna_rt::ParserConfig`]."
             )
             .unwrap();
             writeln!(
                 s,
-                "    Parser::new(StreamingLexer::new(reader), ENTRY_{upper})",
-                upper = name.to_uppercase()
+                "pub fn parse_{name}_from_reader_with<R: Read, C: parsuna_rt::ParserConfig>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>, C> {{",
             )
             .unwrap();
+            writeln!(s, "    Parser::new(StreamingLexer::new(reader), ENTRY_{upper})").unwrap();
             writeln!(s, "}}").unwrap();
             writeln!(s).unwrap();
         }

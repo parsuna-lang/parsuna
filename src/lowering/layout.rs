@@ -12,7 +12,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use crate::analysis::AnalyzedGrammar;
 use crate::lowering::build::{Block, BlockId, Op, Program, Target};
 use crate::lowering::lexer_dfa::{self, DfaOpts};
-use crate::lowering::{build_dispatch_tree, Body, FirstSet, Instr, State, StateId, StateTable, Tail};
+use crate::lowering::{
+    build_dispatch_tree, Body, FirstSet, Instr, ModeInfo, State, StateId, StateTable, Tail,
+};
 
 /// Assign state ids to every op in every block, resolve inter-block
 /// targets, and compile the lexer DFA. Produces the [`StateTable`]
@@ -114,7 +116,31 @@ pub fn layout(prog: Program, ag: &AnalyzedGrammar, dopts: DfaOpts) -> StateTable
         .map(|n| (n.clone(), entry[&prog.rule_entry[n]]))
         .collect();
 
-    let lexer_dfa = lexer_dfa::compile_with_opts(&prog.tokens, dopts);
+    // One DFA per declared lexer mode. A token belongs to its mode_id;
+    // the per-mode token vec is what the DFA builder sees. We hold on
+    // to the original `kind` ids — mode-local DFAs still emit the same
+    // global TokenKind ids, so dispatch can look up the matched kind
+    // without an indirection.
+    let modes: Vec<ModeInfo> = prog
+        .mode_names
+        .iter()
+        .enumerate()
+        .map(|(id, name)| {
+            let id = id as u32;
+            let mode_tokens: Vec<_> = prog
+                .tokens
+                .iter()
+                .filter(|t| t.mode_id == id)
+                .cloned()
+                .collect();
+            let dfa = lexer_dfa::compile_with_opts(&mode_tokens, dopts);
+            ModeInfo {
+                id,
+                name: name.clone(),
+                dfa,
+            }
+        })
+        .collect();
 
     StateTable {
         grammar_name: ag.grammar.name.clone(),
@@ -125,7 +151,7 @@ pub fn layout(prog: Program, ag: &AnalyzedGrammar, dopts: DfaOpts) -> StateTable
         states,
         entry_states,
         k: ag.k,
-        lexer_dfa,
+        modes,
     }
 }
 
@@ -395,8 +421,8 @@ mod tests {
     fn lexer_dfa_compiled_alongside_state_table() {
         let (_, st) = lay("T = \"t\"; main = T;");
         // DFA always has at least the dead state plus a real start.
-        assert!(!st.lexer_dfa.is_empty());
-        assert_eq!(st.lexer_dfa[0].id, crate::lowering::lexer_dfa::START);
+        assert!(!st.lexer_dfa().is_empty());
+        assert_eq!(st.lexer_dfa()[0].id, crate::lowering::lexer_dfa::START);
     }
 
     #[test]

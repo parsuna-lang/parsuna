@@ -95,7 +95,7 @@ type Event struct {
 const Terminated = -1
 
 // MatcherFunc is the grammar-specific compiled DFA the runtime drives.
-// It scans buf[start:] for the longest matching token. Returns
+// It scans buf[start:] for the longest matching token in mode. Returns
 // (bestLen, bestKind, scanned):
 //   - bestLen: bytes consumed by the longest match (0 means no accept).
 //   - bestKind: token kind of the longest match, or ErrorKind when no
@@ -103,7 +103,12 @@ const Terminated = -1
 //   - scanned: total bytes walked past start; equals len(buf)-start when
 //     the scan stopped at end of input rather than a dead transition. The
 //     streaming lexer uses this to detect buffer exhaustion mid-token.
-type MatcherFunc func(buf []byte, start int) (int, uint16, int)
+//
+// mode is the active lexer mode id — 0 for the default (anonymous) mode,
+// further ids correspond to @mode(name) pre-annotations in declaration
+// order. Generated matchers branch on it and dispatch into the per-mode
+// state machine; grammars without modes ignore it.
+type MatcherFunc func(buf []byte, start int, mode uint32) (int, uint16, int)
 
 const lexChunk = 16384
 
@@ -117,11 +122,30 @@ type Lexer struct {
 	offset    uint32
 	line, col uint32
 	matcher   MatcherFunc
+	// modeStack tracks the active lexer mode. Top of stack is what
+	// NextToken passes to matcher. Initialised with the default mode
+	// (id 0) and never empty; PopMode is a no-op past the bottom so a
+	// stray `-> pop` action can't underflow.
+	modeStack []uint32
 }
 
 // NewLexer builds a lexer over r.
 func NewLexer(r io.Reader, matcher MatcherFunc) *Lexer {
-	return &Lexer{reader: r, line: 1, col: 1, matcher: matcher}
+	return &Lexer{reader: r, line: 1, col: 1, matcher: matcher, modeStack: []uint32{0}}
+}
+
+// PushMode pushes mode onto the mode stack; subsequent NextToken calls
+// scan with that mode's DFA until a matching PopMode.
+func (l *Lexer) PushMode(mode uint32) {
+	l.modeStack = append(l.modeStack, mode)
+}
+
+// PopMode pops the topmost mode off the stack, leaving at least the
+// default mode in place. Underflow is silently ignored.
+func (l *Lexer) PopMode() {
+	if len(l.modeStack) > 1 {
+		l.modeStack = l.modeStack[:len(l.modeStack)-1]
+	}
 }
 
 func (l *Lexer) pos() Pos { return Pos{Offset: l.offset, Line: l.line, Column: l.col} }
@@ -196,8 +220,9 @@ func (l *Lexer) advance(n int) {
 }
 
 func (l *Lexer) longestMatch() (int, uint16) {
+	mode := l.modeStack[len(l.modeStack)-1]
 	for {
-		bestLen, bestKind, scanned := l.matcher(l.buf, l.bufPos)
+		bestLen, bestKind, scanned := l.matcher(l.buf, l.bufPos, mode)
 		viewLen := len(l.buf) - l.bufPos
 		if !l.eof && scanned == viewLen {
 			if l.readMore() {
@@ -247,6 +272,23 @@ type Config struct {
 	// Enter/Exit/etc.). Outside callers only see *Parser, which has
 	// no such methods, so the parser's internal state stays sealed.
 	Step func(c *Cursor) (Event, bool)
+	// ApplyActions fires the per-token mode-stack actions declared
+	// via `-> push(name)` / `-> pop`. Called once per lex token before
+	// the skip / lookahead decision; nil is treated as a no-op for
+	// grammars that declare no modes.
+	ApplyActions func(kind uint16, lex *Lexer)
+}
+
+// Options controls runtime behaviour the caller picks per parser
+// construction. Today this is just the skip-emission knob; future
+// runtime-level toggles can extend the struct without breaking
+// existing call sites because of zero-value defaults.
+type Options struct {
+	// DropSkips suppresses skip tokens at the source: the lexer still
+	// matches them (they delimit structural tokens), but the parser's
+	// Next loop never returns them. Default false (= emit skip tokens
+	// as EvToken events, matching the historic behaviour).
+	DropSkips bool
 }
 
 // recovery is in-flight error recovery. Set by TryConsume's mismatch
@@ -292,6 +334,7 @@ type Parser struct {
 	rec        recovery
 	recActive  bool
 	cfg        Config
+	opts       Options
 }
 
 // NewParser builds a parser starting at state `entry`.
@@ -301,10 +344,18 @@ type Parser struct {
 // before the first structural token) are emitted before the entry rule's
 // Enter event.
 func NewParser(lex *Lexer, entry int, cfg Config) *Parser {
+	return NewParserWithOptions(lex, entry, cfg, Options{})
+}
+
+// NewParserWithOptions is NewParser plus runtime [Options] (today: a skip-
+// drop toggle). Passing the zero-value Options is equivalent to
+// NewParser.
+func NewParserWithOptions(lex *Lexer, entry int, cfg Config, opts Options) *Parser {
 	return &Parser{
 		lex:        lex,
 		state:      entry,
 		cfg:        cfg,
+		opts:       opts,
 		look:       make([]Token, cfg.K),
 		lookFilled: make([]bool, cfg.K),
 	}
@@ -457,8 +508,14 @@ func (p *Parser) Next() (Event, bool) {
 		// checking slot K-1 is the O(1) form of "any slot empty".
 		if !p.lookFilled[p.cfg.K-1] {
 			t := p.lex.NextToken()
+			if p.cfg.ApplyActions != nil {
+				p.cfg.ApplyActions(t.Kind, p.lex)
+			}
 			if p.cfg.IsSkip(t.Kind) {
-				return Event{Tag: EvToken, Token: t}, true
+				if !p.opts.DropSkips {
+					return Event{Tag: EvToken, Token: t}, true
+				}
+				continue
 			}
 			for i, ok := range p.lookFilled {
 				if !ok {

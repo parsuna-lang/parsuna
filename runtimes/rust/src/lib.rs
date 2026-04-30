@@ -18,5 +18,5 @@ pub mod span;
 
 pub use events::{Error, Event, RuleKindEnum, Token, TokenKindEnum, TOKEN_EOF};
 pub use lexer::{utf8_char_len, DfaMatch, DfaMatcher, LexerBackend, Scanner, StreamingLexer};
-pub use parser::{Cursor, Grammar, Parser, TERMINATED};
+pub use parser::{Cursor, DropSkips, EmitSkips, Grammar, Parser, ParserConfig, TERMINATED};
 pub use span::{Pos, Span};

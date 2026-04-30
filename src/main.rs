@@ -73,12 +73,6 @@ struct OptArgs {
     /// the raw subset-construction output.
     #[arg(long = "no-dfa-minimize", global = true, help_heading = "Optimizer")]
     no_dfa_minimize: bool,
-
-    /// Disable per-DFA-state self-loop range computation. Backends
-    /// that can vectorize a scan-past prologue won't have the data
-    /// to do so.
-    #[arg(long = "no-dfa-detect-self-loops", global = true, help_heading = "Optimizer")]
-    no_dfa_detect_self_loops: bool,
 }
 
 impl OptArgs {
@@ -94,7 +88,6 @@ impl OptArgs {
     fn dfa_opts(&self) -> DfaOpts {
         DfaOpts {
             minimize: !self.no_dfa_minimize,
-            detect_self_loops: !self.no_dfa_detect_self_loops,
         }
     }
 }
@@ -299,11 +292,18 @@ fn print_stats(ag: &parsuna::AnalyzedGrammar, st: &StateTable) {
     println!("state table   : {} states", st.states.len());
     println!("FIRST pool    : {} interned", st.first_sets.len());
     println!("SYNC pool     : {} interned", st.sync_sets.len());
+    let total_dfa: usize = st.modes.iter().map(|m| m.dfa.len()).sum();
     println!(
-        "lexer DFA     : {} states, start {}",
-        st.lexer_dfa.len(),
+        "lexer DFA     : {} states across {} mode(s), start {}",
+        total_dfa,
+        st.modes.len(),
         parsuna::lowering::lexer_dfa::START
     );
+    if st.modes.len() > 1 {
+        for m in &st.modes {
+            println!("                {:<2} {:<16} {} states", m.id, m.name, m.dfa.len());
+        }
+    }
     println!("entry points  : {}", st.entry_states.len());
 }
 
@@ -317,7 +317,7 @@ fn print_tokens(ag: &parsuna::AnalyzedGrammar) {
         .unwrap_or(0);
     for t in ag.grammar.tokens.values() {
         let tag = match (t.skip, t.is_fragment) {
-            (true, _) => " [skip]",
+            (true, _) => " -> skip",
             (_, true) => " [fragment]",
             _ => "",
         };
@@ -432,32 +432,47 @@ fn print_lowering(_ag: &parsuna::AnalyzedGrammar, st: &StateTable) {
 }
 
 fn print_dfa(st: &StateTable) {
-    let dfa: &[DfaState] = &st.lexer_dfa;
-
-    println!("DFA: {} real states, start = {}", dfa.len(), START);
-    println!();
-
-    for state in dfa {
-        let accept = match state.accept {
-            Some(k) => format!("accept={}({})", k, token_name_for_kind(st, k)),
-            None => "-".to_string(),
-        };
-        println!("state {:>3}  {}", state.id, accept);
-        if !state.self_loop.is_empty() {
-            let label: Vec<String> = state
-                .self_loop
-                .iter()
-                .map(|&(lo, hi)| byte_range_label(lo, hi))
-                .collect();
-            println!("            self-loop  {{{}}}", label.join(", "));
+    for (i, mode) in st.modes.iter().enumerate() {
+        if i > 0 {
+            println!();
         }
-        if state.arms.is_empty() {
-            println!("            (terminal — no live transitions)");
-        } else {
-            for arm in &state.arms {
-                for &(from, to) in &arm.ranges {
-                    let label = byte_range_label(from, to);
-                    println!("            {:>18}  -> {}", label, arm.target);
+        let dfa: &[DfaState] = &mode.dfa;
+        println!(
+            "mode {} \"{}\": {} real states, start = {}",
+            mode.id,
+            mode.name,
+            dfa.len(),
+            START
+        );
+        println!();
+
+        for state in dfa {
+            let accept = match state.accept {
+                Some(k) => format!(
+                    "accept={}({}){}",
+                    k,
+                    token_name_for_kind(st, k),
+                    mode_actions_suffix(st, k)
+                ),
+                None => "-".to_string(),
+            };
+            println!("state {:>3}  {}", state.id, accept);
+            let self_loop = state.self_loop_ranges();
+            if !self_loop.is_empty() {
+                let label: Vec<String> = self_loop
+                    .iter()
+                    .map(|&(lo, hi)| byte_range_label(lo, hi))
+                    .collect();
+                println!("            self-loop  {{{}}}", label.join(", "));
+            }
+            if state.arms.is_empty() {
+                println!("            (terminal — no live transitions)");
+            } else {
+                for arm in &state.arms {
+                    for &(from, to) in &arm.ranges {
+                        let label = byte_range_label(from, to);
+                        println!("            {:>18}  -> {}", label, arm.target);
+                    }
                 }
             }
         }
@@ -767,6 +782,35 @@ fn state_ref(st: &StateTable, id: u32) -> String {
     }
 }
 
+/// Render the mode-stack actions that fire after a token of `kind`
+/// matches — `" → push(tag)"`, `" → pop"`, `" → pop, push(b)"`, or
+/// `""` if the token has none.
+fn mode_actions_suffix(st: &StateTable, kind: u16) -> String {
+    use parsuna::lowering::ModeActionInfo;
+    let Some(t) = st.tokens.get(kind as usize - 1) else {
+        return String::new();
+    };
+    if t.mode_actions.is_empty() {
+        return String::new();
+    }
+    let parts: Vec<String> = t
+        .mode_actions
+        .iter()
+        .map(|a| match a {
+            ModeActionInfo::Push(id) => {
+                let name = st
+                    .modes
+                    .get(*id as usize)
+                    .map(|m| m.name.as_str())
+                    .unwrap_or("?");
+                format!("push({})", name)
+            }
+            ModeActionInfo::Pop => "pop".to_string(),
+        })
+        .collect();
+    format!(" → {}", parts.join(", "))
+}
+
 fn token_name_for_kind(st: &StateTable, kind: u16) -> &str {
     if kind == parsuna_rt::TOKEN_EOF {
         return "EOF";
@@ -812,30 +856,59 @@ fn display_byte(b: u8) -> String {
 }
 
 fn print_dfa_dot(st: &StateTable) {
-    let dfa: &[DfaState] = &st.lexer_dfa;
     println!("digraph lexer_dfa {{");
     println!("  rankdir=LR;");
+    println!("  compound=true;");
     println!("  node [fontname=\"Menlo,Monaco,Consolas,monospace\"];");
     println!("  edge [fontname=\"Menlo,Monaco,Consolas,monospace\"];");
 
-    println!("  _start [shape=point, width=0.12];");
-    println!("  _start -> s{};", START);
+    for mode in &st.modes {
+        let prefix = format!("m{}_", mode.id);
+        println!();
+        println!("  subgraph cluster_m{} {{", mode.id);
+        println!(
+            "    label=\"mode {} ({})\";",
+            mode.id,
+            dot_escape(&mode.name)
+        );
+        println!("    style=\"rounded\";");
+        println!("    labeljust=l;");
+        println!("    {}_start [shape=point, width=0.12];", prefix);
+        println!("    {0}_start -> {0}s{1};", prefix, START);
 
-    for state in dfa {
-        let (shape, label) = match state.accept {
-            Some(k) => (
-                "doublecircle",
-                format!("{}\\n{}", state.id, dot_escape(token_name_for_kind(st, k))),
-            ),
-            None => ("circle", state.id.to_string()),
-        };
-        println!("  s{} [shape={}, label=\"{}\"];", state.id, shape, label);
-        for arm in &state.arms {
-            for &(from, to) in &arm.ranges {
-                let label = dot_escape(&byte_range_label(from, to));
-                println!("  s{} -> s{} [label=\"{}\"];", state.id, arm.target, label);
+        for state in &mode.dfa {
+            let (shape, label) = match state.accept {
+                Some(k) => {
+                    let actions = mode_actions_suffix(st, k);
+                    let label = if actions.is_empty() {
+                        format!("{}\\n{}", state.id, dot_escape(token_name_for_kind(st, k)))
+                    } else {
+                        format!(
+                            "{}\\n{}\\n{}",
+                            state.id,
+                            dot_escape(token_name_for_kind(st, k)),
+                            dot_escape(actions.trim_start_matches(' '))
+                        )
+                    };
+                    ("doublecircle", label)
+                }
+                None => ("circle", state.id.to_string()),
+            };
+            println!(
+                "    {}s{} [shape={}, label=\"{}\"];",
+                prefix, state.id, shape, label
+            );
+            for arm in &state.arms {
+                for &(from, to) in &arm.ranges {
+                    let label = dot_escape(&byte_range_label(from, to));
+                    println!(
+                        "    {0}s{1} -> {0}s{2} [label=\"{3}\"];",
+                        prefix, state.id, arm.target, label
+                    );
+                }
             }
         }
+        println!("  }}");
     }
     println!("}}");
 }

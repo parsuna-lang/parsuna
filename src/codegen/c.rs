@@ -356,6 +356,28 @@ fn emit_header(h: &mut String, st: &StateTable, stem: &str, upper: &str) {
             "{stem}_Parser *{stem}_parser_new_{name}_from_read_fn({stem}_ReadFn read_fn, void *ctx);"
         )
         .unwrap();
+        writeln!(h).unwrap();
+        writeln!(
+            h,
+            "/* `_no_skips` variants: skip tokens (whitespace, comments) are silently"
+        )
+        .unwrap();
+        writeln!(
+            h,
+            " * consumed instead of yielded as EV_TOKEN events. Otherwise identical to"
+        )
+        .unwrap();
+        writeln!(h, " * the constructors above. */").unwrap();
+        writeln!(
+            h,
+            "{stem}_Parser *{stem}_parser_new_{name}_from_string_no_skips(const char *src, size_t len);"
+        )
+        .unwrap();
+        writeln!(
+            h,
+            "{stem}_Parser *{stem}_parser_new_{name}_from_read_fn_no_skips({stem}_ReadFn read_fn, void *ctx);"
+        )
+        .unwrap();
     }
     writeln!(h).unwrap();
     writeln!(
@@ -440,6 +462,7 @@ fn emit_impl(c: &mut String, st: &StateTable, stem: &str, upper: &str) {
     emit_dfa(c, st, upper);
     emit_tables(c, st, upper);
     emit_skip(c, st, upper);
+    emit_apply_actions(c, st, upper);
     emit_step(c, st, stem, upper);
     emit_public_api(c, st, stem, upper);
 }
@@ -474,9 +497,49 @@ fn emit_name_tables(c: &mut String, st: &StateTable, stem: &str, upper: &str) {
 }
 
 fn emit_dfa(c: &mut String, st: &StateTable, upper: &str) {
-    let dfa = &st.lexer_dfa;
+    writeln!(
+        c,
+        "/* Compiled lexer DFA: one helper per declared lexer mode. */"
+    )
+    .unwrap();
+    for m in &st.modes {
+        writeln!(
+            c,
+            "/* Longest-match helper for lexer mode `{}` (id {}). */",
+            m.name, m.id
+        )
+        .unwrap();
+        writeln!(
+            c,
+            "static void longest_match_mode{}_impl(const char *buf, size_t buf_len, size_t start,",
+            m.id
+        )
+        .unwrap();
+        writeln!(
+            c,
+            "                               uint16_t *best_kind, size_t *best_len, size_t *scanned) {{"
+        )
+        .unwrap();
+        writeln!(c, "  size_t pos = start;").unwrap();
+        writeln!(c, "  size_t bl = 0;").unwrap();
+        writeln!(c, "  uint16_t bk = {}_LEX_ERROR;", upper).unwrap();
+        writeln!(c, "  uint32_t state = {}u;", START).unwrap();
+        writeln!(c, "  for (;;) {{").unwrap();
+        writeln!(c, "    switch (state) {{").unwrap();
+        for ds in &m.dfa { emit_dfa_state_arm(c, st, ds, upper); }
+        writeln!(c, "      default: goto done;").unwrap();
+        writeln!(c, "    }}").unwrap();
+        writeln!(c, "  }}").unwrap();
+        writeln!(c, "done:").unwrap();
+        writeln!(c, "  *best_kind = bk;").unwrap();
+        writeln!(c, "  *best_len = bl;").unwrap();
+        writeln!(c, "  *scanned = pos - start;").unwrap();
+        writeln!(c, "}}").unwrap();
+        writeln!(c).unwrap();
+    }
 
-    writeln!(c, "/* Compiled lexer DFA: one switch arm per DFA state. */").unwrap();
+    /* Mode-dispatch entry point. Single-mode grammars collapse to a direct
+     * call so the dispatcher inlines away. */
     writeln!(
         c,
         "static void longest_match_impl(const char *buf, size_t buf_len, size_t start,"
@@ -484,23 +547,34 @@ fn emit_dfa(c: &mut String, st: &StateTable, upper: &str) {
     .unwrap();
     writeln!(
         c,
-        "                               uint16_t *best_kind, size_t *best_len, size_t *scanned) {{"
+        "                               uint32_t mode, uint16_t *best_kind, size_t *best_len, size_t *scanned) {{"
     )
     .unwrap();
-    writeln!(c, "  size_t pos = start;").unwrap();
-    writeln!(c, "  size_t bl = 0;").unwrap();
-    writeln!(c, "  uint16_t bk = {}_LEX_ERROR;", upper).unwrap();
-    writeln!(c, "  uint32_t state = {}u;", START).unwrap();
-    writeln!(c, "  for (;;) {{").unwrap();
-    writeln!(c, "    switch (state) {{").unwrap();
-    for ds in dfa { emit_dfa_state_arm(c, st, ds, upper); }
-    writeln!(c, "      default: goto done;").unwrap();
-    writeln!(c, "    }}").unwrap();
-    writeln!(c, "  }}").unwrap();
-    writeln!(c, "done:").unwrap();
-    writeln!(c, "  *best_kind = bk;").unwrap();
-    writeln!(c, "  *best_len = bl;").unwrap();
-    writeln!(c, "  *scanned = pos - start;").unwrap();
+    if st.modes.len() == 1 {
+        writeln!(c, "  (void)mode;").unwrap();
+        writeln!(
+            c,
+            "  longest_match_mode0_impl(buf, buf_len, start, best_kind, best_len, scanned);"
+        )
+        .unwrap();
+    } else {
+        writeln!(c, "  switch (mode) {{").unwrap();
+        for m in &st.modes {
+            writeln!(
+                c,
+                "    case {}: longest_match_mode{}_impl(buf, buf_len, start, best_kind, best_len, scanned); return;",
+                m.id, m.id
+            )
+            .unwrap();
+        }
+        writeln!(
+            c,
+            "    default: *best_kind = {}_LEX_ERROR; *best_len = 0; *scanned = 0; return;",
+            upper
+        )
+        .unwrap();
+        writeln!(c, "  }}").unwrap();
+    }
     writeln!(c, "}}").unwrap();
     writeln!(c).unwrap();
 }
@@ -516,7 +590,8 @@ fn emit_dfa_state_arm(
         return;
     }
     writeln!(c, "      case {}: {{", ds.id).unwrap();
-    if !ds.self_loop.is_empty() {
+    let self_loop = ds.self_loop_ranges();
+    if !self_loop.is_empty() {
         // Self-loop scan-skip prologue. clang/gcc autovectorise tight
         // byte-test loops with -O2; we keep the body simple and let
         // the optimiser lift it into SIMD on platforms that support it.
@@ -525,7 +600,7 @@ fn emit_dfa_state_arm(
         writeln!(
             c,
             "          if (!({})) break;",
-            byte_cond(&ds.self_loop)
+            byte_cond(self_loop)
         )
         .unwrap();
         writeln!(c, "          pos++;").unwrap();
@@ -653,6 +728,52 @@ fn emit_skip(c: &mut String, st: &StateTable, upper: &str) {
         writeln!(c, "  (void)kind; return 0;").unwrap();
     } else {
         writeln!(c, "  return {};", skips.join(" || ")).unwrap();
+    }
+    writeln!(c, "}}").unwrap();
+    writeln!(c).unwrap();
+}
+
+fn emit_apply_actions(c: &mut String, st: &StateTable, upper: &str) {
+    use crate::lowering::ModeActionInfo;
+
+    let action_tokens: Vec<&crate::lowering::TokenInfo> = st
+        .tokens
+        .iter()
+        .filter(|t| !t.mode_actions.is_empty())
+        .collect();
+
+    writeln!(
+        c,
+        "/* Apply per-token mode-stack actions to `p`. Generated as a switch"
+    )
+    .unwrap();
+    writeln!(
+        c,
+        " * over token kinds; tokens without `-> push/pop` fall through. */"
+    )
+    .unwrap();
+    writeln!(c, "static void apply_actions(uint16_t kind, Parser *p) {{").unwrap();
+    if action_tokens.is_empty() {
+        writeln!(c, "  (void)kind; (void)p;").unwrap();
+    } else {
+        writeln!(c, "  switch (kind) {{").unwrap();
+        for t in &action_tokens {
+            writeln!(c, "    case {}: {{", c_token_name(st, upper, t.kind)).unwrap();
+            for action in &t.mode_actions {
+                match action {
+                    ModeActionInfo::Push(id) => {
+                        writeln!(c, "      parser_push_mode(p, {}u);", id).unwrap();
+                    }
+                    ModeActionInfo::Pop => {
+                        writeln!(c, "      parser_pop_mode(p);").unwrap();
+                    }
+                }
+            }
+            writeln!(c, "      break;").unwrap();
+            writeln!(c, "    }}").unwrap();
+        }
+        writeln!(c, "    default: (void)p; break;").unwrap();
+        writeln!(c, "  }}").unwrap();
     }
     writeln!(c, "}}").unwrap();
     writeln!(c).unwrap();
@@ -848,20 +969,27 @@ fn emit_public_api(c: &mut String, st: &StateTable, stem: &str, upper: &str) {
     for (name, id) in &st.entry_states {
         writeln!(c, "{stem}_Parser *{stem}_parser_new_{name}_from_read_fn({stem}_ReadFn read_fn, void *ctx) {{").unwrap();
         writeln!(c, "  Parser *p = (Parser*)malloc(sizeof *p);").unwrap();
-        writeln!(
-            c,
-            "  parser_init_from_read_fn(p, {id}, read_fn, ctx);"
-        )
-        .unwrap();
+        writeln!(c, "  parser_init_from_read_fn(p, {id}, read_fn, ctx);").unwrap();
         writeln!(c, "  return ({stem}_Parser*)p;").unwrap();
         writeln!(c, "}}").unwrap();
         writeln!(c, "{stem}_Parser *{stem}_parser_new_{name}_from_string(const char *src, size_t len) {{").unwrap();
         writeln!(c, "  Parser *p = (Parser*)malloc(sizeof *p);").unwrap();
-        writeln!(
-            c,
-            "  parser_init_from_string(p, {id}, src, len);"
-        )
-        .unwrap();
+        writeln!(c, "  parser_init_from_string(p, {id}, src, len);").unwrap();
+        writeln!(c, "  return ({stem}_Parser*)p;").unwrap();
+        writeln!(c, "}}").unwrap();
+        /* No-skips variants: same constructors, then flip the runtime
+         * flag so parser_next silently consumes skip tokens instead
+         * of yielding them as EV_TOKEN events. */
+        writeln!(c, "{stem}_Parser *{stem}_parser_new_{name}_from_read_fn_no_skips({stem}_ReadFn read_fn, void *ctx) {{").unwrap();
+        writeln!(c, "  Parser *p = (Parser*)malloc(sizeof *p);").unwrap();
+        writeln!(c, "  parser_init_from_read_fn(p, {id}, read_fn, ctx);").unwrap();
+        writeln!(c, "  p->drop_skips = 1;").unwrap();
+        writeln!(c, "  return ({stem}_Parser*)p;").unwrap();
+        writeln!(c, "}}").unwrap();
+        writeln!(c, "{stem}_Parser *{stem}_parser_new_{name}_from_string_no_skips(const char *src, size_t len) {{").unwrap();
+        writeln!(c, "  Parser *p = (Parser*)malloc(sizeof *p);").unwrap();
+        writeln!(c, "  parser_init_from_string(p, {id}, src, len);").unwrap();
+        writeln!(c, "  p->drop_skips = 1;").unwrap();
         writeln!(c, "  return ({stem}_Parser*)p;").unwrap();
         writeln!(c, "}}").unwrap();
     }

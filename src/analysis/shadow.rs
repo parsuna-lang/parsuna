@@ -31,6 +31,11 @@ pub fn run(g: &Grammar, issues: &mut Vec<Diagnostic>) {
             if j >= i {
                 break;
             }
+            // Tokens in different lexer modes have separate DFAs, so they
+            // can't shadow each other regardless of pattern overlap.
+            if t.mode != u.mode {
+                continue;
+            }
             let resolved = resolve_pattern(&u.pattern, g);
             if pattern_matches_exactly(&resolved, bytes) {
                 issues.push(
@@ -223,6 +228,8 @@ mod tests {
             pattern: pat,
             skip: false,
             is_fragment: false,
+            mode: None,
+            mode_actions: Vec::new(),
             span: Default::default(),
         }
     }

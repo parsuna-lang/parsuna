@@ -41,12 +41,24 @@ pub struct DfaState {
     /// accept state. Filled by taking the minimum (= highest priority) of
     /// the NFA states collapsed into this DFA state.
     pub accept: Option<u16>,
+}
+
+impl DfaState {
     /// Byte ranges in this state's transition table that loop back to the
-    /// state itself. Empty when the state has no self-loop. Backends can
-    /// use this to emit a "scan past every byte in this set" prologue
-    /// before the per-byte switch — turns the byte-by-byte hot loop on
-    /// `[a-z]+`-like states into one bulk scan.
-    pub self_loop: Vec<(u8, u8)>,
+    /// state itself. Empty when the state has no self-loop. Backends use
+    /// this to emit a "scan past every byte in this set" prologue before
+    /// the per-byte switch — turns the byte-by-byte hot loop on `[a-z]+`-
+    /// like states into one bulk scan.
+    ///
+    /// Subset construction keys arms by target, so at most one arm per
+    /// state has `target == self.id`; we just return its ranges.
+    pub fn self_loop_ranges(&self) -> &[(u8, u8)] {
+        self.arms
+            .iter()
+            .find(|arm| arm.target == self.id)
+            .map(|arm| arm.ranges.as_slice())
+            .unwrap_or(&[])
+    }
 }
 
 /// One `match`/`switch` arm in a generated DFA state: every byte that
@@ -84,18 +96,11 @@ pub struct DfaOpts {
     /// output. Off: many duplicate near-identical states stay alive
     /// (e.g. one per UTF-8 byte arrival path through whitespace).
     pub minimize: bool,
-    /// Compute per-state self-loop byte ranges so backends can emit
-    /// a vectorizable scan-past prologue. Off: each byte goes through
-    /// the per-byte switch one at a time.
-    pub detect_self_loops: bool,
 }
 
 impl Default for DfaOpts {
     fn default() -> Self {
-        Self {
-            minimize: true,
-            detect_self_loops: true,
-        }
+        Self { minimize: true }
     }
 }
 
@@ -110,9 +115,6 @@ pub fn compile_with_opts(tokens: &[TokenInfo], opts: DfaOpts) -> Vec<DfaState> {
     let mut dfa = subset_construct(&nfa);
     if opts.minimize {
         dfa = minimize(dfa);
-    }
-    if opts.detect_self_loops {
-        detect_self_loops(&mut dfa);
     }
     dfa
 }
@@ -631,7 +633,6 @@ fn new_dfa_state(id: u32, nfa: &Nfa, set: &BTreeSet<NfaStateId>) -> DfaState {
         id,
         arms: Vec::new(),
         accept,
-        self_loop: Vec::new(),
     }
 }
 
@@ -747,7 +748,6 @@ fn minimize(states: Vec<DfaState>) -> Vec<DfaState> {
             id: new_id,
             arms,
             accept: rep.accept,
-            self_loop: Vec::new(),
         });
     }
     out.sort_by_key(|s| s.id);
@@ -778,23 +778,6 @@ fn set_block_of(blocks: &[Vec<usize>], block_of: &mut [u32]) {
 // =====================
 // Self-loop detection
 // =====================
-
-/// For each state, compute the set of bytes whose transition loops back
-/// to that same state. Backends can use this to emit a bulk scan-until-
-/// break loop instead of a byte-by-byte switch dispatch on bytes that
-/// don't change the state.
-fn detect_self_loops(states: &mut [DfaState]) {
-    for state in states {
-        let mut ranges: Vec<(u8, u8)> = state
-            .arms
-            .iter()
-            .filter(|arm| arm.target == state.id)
-            .flat_map(|arm| arm.ranges.iter().copied())
-            .collect();
-        ranges.sort();
-        state.self_loop = merge_adjacent(ranges);
-    }
-}
 
 fn epsilon_closure(nfa: &Nfa, seeds: BTreeSet<NfaStateId>) -> BTreeSet<NfaStateId> {
     let mut out = seeds.clone();
@@ -856,6 +839,8 @@ mod tests {
             pattern: pat,
             skip: false,
             kind: 0,
+            mode_id: 0,
+            mode_actions: Vec::new(),
         }
     }
 

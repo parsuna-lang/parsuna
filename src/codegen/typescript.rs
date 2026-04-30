@@ -206,42 +206,88 @@ fn rule_variant(st: &StateTable, kind: u16) -> String {
 }
 
 fn emit_dfa(s: &mut String, st: &StateTable) {
-    let dfa = &st.lexer_dfa;
-
     writeln!(s, "/**").unwrap();
     writeln!(
         s,
-        " * Scan `buf[start:]` for the longest accepted token. Returns the"
+        " * Scan `buf[start:]` for the longest accepted token in `mode`."
     )
     .unwrap();
     writeln!(
         s,
-        " * best match and how many bytes were scanned (so the lexer can"
+        " * Returns the best match and how many bytes were scanned (so the"
     )
     .unwrap();
-    writeln!(s, " * detect buffer exhaustion mid-token).").unwrap();
+    writeln!(s, " * lexer can detect buffer exhaustion mid-token).").unwrap();
+    writeln!(s, " *").unwrap();
+    writeln!(
+        s,
+        " * Branches on `mode` and falls into the per-mode helper. Single-mode"
+    )
+    .unwrap();
+    writeln!(
+        s,
+        " * grammars collapse to a direct call so the dispatch inlines away."
+    )
+    .unwrap();
     writeln!(s, " */").unwrap();
     writeln!(
         s,
-        "function longestMatch(buf: string, start: number): DfaMatch<TokenKind> {{"
+        "function longestMatch(buf: string, start: number, mode: number): DfaMatch<TokenKind> {{"
     )
     .unwrap();
-    writeln!(s, "  let pos = start;").unwrap();
-    writeln!(s, "  let bestLen = 0;").unwrap();
-    writeln!(s, "  let bestKind: TokenKind | null = null;").unwrap();
-    writeln!(s, "  let state = {};", START).unwrap();
-    writeln!(s, "  for (;;) {{").unwrap();
-    writeln!(s, "    switch (state) {{").unwrap();
-    for ds in dfa { emit_dfa_state_arm(s, st, ds); }
-    writeln!(
-        s,
-        "      default: return {{ bestLen, bestKind, scanned: pos - start }};"
-    )
-    .unwrap();
-    writeln!(s, "    }}").unwrap();
-    writeln!(s, "  }}").unwrap();
+    if st.modes.len() == 1 {
+        writeln!(s, "  void mode;").unwrap();
+        writeln!(s, "  return longestMatchMode0(buf, start);").unwrap();
+    } else {
+        writeln!(s, "  switch (mode) {{").unwrap();
+        for m in &st.modes {
+            writeln!(
+                s,
+                "    case {}: return longestMatchMode{}(buf, start);",
+                m.id, m.id
+            )
+            .unwrap();
+        }
+        writeln!(
+            s,
+            "    default: return {{ bestLen: 0, bestKind: null, scanned: 0 }};"
+        )
+        .unwrap();
+        writeln!(s, "  }}").unwrap();
+    }
     writeln!(s, "}}").unwrap();
     writeln!(s).unwrap();
+
+    for m in &st.modes {
+        writeln!(
+            s,
+            "/** Longest-match helper for lexer mode `{}` (id {}). */",
+            m.name, m.id
+        )
+        .unwrap();
+        writeln!(
+            s,
+            "function longestMatchMode{}(buf: string, start: number): DfaMatch<TokenKind> {{",
+            m.id
+        )
+        .unwrap();
+        writeln!(s, "  let pos = start;").unwrap();
+        writeln!(s, "  let bestLen = 0;").unwrap();
+        writeln!(s, "  let bestKind: TokenKind | null = null;").unwrap();
+        writeln!(s, "  let state = {};", START).unwrap();
+        writeln!(s, "  for (;;) {{").unwrap();
+        writeln!(s, "    switch (state) {{").unwrap();
+        for ds in &m.dfa { emit_dfa_state_arm(s, st, ds, m.id); }
+        writeln!(
+            s,
+            "      default: return {{ bestLen, bestKind, scanned: pos - start }};"
+        )
+        .unwrap();
+        writeln!(s, "    }}").unwrap();
+        writeln!(s, "  }}").unwrap();
+        writeln!(s, "}}").unwrap();
+        writeln!(s).unwrap();
+    }
 
     write!(
         s,
@@ -266,16 +312,22 @@ fn emit_dfa(s: &mut String, st: &StateTable) {
     // bumps `lastIndex` past the entire run, and the prologue copies
     // it back into `pos`. Irregexp scans these classes with its native
     // SIMD primitives, so a 64 KiB whitespace run becomes one tight
-    // bulk loop instead of one switch dispatch per byte.
-    for ds in &st.lexer_dfa {
-        if !ds.self_loop.is_empty() {
-            writeln!(
-                s,
-                "const SKIP_S{} = /[{}]+/y;",
-                ds.id,
-                regex_class(&ds.self_loop)
-            )
-            .unwrap();
+    // bulk loop instead of one switch dispatch per byte. Qualified by
+    // mode id because DFA state ids are per-mode and would otherwise
+    // collide across modes.
+    for m in &st.modes {
+        for ds in &m.dfa {
+            let self_loop = ds.self_loop_ranges();
+            if !self_loop.is_empty() {
+                writeln!(
+                    s,
+                    "const SKIP_M{}_S{} = /[{}]+/y;",
+                    m.id,
+                    ds.id,
+                    regex_class(self_loop)
+                )
+                .unwrap();
+            }
         }
     }
     writeln!(s).unwrap();
@@ -306,6 +358,7 @@ fn emit_dfa_state_arm(
     s: &mut String,
     st: &StateTable,
         ds: &DfaState,
+    mode_id: u32,
 ) {
     if ds.arms.is_empty() {
         writeln!(
@@ -317,12 +370,13 @@ fn emit_dfa_state_arm(
         return;
     }
     writeln!(s, "      case {}: {{", ds.id).unwrap();
-    if !ds.self_loop.is_empty() {
-        writeln!(s, "        SKIP_S{}.lastIndex = pos;", ds.id).unwrap();
+    if !ds.self_loop_ranges().is_empty() {
+        writeln!(s, "        SKIP_M{}_S{}.lastIndex = pos;", mode_id, ds.id).unwrap();
         writeln!(
             s,
-            "        if (SKIP_S{}.test(buf)) pos = SKIP_S{}.lastIndex;",
-            ds.id, ds.id
+            "        if (SKIP_M{m}_S{n}.test(buf)) pos = SKIP_M{m}_S{n}.lastIndex;",
+            m = mode_id,
+            n = ds.id
         )
         .unwrap();
         if let Some(kind) = ds.accept {
@@ -593,19 +647,74 @@ fn emit_dispatch_leaf_block(
     }
 }
 
-fn emit_public_api(s: &mut String, st: &StateTable) {
+fn emit_apply_actions(s: &mut String, st: &StateTable) {
+    use crate::lowering::ModeActionInfo;
+
+    let action_tokens: Vec<&crate::lowering::TokenInfo> = st
+        .tokens
+        .iter()
+        .filter(|t| !t.mode_actions.is_empty())
+        .collect();
+
+    writeln!(s, "/**").unwrap();
     writeln!(
         s,
-        "const PARSER_CONFIG = {{ k: K, eofKind: TokenKind.Eof, isSkip: (k: TokenKind) => SKIP_KINDS.has(k), step }};"
+        " * Apply per-token mode-stack actions to `lex`. Generated as a"
+    )
+    .unwrap();
+    writeln!(
+        s,
+        " * switch over token kinds; tokens without `-> push/pop` fall through."
+    )
+    .unwrap();
+    writeln!(s, " */").unwrap();
+    writeln!(
+        s,
+        "function applyActions(kind: TokenKind | null, lex: Lexer<TokenKind>): void {{"
+    )
+    .unwrap();
+    if action_tokens.is_empty() {
+        writeln!(s, "  void kind;").unwrap();
+        writeln!(s, "  void lex;").unwrap();
+    } else {
+        writeln!(s, "  switch (kind) {{").unwrap();
+        for t in &action_tokens {
+            writeln!(s, "    case {}:", token_variant(st, t.kind)).unwrap();
+            for action in &t.mode_actions {
+                match action {
+                    ModeActionInfo::Push(id) => {
+                        writeln!(s, "      lex.pushMode({});", id).unwrap();
+                    }
+                    ModeActionInfo::Pop => {
+                        writeln!(s, "      lex.popMode();").unwrap();
+                    }
+                }
+            }
+            writeln!(s, "      break;").unwrap();
+        }
+        writeln!(s, "    default: break;").unwrap();
+        writeln!(s, "  }}").unwrap();
+    }
+    writeln!(s, "}}").unwrap();
+    writeln!(s).unwrap();
+}
+
+fn emit_public_api(s: &mut String, st: &StateTable) {
+    emit_apply_actions(s, st);
+    writeln!(
+        s,
+        "const PARSER_CONFIG = {{ k: K, eofKind: TokenKind.Eof, isSkip: (k: TokenKind) => SKIP_KINDS.has(k), step, applyActions }};"
     )
     .unwrap();
     writeln!(s).unwrap();
     for (name, _) in &st.entry_states {
-        writeln!(s, "/** Parse the `{}` rule from a source string. */", name).unwrap();
+        let pascal_name = pascal(name);
+        let upper = name.to_uppercase();
+
+        writeln!(s, "/** Parse the `{}` rule from a source string. Skip tokens are surfaced as `Event::Token`; pass `{{ emitSkips: false }}` (or call `parse{}NoSkips`) to drop them. */", name, pascal_name).unwrap();
         writeln!(
             s,
-            "export function parse{pascal}(src: string): Parser<TokenKind, RuleKind> {{",
-            pascal = pascal(name),
+            "export function parse{pascal_name}(src: string, options?: {{ emitSkips?: boolean }}): Parser<TokenKind, RuleKind> {{"
         )
         .unwrap();
         writeln!(
@@ -615,10 +724,24 @@ fn emit_public_api(s: &mut String, st: &StateTable) {
         .unwrap();
         writeln!(
             s,
-            "  return new Parser<TokenKind, RuleKind>(lex, ENTRY_{upper}, PARSER_CONFIG);",
-            upper = name.to_uppercase(),
+            "  return new Parser<TokenKind, RuleKind>(lex, ENTRY_{upper}, PARSER_CONFIG, options);"
         )
         .unwrap();
+        writeln!(s, "}}").unwrap();
+        writeln!(s).unwrap();
+
+        writeln!(
+            s,
+            "/** Parse the `{}` rule from a source string, silently consuming skip tokens. Equivalent to calling `parse{}` with `{{ emitSkips: false }}`. */",
+            name, pascal_name
+        )
+        .unwrap();
+        writeln!(
+            s,
+            "export function parse{pascal_name}NoSkips(src: string): Parser<TokenKind, RuleKind> {{"
+        )
+        .unwrap();
+        writeln!(s, "  return parse{pascal_name}(src, {{ emitSkips: false }});").unwrap();
         writeln!(s, "}}").unwrap();
         writeln!(s).unwrap();
     }

@@ -1,3 +1,5 @@
+use std::marker::PhantomData;
+
 use crate::events::{Error, Event, RuleKindEnum, Token, TokenKindEnum};
 use crate::lexer::LexerBackend;
 use crate::span::Pos;
@@ -8,6 +10,37 @@ use crate::span::Pos;
 /// exits its dispatch, and the runtime's pull loop performs the final
 /// EOF check before yielding `None`.
 pub const TERMINATED: u32 = 0;
+
+/// Compile-time configuration for the [`Parser`].
+///
+/// Implementors are zero-sized markers that flip behaviour through
+/// associated `const`s. The runtime only branches on `EMIT_SKIPS` today;
+/// when it's `false` the dead arm in [`Iterator::next`] is removed by
+/// monomorphization, so a parser that drops whitespace pays no runtime
+/// cost for the decision.
+pub trait ParserConfig {
+    /// When `false`, skip-kind tokens (whitespace, comments, etc.) are
+    /// silently consumed instead of yielded as `Event::Token`. The
+    /// structural event stream is unchanged.
+    const EMIT_SKIPS: bool;
+}
+
+/// Default config: skip tokens are surfaced as `Event::Token` so the
+/// caller can re-attach trivia, render the input verbatim, or drop them
+/// itself.
+pub struct EmitSkips;
+impl ParserConfig for EmitSkips {
+    const EMIT_SKIPS: bool = true;
+}
+
+/// Drop skip tokens at the source. The parser still lexes them (skip
+/// patterns delimit the structural ones), but they never reach the
+/// iterator. Picking this lets monomorphization remove the skip-emit
+/// branch entirely.
+pub struct DropSkips;
+impl ParserConfig for DropSkips {
+    const EMIT_SKIPS: bool = false;
+}
 
 /// Bridge from a generated grammar into the runtime's pull loop.
 ///
@@ -20,8 +53,8 @@ pub const TERMINATED: u32 = 0;
 pub trait Grammar<const K: usize>: Sized {
     type TokenKind: TokenKindEnum;
     type RuleKind: RuleKindEnum;
-    /// True iff the grammar declares any `[skip]`-annotated tokens. Lets
-    /// the runtime skip the per-pump skip check when no skips exist.
+    /// True iff the grammar declares any tokens with a `-> skip` action.
+    /// Lets the runtime skip the per-pump skip check when no skips exist.
     const HAS_SKIPS: bool;
     /// Does `kind` denote a skip token (dropped from the structural stream
     /// and re-attached around structural events)?
@@ -43,9 +76,27 @@ pub trait Grammar<const K: usize>: Sized {
     /// recovery). External callers can't construct one, so the parser's
     /// internal state stays sealed: the only way to drive a parse is
     /// through [`Iterator::next`].
-    fn step<'a, 'p, L: LexerBackend<'a, Self::TokenKind>>(
-        p: &mut Cursor<'p, 'a, L, K, Self>,
+    fn step<'a, 'p, L: LexerBackend<'a, Self::TokenKind>, C: ParserConfig>(
+        p: &mut Cursor<'p, 'a, L, K, Self, C>,
     ) -> Option<Event<'a, Self::TokenKind, Self::RuleKind>>;
+
+    /// Apply the mode-stack actions declared on `kind` to `lex`.
+    ///
+    /// Generated code emits this as a `match` over token kinds, calling
+    /// `lex.push_mode(...)` / `lex.pop_mode()` in source order for each
+    /// declared `-> push(...)` / `-> pop` action. Tokens with no actions
+    /// fall through with no effect. Called once per token immediately
+    /// after the lexer hands it to the runtime, so by the time the next
+    /// `next_token()` runs the lexer's mode stack is up to date.
+    ///
+    /// Default impl is a no-op for grammars that declare no modes.
+    #[inline]
+    fn apply_actions<'a, L: LexerBackend<'a, Self::TokenKind>>(
+        kind: Option<Self::TokenKind>,
+        lex: &mut L,
+    ) {
+        let _ = (kind, lex);
+    }
 }
 
 /// In-flight error recovery. Armed by [`Cursor::expect`] (mismatch path)
@@ -87,7 +138,13 @@ struct Recovery<TK: 'static> {
 /// live on [`Cursor`] instead, and a `Cursor` can only be obtained from
 /// inside the pull loop — so external callers can't poke at parser
 /// internals out of band.
-pub struct Parser<'a, L: LexerBackend<'a, G::TokenKind>, const K: usize, G: Grammar<K>> {
+pub struct Parser<
+    'a,
+    L: LexerBackend<'a, G::TokenKind>,
+    const K: usize,
+    G: Grammar<K>,
+    C: ParserConfig = EmitSkips,
+> {
     lex: L,
     /// Lookahead ring. `None` slots are awaiting refill — Skip mode pulls
     /// lex tokens one-at-a-time until every slot holds a structural token.
@@ -98,9 +155,12 @@ pub struct Parser<'a, L: LexerBackend<'a, G::TokenKind>, const K: usize, G: Gram
     state: u32,
     ret_stack: Vec<u32>,
     recovery: Option<Recovery<G::TokenKind>>,
+    _config: PhantomData<C>,
 }
 
-impl<'a, L: LexerBackend<'a, G::TokenKind>, const K: usize, G: Grammar<K>> Parser<'a, L, K, G> {
+impl<'a, L: LexerBackend<'a, G::TokenKind>, const K: usize, G: Grammar<K>, C: ParserConfig>
+    Parser<'a, L, K, G, C>
+{
     /// Build a parser over `lex`, starting at `entry` (the state id of the
     /// rule you want to parse — generated code exposes `ENTRY_FOO` constants
     /// for each public rule and `parse_foo_from_str` wrappers that call
@@ -118,6 +178,7 @@ impl<'a, L: LexerBackend<'a, G::TokenKind>, const K: usize, G: Grammar<K>> Parse
             state: entry,
             ret_stack: Vec::with_capacity(64),
             recovery: None,
+            _config: PhantomData,
         }
     }
 
@@ -171,12 +232,25 @@ impl<'a, L: LexerBackend<'a, G::TokenKind>, const K: usize, G: Grammar<K>> Parse
 /// ever exists is inside a call to [`Grammar::step`] from the runtime's
 /// pull loop. That keeps the parser's internal state from being poked
 /// at out of band.
-pub struct Cursor<'p, 'a, L: LexerBackend<'a, G::TokenKind>, const K: usize, G: Grammar<K>> {
-    p: &'p mut Parser<'a, L, K, G>,
+pub struct Cursor<
+    'p,
+    'a,
+    L: LexerBackend<'a, G::TokenKind>,
+    const K: usize,
+    G: Grammar<K>,
+    C: ParserConfig,
+> {
+    p: &'p mut Parser<'a, L, K, G, C>,
 }
 
-impl<'p, 'a, L: LexerBackend<'a, G::TokenKind>, const K: usize, G: Grammar<K>>
-    Cursor<'p, 'a, L, K, G>
+impl<
+        'p,
+        'a,
+        L: LexerBackend<'a, G::TokenKind>,
+        const K: usize,
+        G: Grammar<K>,
+        C: ParserConfig,
+    > Cursor<'p, 'a, L, K, G, C>
 {
     /// Current state id. Generated dispatch reads this at the start of
     /// each iteration and writes it back when the loop suspends.
@@ -305,8 +379,8 @@ impl<'p, 'a, L: LexerBackend<'a, G::TokenKind>, const K: usize, G: Grammar<K>>
     }
 }
 
-impl<'a, L: LexerBackend<'a, G::TokenKind>, const K: usize, G: Grammar<K>> Iterator
-    for Parser<'a, L, K, G>
+impl<'a, L: LexerBackend<'a, G::TokenKind>, const K: usize, G: Grammar<K>, C: ParserConfig>
+    Iterator for Parser<'a, L, K, G, C>
 {
     type Item = Event<'a, G::TokenKind, G::RuleKind>;
 
@@ -329,10 +403,23 @@ impl<'a, L: LexerBackend<'a, G::TokenKind>, const K: usize, G: Grammar<K>> Itera
             // slot. So slot `K-1` is `None` iff *any* slot is empty.
             if self.look[K - 1].is_none() {
                 let t = self.lex.next_token();
+                // Apply token-level mode-stack actions before deciding
+                // skip vs. structural — `-> skip, push(foo)` is invalid
+                // (parser-level check), so a skip token never has actions
+                // and a token-with-actions never skips. Calling
+                // unconditionally keeps the call site simple; the default
+                // impl is empty for action-free grammars.
+                G::apply_actions(t.kind, &mut self.lex);
                 if G::HAS_SKIPS {
                     if let Some(k) = t.kind {
                         if G::is_skip(k) {
-                            return Some(Event::Token(t));
+                            // Compile-time gate: with `C = DropSkips`,
+                            // monomorphization removes the yield arm, so
+                            // the skip token is silently consumed.
+                            if C::EMIT_SKIPS {
+                                return Some(Event::Token(t));
+                            }
+                            continue;
                         }
                     }
                 }

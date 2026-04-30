@@ -166,11 +166,9 @@ fn rule_const(st: &StateTable, kind: u16) -> String {
 }
 
 fn emit_dfa(s: &mut String, st: &StateTable) {
-    let dfa = &st.lexer_dfa;
-
     writeln!(
         s,
-        "// longestMatch scans buf[start:] for the longest accepted token."
+        "// longestMatch scans buf[start:] for the longest accepted token in mode."
     )
     .unwrap();
     writeln!(
@@ -185,25 +183,74 @@ fn emit_dfa(s: &mut String, st: &StateTable) {
     .unwrap();
     writeln!(
         s,
-        "func longestMatch(buf []byte, start int) (int, uint16, int) {{"
+        "// mode is the active lexer mode id (0 = default); the dispatcher branches"
     )
     .unwrap();
-    writeln!(s, "\tpos := start").unwrap();
-    writeln!(s, "\tbestLen := 0").unwrap();
-    writeln!(s, "\tbestKind := rt.ErrorKind").unwrap();
-    writeln!(s, "\tstate := uint32({})", START).unwrap();
-    writeln!(s, "\tfor {{").unwrap();
-    writeln!(s, "\t\tswitch state {{").unwrap();
-    for ds in dfa { emit_dfa_state_arm(s, st, ds); }
     writeln!(
         s,
-        "\t\tdefault:\n\t\t\treturn bestLen, bestKind, pos - start"
+        "// on it and falls into the per-mode helper. Single-mode grammars collapse"
     )
     .unwrap();
-    writeln!(s, "\t\t}}").unwrap();
-    writeln!(s, "\t}}").unwrap();
+    writeln!(
+        s,
+        "// to a direct call so the dispatch inlines away."
+    )
+    .unwrap();
+    writeln!(
+        s,
+        "func longestMatch(buf []byte, start int, mode uint32) (int, uint16, int) {{"
+    )
+    .unwrap();
+    if st.modes.len() == 1 {
+        writeln!(s, "\t_ = mode").unwrap();
+        writeln!(s, "\treturn longestMatchMode0(buf, start)").unwrap();
+    } else {
+        writeln!(s, "\tswitch mode {{").unwrap();
+        for m in &st.modes {
+            writeln!(
+                s,
+                "\tcase {}:\n\t\treturn longestMatchMode{}(buf, start)",
+                m.id, m.id
+            )
+            .unwrap();
+        }
+        writeln!(s, "\tdefault:\n\t\treturn 0, rt.ErrorKind, 0").unwrap();
+        writeln!(s, "\t}}").unwrap();
+    }
     writeln!(s, "}}").unwrap();
     writeln!(s).unwrap();
+
+    for m in &st.modes {
+        writeln!(
+            s,
+            "// longestMatchMode{} is the longest-match helper for lexer mode `{}` (id {}).",
+            m.id, m.name, m.id
+        )
+        .unwrap();
+        writeln!(
+            s,
+            "func longestMatchMode{}(buf []byte, start int) (int, uint16, int) {{",
+            m.id
+        )
+        .unwrap();
+        writeln!(s, "\tpos := start").unwrap();
+        writeln!(s, "\tbestLen := 0").unwrap();
+        writeln!(s, "\tbestKind := rt.ErrorKind").unwrap();
+        writeln!(s, "\tstate := uint32({})", START).unwrap();
+        writeln!(s, "\tfor {{").unwrap();
+        writeln!(s, "\t\tswitch state {{").unwrap();
+        for ds in &m.dfa { emit_dfa_state_arm(s, st, ds); }
+        writeln!(
+            s,
+            "\t\tdefault:\n\t\t\treturn bestLen, bestKind, pos - start"
+        )
+        .unwrap();
+        writeln!(s, "\t\t}}").unwrap();
+        writeln!(s, "\t}}").unwrap();
+        writeln!(s, "}}").unwrap();
+        writeln!(s).unwrap();
+    }
+
     write!(s, "var skipKinds = map[uint16]struct{{}}{{").unwrap();
     let skips: Vec<String> = st
         .tokens
@@ -214,6 +261,58 @@ fn emit_dfa(s: &mut String, st: &StateTable) {
     s.push_str(&skips.join(", "));
     writeln!(s, "}}").unwrap();
     writeln!(s, "func isSkip(k uint16) bool {{ _, ok := skipKinds[k]; return ok }}").unwrap();
+    writeln!(s).unwrap();
+
+    emit_apply_actions(s, st);
+}
+
+fn emit_apply_actions(s: &mut String, st: &StateTable) {
+    use crate::lowering::ModeActionInfo;
+
+    let action_tokens: Vec<&crate::lowering::TokenInfo> = st
+        .tokens
+        .iter()
+        .filter(|t| !t.mode_actions.is_empty())
+        .collect();
+
+    writeln!(
+        s,
+        "// applyActions applies per-token mode-stack actions to lex. Generated"
+    )
+    .unwrap();
+    writeln!(
+        s,
+        "// as a switch over token kinds; tokens without `-> push/pop` fall"
+    )
+    .unwrap();
+    writeln!(
+        s,
+        "// through with no effect. Grammars that declare no modes get an empty"
+    )
+    .unwrap();
+    writeln!(s, "// body.").unwrap();
+    writeln!(s, "func applyActions(kind uint16, lex *rt.Lexer) {{").unwrap();
+    if action_tokens.is_empty() {
+        writeln!(s, "\t_ = kind").unwrap();
+        writeln!(s, "\t_ = lex").unwrap();
+    } else {
+        writeln!(s, "\tswitch kind {{").unwrap();
+        for t in &action_tokens {
+            writeln!(s, "\tcase uint16({}):", token_const(st, t.kind)).unwrap();
+            for action in &t.mode_actions {
+                match action {
+                    ModeActionInfo::Push(id) => {
+                        writeln!(s, "\t\tlex.PushMode({})", id).unwrap();
+                    }
+                    ModeActionInfo::Pop => {
+                        writeln!(s, "\t\tlex.PopMode()").unwrap();
+                    }
+                }
+            }
+        }
+        writeln!(s, "\t}}").unwrap();
+    }
+    writeln!(s, "}}").unwrap();
     writeln!(s).unwrap();
 }
 
@@ -232,13 +331,14 @@ fn emit_dfa_state_arm(
         return;
     }
     writeln!(s, "\t\tcase {}:", ds.id).unwrap();
-    if !ds.self_loop.is_empty() {
+    let self_loop = ds.self_loop_ranges();
+    if !self_loop.is_empty() {
         // Self-loop scan-skip prologue. The Go compiler vectorises
         // tight byte-comparison loops on amd64; we keep it inline so
         // it inlines into the per-state case without a closure.
         writeln!(s, "\t\t\tfor pos < len(buf) {{").unwrap();
         writeln!(s, "\t\t\t\tb := buf[pos]").unwrap();
-        writeln!(s, "\t\t\t\tif !({}) {{ break }}", byte_cond(&ds.self_loop)).unwrap();
+        writeln!(s, "\t\t\t\tif !({}) {{ break }}", byte_cond(self_loop)).unwrap();
         writeln!(s, "\t\t\t\tpos++").unwrap();
         writeln!(s, "\t\t\t}}").unwrap();
         if let Some(kind) = ds.accept {
@@ -535,33 +635,49 @@ fn emit_dispatch_leaf_block(
 fn emit_public_api(s: &mut String, st: &StateTable) {
     writeln!(
         s,
-        "var parserConfig = rt.Config{{K: K, IsSkip: isSkip, Step: step}}"
+        "var parserConfig = rt.Config{{K: K, IsSkip: isSkip, Step: step, ApplyActions: applyActions}}"
     )
     .unwrap();
     writeln!(s).unwrap();
     for (name, _) in &st.entry_states {
+        let cap = capitalize(name);
+
         writeln!(
             s,
             "// Parse{cap} returns a Parser that parses the `{name}` rule from r.",
-            cap = capitalize(name),
-            name = name,
+        )
+        .unwrap();
+        writeln!(s, "//").unwrap();
+        writeln!(
+            s,
+            "// Skip tokens (whitespace, comments) are surfaced as EvToken events."
         )
         .unwrap();
         writeln!(
             s,
-            "func Parse{cap}(r io.Reader) *rt.Parser {{",
-            cap = capitalize(name)
+            "// Use Parse{cap}WithOptions and rt.Options{{DropSkips: true}} to silently consume them."
+        )
+        .unwrap();
+        writeln!(s, "func Parse{cap}(r io.Reader) *rt.Parser {{").unwrap();
+        writeln!(s, "\tlex := rt.NewLexer(r, longestMatch)").unwrap();
+        writeln!(s, "\treturn rt.NewParser(lex, entry{cap}, parserConfig)").unwrap();
+        writeln!(s, "}}").unwrap();
+        writeln!(s).unwrap();
+
+        writeln!(
+            s,
+            "// Parse{cap}WithOptions is Parse{cap} with caller-provided runtime options.",
         )
         .unwrap();
         writeln!(
             s,
-            "\tlex := rt.NewLexer(r, longestMatch)"
+            "func Parse{cap}WithOptions(r io.Reader, opts rt.Options) *rt.Parser {{"
         )
         .unwrap();
+        writeln!(s, "\tlex := rt.NewLexer(r, longestMatch)").unwrap();
         writeln!(
             s,
-            "\treturn rt.NewParser(lex, entry{}, parserConfig)",
-            capitalize(name)
+            "\treturn rt.NewParserWithOptions(lex, entry{cap}, parserConfig, opts)"
         )
         .unwrap();
         writeln!(s, "}}").unwrap();

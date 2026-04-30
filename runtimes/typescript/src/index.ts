@@ -90,16 +90,21 @@ export interface DfaMatch<TK> {
 
 /**
  * Grammar-specific compiled DFA. Generated code supplies one of these:
- * a per-state `switch` that avoids the data-dependent table load a
- * table-driven DFA pays on every byte.
+ * a per-state `switch` (one per declared lexer mode) that avoids the
+ * data-dependent table load a table-driven DFA pays on every byte.
  *
  * `buf` is a Latin-1 string where each char's code unit is the
  * underlying UTF-8 byte (0–255). The runtime constructs it once at
  * Lexer construction so the hot-path matcher can read bytes via
  * `buf.charCodeAt(pos)` — V8's one-byte-string representation makes
  * that a single load with no bounds-check or typed-array dispatch.
+ *
+ * `mode` is the active lexer mode id — `0` for the default (anonymous)
+ * mode, further ids correspond to `@mode(name)` pre-annotations in
+ * declaration order. Generated matchers branch on it and dispatch into
+ * the per-mode state machine; grammars without modes ignore it.
  */
-export type MatcherFunc<TK> = (buf: string, start: number) => DfaMatch<TK>;
+export type MatcherFunc<TK> = (buf: string, start: number, mode: number) => DfaMatch<TK>;
 
 const _TEXT_DECODER = new TextDecoder();
 const _LATIN1_DECODER = new TextDecoder("latin1");
@@ -128,6 +133,13 @@ export class Lexer<TK extends number> {
   private i = 0;
   private line = 1;
   private col = 1;
+  /**
+   * Mode stack — top of stack is the active lexer mode. Always
+   * non-empty; initialised with the default mode (id 0). `popMode`
+   * is a no-op past the bottom so a stray `-> pop` action can't
+   * underflow.
+   */
+  private modeStack: number[] = [0];
 
   constructor(
     src: string,
@@ -136,6 +148,22 @@ export class Lexer<TK extends number> {
   ) {
     this.bytes = new TextEncoder().encode(src);
     this.buf = _LATIN1_DECODER.decode(this.bytes);
+  }
+
+  /**
+   * Push `mode` onto the mode stack; subsequent [`nextToken`] calls
+   * scan with that mode's DFA until a matching [`popMode`].
+   */
+  pushMode(mode: number): void {
+    this.modeStack.push(mode);
+  }
+
+  /**
+   * Pop the topmost mode off the stack, leaving at least the default
+   * mode in place. Underflow is silently ignored.
+   */
+  popMode(): void {
+    if (this.modeStack.length > 1) this.modeStack.pop();
   }
 
   private pos(): Pos {
@@ -177,7 +205,8 @@ export class Lexer<TK extends number> {
       return { kind: this.eofKind, span: pointSpan(p), text: "" };
     }
 
-    const { bestLen, bestKind } = this.matcher(this.buf, this.i);
+    const mode = this.modeStack[this.modeStack.length - 1];
+    const { bestLen, bestKind } = this.matcher(this.buf, this.i, mode);
 
     const start = this.pos();
     if (bestLen === 0) {
@@ -252,7 +281,7 @@ export interface ParserConfig<TK extends number, RK extends number> {
   k: number;
   /** EOF kind sentinel (matches the one passed to the `Lexer`). */
   eofKind: TK;
-  /** Whether a given token kind is a `[skip]`-annotated skip. */
+  /** Whether a given token kind has a `-> skip` action. */
   isSkip: (kind: TK) => boolean;
   /**
    * Run one state body of the generated dispatch. Returns the event
@@ -260,6 +289,13 @@ export interface ParserConfig<TK extends number, RK extends number> {
    * (the runtime's `nextEvent` loop calls `step` again).
    */
   step: (c: Cursor<TK, RK>) => Event<TK, RK> | undefined;
+  /**
+   * Per-token mode-stack callback. Called once per lex token before
+   * the skip / lookahead decision; calls `lex.pushMode(...)` /
+   * `lex.popMode()` based on the token's `-> push(name)` / `-> pop`
+   * annotations. Optional: grammars that declare no modes omit it.
+   */
+  applyActions?: (kind: TK | null, lex: Lexer<TK>) => void;
 }
 
 /**
@@ -318,17 +354,20 @@ export class Parser<
   private state: number;
   private retStack: number[] = [];
   private recovery: Recovery<TK> | null = null;
+  private readonly emitSkips: boolean;
 
   constructor(
     private readonly lex: Lexer<TK>,
     entry: number,
     private readonly cfg: ParserConfig<TK, RK>,
+    options?: { emitSkips?: boolean },
   ) {
     this.state = entry;
     this.lookBuf = new Array<Token<TK> | null>(cfg.k).fill(null);
     // `prevEnd` is overwritten on the first `enter()`/`consume()`. Until
     // then it just needs to be a valid Pos; pin it at the source origin.
     this.prevEnd = { offset: 0, line: 1, column: 1 };
+    this.emitSkips = options?.emitSkips ?? true;
   }
 
   // -------------------------------------------------------------------
@@ -459,8 +498,14 @@ export class Parser<
       // O(1) form of "any slot is null".
       if (this.lookBuf[this.cfg.k - 1] === null) {
         const t = this.lex.nextToken();
+        if (this.cfg.applyActions !== undefined) {
+          this.cfg.applyActions(t.kind, this.lex);
+        }
         if (t.kind !== null && this.cfg.isSkip(t.kind)) {
-          return { done: false, value: { tag: "token", token: t } };
+          if (this.emitSkips) {
+            return { done: false, value: { tag: "token", token: t } };
+          }
+          continue;
         }
         for (let i = 0; i < this.lookBuf.length; i++) {
           if (this.lookBuf[i] === null) {

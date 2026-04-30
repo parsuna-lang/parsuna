@@ -79,17 +79,22 @@ public sealed record ErrorEvent(ParseError Error) : Event;
 
 /// <summary>
 /// Grammar-specific compiled lexer DFA. Generated code supplies this as a
-/// method: a per-state switch that avoids the data-dependent table load a
-/// table-driven DFA pays on every byte.
+/// method: a per-state switch (one per declared lexer mode) that avoids
+/// the data-dependent table load a table-driven DFA pays on every byte.
 /// </summary>
 /// <remarks>
-/// Writes three ints to <paramref name="output"/>:
+/// <para>The matcher branches on <paramref name="mode"/> and falls into
+/// the per-mode state machine. Grammars without <c>@mode(...)</c>
+/// pre-annotations have a single mode (id 0); the dispatch collapses to
+/// a direct call.</para>
+///
+/// <para>Writes three ints to <paramref name="output"/>:
 /// [0] bestLen (0 = no accept), [1] bestKind (error sentinel when no
 /// accept reached), [2] scanned (== bufLen - start when the scan ran out
 /// of buffer rather than hitting a dead transition; used to detect
-/// buffer exhaustion mid-token).
+/// buffer exhaustion mid-token).</para>
 /// </remarks>
-public delegate void DfaMatcher(byte[] buf, int start, int bufLen, int[] output);
+public delegate void DfaMatcher(byte[] buf, int start, int bufLen, int mode, int[] output);
 
 /// <summary>Byte-level lexer. Reads from a <see cref="Stream"/> in 16 KiB chunks. The grammar-specific DFA is supplied as a <see cref="DfaMatcher"/>.</summary>
 public sealed class Lexer
@@ -113,12 +118,37 @@ public sealed class Lexer
     private int _col = 1;
     private readonly DfaMatcher _matcher;
     private readonly int[] _matchOut = new int[3];
+    /// <summary>Mode stack — top of stack is the active lexer mode. Always
+    /// non-empty; initialised with the default mode (id 0). Pop is a no-op
+    /// when only the default remains so a stray <c>-> pop</c> action can't
+    /// underflow.</summary>
+    private int[] _modeStack = { 0 };
+    private int _modeTop;
 
     public Lexer(Stream stream, DfaMatcher matcher)
     {
         _stream = stream;
         _buf = new byte[Chunk * 2];
         _matcher = matcher;
+    }
+
+    /// <summary>Push <paramref name="mode"/> onto the mode stack.
+    /// Subsequent <see cref="NextToken"/> calls scan with that mode's DFA
+    /// until a matching <see cref="PopMode"/>.</summary>
+    public void PushMode(int mode)
+    {
+        if (_modeTop + 1 >= _modeStack.Length)
+        {
+            Array.Resize(ref _modeStack, _modeStack.Length * 2);
+        }
+        _modeStack[++_modeTop] = mode;
+    }
+
+    /// <summary>Pop the topmost mode off the stack, leaving at least the
+    /// default mode in place. Underflow is silently ignored.</summary>
+    public void PopMode()
+    {
+        if (_modeTop > 0) _modeTop--;
     }
 
     private Pos CurPos() => new(_offset, _line, _col);
@@ -183,7 +213,7 @@ public sealed class Lexer
     {
         while (true)
         {
-            _matcher(_buf, _bufPos, _bufLen, _matchOut);
+            _matcher(_buf, _bufPos, _bufLen, _modeStack[_modeTop], _matchOut);
             int scanned = _matchOut[2];
             int viewLen = _bufLen - _bufPos;
             if (!_eof && scanned == viewLen)
@@ -238,12 +268,34 @@ public sealed record ParserConfig(
     int K,
     Predicate<ushort> IsSkip,
     bool HasSkips,
-    Func<Cursor, Event?> Step)
+    Func<Cursor, Event?> Step,
+    Action<ushort, Lexer> ApplyActions)
 {
     /// <summary>End-of-input token kind. Always 0; a constant rather than a
     /// per-grammar value so generated code and consumers don't sprinkle
     /// magic numbers.</summary>
     public const ushort EofKind = 0;
+
+    /// <summary>Convenience constructor for grammars that declare no
+    /// modes — supplies a no-op <see cref="ApplyActions"/>.</summary>
+    public ParserConfig(int K, Predicate<ushort> IsSkip, bool HasSkips, Func<Cursor, Event?> Step)
+        : this(K, IsSkip, HasSkips, Step, static (_, _) => {}) { }
+}
+
+/// <summary>
+/// Runtime-level toggles the caller picks per parser construction.
+/// Today it just controls skip-token emission; future flags can be added
+/// without breaking call sites because of <c>init</c>-only defaults.
+/// </summary>
+/// <remarks>
+/// <c>DropSkips = true</c> suppresses skip tokens at the source: the
+/// lexer still matches them (they delimit structural tokens), but the
+/// parser's enumeration never returns them as <see cref="TokenEvent"/>s.
+/// Default <c>false</c> matches the historic behaviour.
+/// </remarks>
+public sealed record ParserOptions
+{
+    public bool DropSkips { get; init; } = false;
 }
 
 /// <summary>
@@ -316,11 +368,16 @@ public sealed class Parser : IEnumerable<Event>, IEnumerator<Event>
     internal bool _recoveryActive;
 
     internal readonly ParserConfig _cfg;
+    internal readonly ParserOptions _opts;
 
     public Parser(Lexer lex, int entry, ParserConfig cfg)
+        : this(lex, entry, cfg, new ParserOptions()) { }
+
+    public Parser(Lexer lex, int entry, ParserConfig cfg, ParserOptions opts)
     {
         _lex = lex;
         _cfg = cfg;
+        _opts = opts;
         _state = entry;
         _look = new Token?[cfg.K];
         _prevEnd = default;
@@ -374,10 +431,15 @@ public sealed class Parser : IEnumerable<Event>, IEnumerator<Event>
             if (PumpPending())
             {
                 var t = _lex.NextToken();
+                _cfg.ApplyActions(t.Kind, _lex);
                 if (_cfg.HasSkips && _cfg.IsSkip(t.Kind))
                 {
-                    _current = new TokenEvent(t);
-                    return true;
+                    if (!_opts.DropSkips)
+                    {
+                        _current = new TokenEvent(t);
+                        return true;
+                    }
+                    continue;
                 }
                 for (int i = 0; i < _look.Length; i++)
                 {

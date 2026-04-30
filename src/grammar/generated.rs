@@ -19,18 +19,18 @@ pub enum TokenKind {
     Eof = 0,
     Lparen = 1,
     Rparen = 2,
-    Lbrack = 3,
-    Rbrack = 4,
-    Comma = 5,
-    Eq = 6,
-    Semi = 7,
-    Pipe = 8,
-    Question = 9,
-    Star = 10,
-    Plus = 11,
-    Dotdot = 12,
-    Dot = 13,
-    Bang = 14,
+    Comma = 3,
+    Eq = 4,
+    Semi = 5,
+    Pipe = 6,
+    Question = 7,
+    Star = 8,
+    Plus = 9,
+    Dotdot = 10,
+    Dot = 11,
+    Bang = 12,
+    At = 13,
+    Arrow = 14,
     String = 15,
     Char = 16,
     Ident = 17,
@@ -49,8 +49,6 @@ impl parsuna_rt::TokenKindEnum for TokenKind {
             TokenKind::Eof => "EOF",
             TokenKind::Lparen => "LPAREN",
             TokenKind::Rparen => "RPAREN",
-            TokenKind::Lbrack => "LBRACK",
-            TokenKind::Rbrack => "RBRACK",
             TokenKind::Comma => "COMMA",
             TokenKind::Eq => "EQ",
             TokenKind::Semi => "SEMI",
@@ -61,6 +59,8 @@ impl parsuna_rt::TokenKindEnum for TokenKind {
             TokenKind::Dotdot => "DOTDOT",
             TokenKind::Dot => "DOT",
             TokenKind::Bang => "BANG",
+            TokenKind::At => "AT",
+            TokenKind::Arrow => "ARROW",
             TokenKind::String => "STRING",
             TokenKind::Char => "CHAR",
             TokenKind::Ident => "IDENT",
@@ -78,16 +78,19 @@ impl parsuna_rt::TokenKindEnum for TokenKind {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 #[repr(u16)]
 pub enum RuleKind {
-    AltExpr = 0,
-    Annot = 1,
-    Annots = 2,
-    Atom = 3,
-    CharPrimary = 4,
-    Decl = 5,
-    File = 6,
-    Group = 7,
-    NegClass = 8,
-    SeqExpr = 9,
+    Action = 0,
+    ActionArg = 1,
+    Actions = 2,
+    AltExpr = 3,
+    Atom = 4,
+    CharPrimary = 5,
+    Decl = 6,
+    File = 7,
+    Group = 8,
+    Item = 9,
+    ModePre = 10,
+    NegClass = 11,
+    SeqExpr = 12,
 }
 
 impl RuleKind {
@@ -98,14 +101,17 @@ impl RuleKind {
 impl parsuna_rt::RuleKindEnum for RuleKind {
     fn name(self) -> &'static str {
         match self {
+            RuleKind::Action => "action",
+            RuleKind::ActionArg => "action_arg",
+            RuleKind::Actions => "actions",
             RuleKind::AltExpr => "alt_expr",
-            RuleKind::Annot => "annot",
-            RuleKind::Annots => "annots",
             RuleKind::Atom => "atom",
             RuleKind::CharPrimary => "char_primary",
             RuleKind::Decl => "decl",
             RuleKind::File => "file",
             RuleKind::Group => "group",
+            RuleKind::Item => "item",
+            RuleKind::ModePre => "mode_pre",
             RuleKind::NegClass => "neg_class",
             RuleKind::SeqExpr => "seq_expr",
         }
@@ -125,43 +131,69 @@ pub type Token<'a> = parsuna_rt::Token<'a, TokenKind>;
 /// Compiled lexer DFA for this grammar.
 ///
 /// Zero-sized type whose [`DfaMatcher`] impl drives the lexer via a
-/// per-state `match` rather than a transition table. Generated code
-/// supplies this to [`Scanner`]/[`StreamingLexer`].
+/// per-state `match` rather than a transition table. One helper
+/// is emitted per declared lexer mode; `longest_match` dispatches
+/// on the active mode id and falls through to the matching helper.
 pub struct LexerDfa;
 
 impl DfaMatcher<TokenKind> for LexerDfa {
     #[inline]
-    fn longest_match(buf: &[u8], start: usize) -> DfaMatch<TokenKind> {
-        let mut pos = start;
-        let mut best_len: usize = 0;
-        let mut best_kind: Option<TokenKind> = None;
-        let mut state: u32 = 1;
-        loop {
-            match state {
-                1 => match buf.get(pos) {
-                    Some(&b'\'') => { pos += 1; state = 2; }
-                    Some(&b'"') => { pos += 1; state = 3; }
-                    Some(&b'/') => { pos += 1; state = 7; }
-                    Some(&b'(') => { pos += 1; state = 35; best_len = pos - start; best_kind = Some(TokenKind::Lparen); }
-                    Some(&b')') => { pos += 1; state = 36; best_len = pos - start; best_kind = Some(TokenKind::Rparen); }
-                    Some(&b'[') => { pos += 1; state = 37; best_len = pos - start; best_kind = Some(TokenKind::Lbrack); }
-                    Some(&b']') => { pos += 1; state = 38; best_len = pos - start; best_kind = Some(TokenKind::Rbrack); }
-                    Some(&b',') => { pos += 1; state = 39; best_len = pos - start; best_kind = Some(TokenKind::Comma); }
-                    Some(&b'=') => { pos += 1; state = 40; best_len = pos - start; best_kind = Some(TokenKind::Eq); }
-                    Some(&b';') => { pos += 1; state = 41; best_len = pos - start; best_kind = Some(TokenKind::Semi); }
-                    Some(&b'|') => { pos += 1; state = 42; best_len = pos - start; best_kind = Some(TokenKind::Pipe); }
-                    Some(&b'?') => { pos += 1; state = 43; best_len = pos - start; best_kind = Some(TokenKind::Question); }
-                    Some(&b'*') => { pos += 1; state = 44; best_len = pos - start; best_kind = Some(TokenKind::Star); }
-                    Some(&b'+') => { pos += 1; state = 45; best_len = pos - start; best_kind = Some(TokenKind::Plus); }
-                    Some(&b'.') => { pos += 1; state = 47; best_len = pos - start; best_kind = Some(TokenKind::Dot); }
-                    Some(&b'!') => { pos += 1; state = 48; best_len = pos - start; best_kind = Some(TokenKind::Bang); }
-                    Some(&(b'A'..=b'Z' | b'_' | b'a'..=b'z')) => { pos += 1; state = 51; best_len = pos - start; best_kind = Some(TokenKind::Ident); }
-                    Some(&(b'\t'..=b'\n' | b'\r' | b' ')) => { pos += 1; state = 52; best_len = pos - start; best_kind = Some(TokenKind::Ws); }
-                    _ => break,
-                },
-                2 => match buf.get(pos) {
-                    Some(&b'\\') => { pos += 1; state = 5; }
-                    Some(&(0x00..=b'\t' | 0x0b..=b'&' | b'('..=b'[' | b']'..=0x7f)) => { pos += 1; state = 6; }
+    fn longest_match(buf: &[u8], start: usize, mode: u32) -> DfaMatch<TokenKind> {
+        let _ = mode;
+        longest_match_mode_0(buf, start)
+    }
+}
+
+/// Longest-match helper for lexer mode `default` (id 0).
+#[inline]
+fn longest_match_mode_0(buf: &[u8], start: usize) -> DfaMatch<TokenKind> {
+    let mut pos = start;
+    let mut best_len: usize = 0;
+    let mut best_kind: Option<TokenKind> = None;
+    let mut state: u32 = 1;
+    loop {
+        match state {
+            1 => match buf.get(pos) {
+                Some(&b'\'') => { pos += 1; state = 2; }
+                Some(&b'"') => { pos += 1; state = 3; }
+                Some(&b'/') => { pos += 1; state = 7; }
+                Some(&b'-') => { pos += 1; state = 12; }
+                Some(&b'(') => { pos += 1; state = 36; best_len = pos - start; best_kind = Some(TokenKind::Lparen); }
+                Some(&b')') => { pos += 1; state = 37; best_len = pos - start; best_kind = Some(TokenKind::Rparen); }
+                Some(&b',') => { pos += 1; state = 38; best_len = pos - start; best_kind = Some(TokenKind::Comma); }
+                Some(&b'=') => { pos += 1; state = 39; best_len = pos - start; best_kind = Some(TokenKind::Eq); }
+                Some(&b';') => { pos += 1; state = 40; best_len = pos - start; best_kind = Some(TokenKind::Semi); }
+                Some(&b'|') => { pos += 1; state = 41; best_len = pos - start; best_kind = Some(TokenKind::Pipe); }
+                Some(&b'?') => { pos += 1; state = 42; best_len = pos - start; best_kind = Some(TokenKind::Question); }
+                Some(&b'*') => { pos += 1; state = 43; best_len = pos - start; best_kind = Some(TokenKind::Star); }
+                Some(&b'+') => { pos += 1; state = 44; best_len = pos - start; best_kind = Some(TokenKind::Plus); }
+                Some(&b'.') => { pos += 1; state = 46; best_len = pos - start; best_kind = Some(TokenKind::Dot); }
+                Some(&b'!') => { pos += 1; state = 47; best_len = pos - start; best_kind = Some(TokenKind::Bang); }
+                Some(&b'@') => { pos += 1; state = 48; best_len = pos - start; best_kind = Some(TokenKind::At); }
+                Some(&(b'A'..=b'Z' | b'_' | b'a'..=b'z')) => { pos += 1; state = 52; best_len = pos - start; best_kind = Some(TokenKind::Ident); }
+                Some(&(b'\t'..=b'\n' | b'\r' | b' ')) => { pos += 1; state = 53; best_len = pos - start; best_kind = Some(TokenKind::Ws); }
+                _ => break,
+            },
+            2 => match buf.get(pos) {
+                Some(&b'\\') => { pos += 1; state = 5; }
+                Some(&(0x00..=b'\t' | 0x0b..=b'&' | b'('..=b'[' | b']'..=0x7f)) => { pos += 1; state = 6; }
+                Some(&(0xc2..=0xdf)) => { pos += 1; state = 16; }
+                Some(&(0xe1..=0xec | 0xee..=0xef)) => { pos += 1; state = 18; }
+                Some(&(0xf1..=0xf3)) => { pos += 1; state = 20; }
+                Some(&0xed) => { pos += 1; state = 24; }
+                Some(&0xf4) => { pos += 1; state = 27; }
+                Some(&0xf0) => { pos += 1; state = 31; }
+                Some(&0xe0) => { pos += 1; state = 34; }
+                _ => break,
+            },
+            3 => {
+                while let Some(&b) = buf.get(pos) {
+                    if !matches!(b, 0x00..=b'\t' | 0x0b..=b'!' | b'#'..=b'[' | b']'..=0x7f) { break; }
+                    pos += 1;
+                }
+                match buf.get(pos) {
+                    Some(&(0x00..=b'\t' | 0x0b..=b'!' | b'#'..=b'[' | b']'..=0x7f)) => { pos += 1; state = 3; }
+                    Some(&b'\\') => { pos += 1; state = 4; }
                     Some(&(0xc2..=0xdf)) => { pos += 1; state = 15; }
                     Some(&(0xe1..=0xec | 0xee..=0xef)) => { pos += 1; state = 17; }
                     Some(&(0xf1..=0xf3)) => { pos += 1; state = 19; }
@@ -169,255 +201,244 @@ impl DfaMatcher<TokenKind> for LexerDfa {
                     Some(&0xf4) => { pos += 1; state = 26; }
                     Some(&0xf0) => { pos += 1; state = 30; }
                     Some(&0xe0) => { pos += 1; state = 33; }
+                    Some(&b'"') => { pos += 1; state = 50; best_len = pos - start; best_kind = Some(TokenKind::String); }
                     _ => break,
-                },
-                3 => {
-                    while let Some(&b) = buf.get(pos) {
-                        if !matches!(b, 0x00..=b'\t' | 0x0b..=b'!' | b'#'..=b'[' | b']'..=0x7f) { break; }
-                        pos += 1;
-                    }
-                    match buf.get(pos) {
-                        Some(&(0x00..=b'\t' | 0x0b..=b'!' | b'#'..=b'[' | b']'..=0x7f)) => { pos += 1; state = 3; }
-                        Some(&b'\\') => { pos += 1; state = 4; }
-                        Some(&(0xc2..=0xdf)) => { pos += 1; state = 14; }
-                        Some(&(0xe1..=0xec | 0xee..=0xef)) => { pos += 1; state = 16; }
-                        Some(&(0xf1..=0xf3)) => { pos += 1; state = 18; }
-                        Some(&0xed) => { pos += 1; state = 22; }
-                        Some(&0xf4) => { pos += 1; state = 25; }
-                        Some(&0xf0) => { pos += 1; state = 29; }
-                        Some(&0xe0) => { pos += 1; state = 32; }
-                        Some(&b'"') => { pos += 1; state = 49; best_len = pos - start; best_kind = Some(TokenKind::String); }
-                        _ => break,
-                    }
-                },
-                4 => match buf.get(pos) {
-                    Some(&(b'"' | b'\'' | b'0' | b'\\' | b'n' | b'r' | b't')) => { pos += 1; state = 3; }
-                    Some(&b'u') => { pos += 1; state = 12; }
-                    _ => break,
-                },
-                5 => match buf.get(pos) {
-                    Some(&(b'"' | b'\'' | b'0' | b'\\' | b'n' | b'r' | b't')) => { pos += 1; state = 6; }
-                    Some(&b'u') => { pos += 1; state = 13; }
-                    _ => break,
-                },
-                6 => match buf.get(pos) {
-                    Some(&b'\'') => { pos += 1; state = 50; best_len = pos - start; best_kind = Some(TokenKind::Char); }
-                    _ => break,
-                },
-                7 => match buf.get(pos) {
-                    Some(&b'/') => { pos += 1; state = 53; best_len = pos - start; best_kind = Some(TokenKind::Comment); }
-                    _ => break,
-                },
-                8 => {
-                    while let Some(&b) = buf.get(pos) {
-                        if !matches!(b, b'0'..=b'9' | b'A'..=b'F' | b'a'..=b'f') { break; }
-                        pos += 1;
-                    }
-                    match buf.get(pos) {
-                        Some(&b'}') => { pos += 1; state = 3; }
-                        Some(&(b'0'..=b'9' | b'A'..=b'F' | b'a'..=b'f')) => { pos += 1; state = 8; }
-                        _ => break,
-                    }
-                },
-                9 => {
-                    while let Some(&b) = buf.get(pos) {
-                        if !matches!(b, b'0'..=b'9' | b'A'..=b'F' | b'a'..=b'f') { break; }
-                        pos += 1;
-                    }
-                    match buf.get(pos) {
-                        Some(&b'}') => { pos += 1; state = 6; }
-                        Some(&(b'0'..=b'9' | b'A'..=b'F' | b'a'..=b'f')) => { pos += 1; state = 9; }
-                        _ => break,
-                    }
-                },
-                10 => match buf.get(pos) {
+                }
+            },
+            4 => match buf.get(pos) {
+                Some(&(b'"' | b'\'' | b'0' | b'\\' | b'n' | b'r' | b't')) => { pos += 1; state = 3; }
+                Some(&b'u') => { pos += 1; state = 13; }
+                _ => break,
+            },
+            5 => match buf.get(pos) {
+                Some(&(b'"' | b'\'' | b'0' | b'\\' | b'n' | b'r' | b't')) => { pos += 1; state = 6; }
+                Some(&b'u') => { pos += 1; state = 14; }
+                _ => break,
+            },
+            6 => match buf.get(pos) {
+                Some(&b'\'') => { pos += 1; state = 51; best_len = pos - start; best_kind = Some(TokenKind::Char); }
+                _ => break,
+            },
+            7 => match buf.get(pos) {
+                Some(&b'/') => { pos += 1; state = 54; best_len = pos - start; best_kind = Some(TokenKind::Comment); }
+                _ => break,
+            },
+            8 => {
+                while let Some(&b) = buf.get(pos) {
+                    if !matches!(b, b'0'..=b'9' | b'A'..=b'F' | b'a'..=b'f') { break; }
+                    pos += 1;
+                }
+                match buf.get(pos) {
+                    Some(&b'}') => { pos += 1; state = 3; }
                     Some(&(b'0'..=b'9' | b'A'..=b'F' | b'a'..=b'f')) => { pos += 1; state = 8; }
                     _ => break,
-                },
-                11 => match buf.get(pos) {
+                }
+            },
+            9 => {
+                while let Some(&b) = buf.get(pos) {
+                    if !matches!(b, b'0'..=b'9' | b'A'..=b'F' | b'a'..=b'f') { break; }
+                    pos += 1;
+                }
+                match buf.get(pos) {
+                    Some(&b'}') => { pos += 1; state = 6; }
                     Some(&(b'0'..=b'9' | b'A'..=b'F' | b'a'..=b'f')) => { pos += 1; state = 9; }
                     _ => break,
-                },
-                12 => match buf.get(pos) {
-                    Some(&b'{') => { pos += 1; state = 10; }
-                    _ => break,
-                },
-                13 => match buf.get(pos) {
-                    Some(&b'{') => { pos += 1; state = 11; }
-                    _ => break,
-                },
-                14 => match buf.get(pos) {
-                    Some(&(0x80..=0xbf)) => { pos += 1; state = 3; }
-                    _ => break,
-                },
-                15 => match buf.get(pos) {
-                    Some(&(0x80..=0xbf)) => { pos += 1; state = 6; }
-                    _ => break,
-                },
-                16 => match buf.get(pos) {
-                    Some(&(0x80..=0xbf)) => { pos += 1; state = 14; }
-                    _ => break,
-                },
-                17 => match buf.get(pos) {
-                    Some(&(0x80..=0xbf)) => { pos += 1; state = 15; }
-                    _ => break,
-                },
-                18 => match buf.get(pos) {
-                    Some(&(0x80..=0xbf)) => { pos += 1; state = 16; }
-                    _ => break,
-                },
-                19 => match buf.get(pos) {
-                    Some(&(0x80..=0xbf)) => { pos += 1; state = 17; }
-                    _ => break,
-                },
-                20 => match buf.get(pos) {
-                    Some(&(0x80..=0xbf)) => { pos += 1; state = 21; }
-                    _ => break,
-                },
-                21 => match buf.get(pos) {
-                    Some(&(0x80..=0xbf)) => { pos += 1; state = 28; }
-                    _ => break,
-                },
-                22 => match buf.get(pos) {
-                    Some(&(0x80..=0x9f)) => { pos += 1; state = 14; }
-                    _ => break,
-                },
-                23 => match buf.get(pos) {
-                    Some(&(0x80..=0x9f)) => { pos += 1; state = 15; }
-                    _ => break,
-                },
-                24 => match buf.get(pos) {
-                    Some(&(0x80..=0x9f)) => { pos += 1; state = 28; }
-                    _ => break,
-                },
-                25 => match buf.get(pos) {
-                    Some(&(0x80..=0x8f)) => { pos += 1; state = 16; }
-                    _ => break,
-                },
-                26 => match buf.get(pos) {
-                    Some(&(0x80..=0x8f)) => { pos += 1; state = 17; }
-                    _ => break,
-                },
-                27 => match buf.get(pos) {
-                    Some(&(0x80..=0x8f)) => { pos += 1; state = 21; }
-                    _ => break,
-                },
-                28 => match buf.get(pos) {
-                    Some(&(0x80..=0xbf)) => { pos += 1; state = 53; best_len = pos - start; best_kind = Some(TokenKind::Comment); }
-                    _ => break,
-                },
-                29 => match buf.get(pos) {
-                    Some(&(0x90..=0xbf)) => { pos += 1; state = 16; }
-                    _ => break,
-                },
-                30 => match buf.get(pos) {
-                    Some(&(0x90..=0xbf)) => { pos += 1; state = 17; }
-                    _ => break,
-                },
-                31 => match buf.get(pos) {
-                    Some(&(0x90..=0xbf)) => { pos += 1; state = 21; }
-                    _ => break,
-                },
-                32 => match buf.get(pos) {
-                    Some(&(0xa0..=0xbf)) => { pos += 1; state = 14; }
-                    _ => break,
-                },
-                33 => match buf.get(pos) {
-                    Some(&(0xa0..=0xbf)) => { pos += 1; state = 15; }
-                    _ => break,
-                },
-                34 => match buf.get(pos) {
-                    Some(&(0xa0..=0xbf)) => { pos += 1; state = 28; }
-                    _ => break,
-                },
-                35 => break,
-                36 => break,
-                37 => break,
-                38 => break,
-                39 => break,
-                40 => break,
-                41 => break,
-                42 => break,
-                43 => break,
-                44 => break,
-                45 => break,
-                46 => break,
-                47 => match buf.get(pos) {
-                    Some(&b'.') => { pos += 1; state = 46; best_len = pos - start; best_kind = Some(TokenKind::Dotdot); }
-                    _ => break,
-                },
-                48 => break,
-                49 => break,
-                50 => break,
-                51 => {
-                    while let Some(&b) = buf.get(pos) {
-                        if !matches!(b, b'0'..=b'9' | b'A'..=b'Z' | b'_' | b'a'..=b'z') { break; }
-                        pos += 1;
-                    }
-                    best_len = pos - start;
-                    best_kind = Some(TokenKind::Ident);
-                    match buf.get(pos) {
-                        Some(&(b'0'..=b'9' | b'A'..=b'Z' | b'_' | b'a'..=b'z')) => { pos += 1; state = 51; best_len = pos - start; best_kind = Some(TokenKind::Ident); }
-                        _ => break,
-                    }
-                },
-                52 => {
-                    while let Some(&b) = buf.get(pos) {
-                        if !matches!(b, b'\t'..=b'\n' | b'\r' | b' ') { break; }
-                        pos += 1;
-                    }
-                    best_len = pos - start;
-                    best_kind = Some(TokenKind::Ws);
-                    match buf.get(pos) {
-                        Some(&(b'\t'..=b'\n' | b'\r' | b' ')) => { pos += 1; state = 52; best_len = pos - start; best_kind = Some(TokenKind::Ws); }
-                        _ => break,
-                    }
-                },
-                53 => {
-                    while let Some(&b) = buf.get(pos) {
-                        if !matches!(b, 0x00..=b'\t' | 0x0b..=0x7f) { break; }
-                        pos += 1;
-                    }
-                    best_len = pos - start;
-                    best_kind = Some(TokenKind::Comment);
-                    match buf.get(pos) {
-                        Some(&(0xf1..=0xf3)) => { pos += 1; state = 20; }
-                        Some(&(0xe1..=0xec | 0xee..=0xef)) => { pos += 1; state = 21; }
-                        Some(&0xed) => { pos += 1; state = 24; }
-                        Some(&0xf4) => { pos += 1; state = 27; }
-                        Some(&(0xc2..=0xdf)) => { pos += 1; state = 28; }
-                        Some(&0xf0) => { pos += 1; state = 31; }
-                        Some(&0xe0) => { pos += 1; state = 34; }
-                        Some(&(0x00..=b'\t' | 0x0b..=0x7f)) => { pos += 1; state = 53; best_len = pos - start; best_kind = Some(TokenKind::Comment); }
-                        _ => break,
-                    }
-                },
+                }
+            },
+            10 => match buf.get(pos) {
+                Some(&(b'0'..=b'9' | b'A'..=b'F' | b'a'..=b'f')) => { pos += 1; state = 8; }
                 _ => break,
-            }
+            },
+            11 => match buf.get(pos) {
+                Some(&(b'0'..=b'9' | b'A'..=b'F' | b'a'..=b'f')) => { pos += 1; state = 9; }
+                _ => break,
+            },
+            12 => match buf.get(pos) {
+                Some(&b'>') => { pos += 1; state = 49; best_len = pos - start; best_kind = Some(TokenKind::Arrow); }
+                _ => break,
+            },
+            13 => match buf.get(pos) {
+                Some(&b'{') => { pos += 1; state = 10; }
+                _ => break,
+            },
+            14 => match buf.get(pos) {
+                Some(&b'{') => { pos += 1; state = 11; }
+                _ => break,
+            },
+            15 => match buf.get(pos) {
+                Some(&(0x80..=0xbf)) => { pos += 1; state = 3; }
+                _ => break,
+            },
+            16 => match buf.get(pos) {
+                Some(&(0x80..=0xbf)) => { pos += 1; state = 6; }
+                _ => break,
+            },
+            17 => match buf.get(pos) {
+                Some(&(0x80..=0xbf)) => { pos += 1; state = 15; }
+                _ => break,
+            },
+            18 => match buf.get(pos) {
+                Some(&(0x80..=0xbf)) => { pos += 1; state = 16; }
+                _ => break,
+            },
+            19 => match buf.get(pos) {
+                Some(&(0x80..=0xbf)) => { pos += 1; state = 17; }
+                _ => break,
+            },
+            20 => match buf.get(pos) {
+                Some(&(0x80..=0xbf)) => { pos += 1; state = 18; }
+                _ => break,
+            },
+            21 => match buf.get(pos) {
+                Some(&(0x80..=0xbf)) => { pos += 1; state = 22; }
+                _ => break,
+            },
+            22 => match buf.get(pos) {
+                Some(&(0x80..=0xbf)) => { pos += 1; state = 29; }
+                _ => break,
+            },
+            23 => match buf.get(pos) {
+                Some(&(0x80..=0x9f)) => { pos += 1; state = 15; }
+                _ => break,
+            },
+            24 => match buf.get(pos) {
+                Some(&(0x80..=0x9f)) => { pos += 1; state = 16; }
+                _ => break,
+            },
+            25 => match buf.get(pos) {
+                Some(&(0x80..=0x9f)) => { pos += 1; state = 29; }
+                _ => break,
+            },
+            26 => match buf.get(pos) {
+                Some(&(0x80..=0x8f)) => { pos += 1; state = 17; }
+                _ => break,
+            },
+            27 => match buf.get(pos) {
+                Some(&(0x80..=0x8f)) => { pos += 1; state = 18; }
+                _ => break,
+            },
+            28 => match buf.get(pos) {
+                Some(&(0x80..=0x8f)) => { pos += 1; state = 22; }
+                _ => break,
+            },
+            29 => match buf.get(pos) {
+                Some(&(0x80..=0xbf)) => { pos += 1; state = 54; best_len = pos - start; best_kind = Some(TokenKind::Comment); }
+                _ => break,
+            },
+            30 => match buf.get(pos) {
+                Some(&(0x90..=0xbf)) => { pos += 1; state = 17; }
+                _ => break,
+            },
+            31 => match buf.get(pos) {
+                Some(&(0x90..=0xbf)) => { pos += 1; state = 18; }
+                _ => break,
+            },
+            32 => match buf.get(pos) {
+                Some(&(0x90..=0xbf)) => { pos += 1; state = 22; }
+                _ => break,
+            },
+            33 => match buf.get(pos) {
+                Some(&(0xa0..=0xbf)) => { pos += 1; state = 15; }
+                _ => break,
+            },
+            34 => match buf.get(pos) {
+                Some(&(0xa0..=0xbf)) => { pos += 1; state = 16; }
+                _ => break,
+            },
+            35 => match buf.get(pos) {
+                Some(&(0xa0..=0xbf)) => { pos += 1; state = 29; }
+                _ => break,
+            },
+            36 => break,
+            37 => break,
+            38 => break,
+            39 => break,
+            40 => break,
+            41 => break,
+            42 => break,
+            43 => break,
+            44 => break,
+            45 => break,
+            46 => match buf.get(pos) {
+                Some(&b'.') => { pos += 1; state = 45; best_len = pos - start; best_kind = Some(TokenKind::Dotdot); }
+                _ => break,
+            },
+            47 => break,
+            48 => break,
+            49 => break,
+            50 => break,
+            51 => break,
+            52 => {
+                while let Some(&b) = buf.get(pos) {
+                    if !matches!(b, b'0'..=b'9' | b'A'..=b'Z' | b'_' | b'a'..=b'z') { break; }
+                    pos += 1;
+                }
+                best_len = pos - start;
+                best_kind = Some(TokenKind::Ident);
+                match buf.get(pos) {
+                    Some(&(b'0'..=b'9' | b'A'..=b'Z' | b'_' | b'a'..=b'z')) => { pos += 1; state = 52; best_len = pos - start; best_kind = Some(TokenKind::Ident); }
+                    _ => break,
+                }
+            },
+            53 => {
+                while let Some(&b) = buf.get(pos) {
+                    if !matches!(b, b'\t'..=b'\n' | b'\r' | b' ') { break; }
+                    pos += 1;
+                }
+                best_len = pos - start;
+                best_kind = Some(TokenKind::Ws);
+                match buf.get(pos) {
+                    Some(&(b'\t'..=b'\n' | b'\r' | b' ')) => { pos += 1; state = 53; best_len = pos - start; best_kind = Some(TokenKind::Ws); }
+                    _ => break,
+                }
+            },
+            54 => {
+                while let Some(&b) = buf.get(pos) {
+                    if !matches!(b, 0x00..=b'\t' | 0x0b..=0x7f) { break; }
+                    pos += 1;
+                }
+                best_len = pos - start;
+                best_kind = Some(TokenKind::Comment);
+                match buf.get(pos) {
+                    Some(&(0xf1..=0xf3)) => { pos += 1; state = 21; }
+                    Some(&(0xe1..=0xec | 0xee..=0xef)) => { pos += 1; state = 22; }
+                    Some(&0xed) => { pos += 1; state = 25; }
+                    Some(&0xf4) => { pos += 1; state = 28; }
+                    Some(&(0xc2..=0xdf)) => { pos += 1; state = 29; }
+                    Some(&0xf0) => { pos += 1; state = 32; }
+                    Some(&0xe0) => { pos += 1; state = 35; }
+                    Some(&(0x00..=b'\t' | 0x0b..=0x7f)) => { pos += 1; state = 54; best_len = pos - start; best_kind = Some(TokenKind::Comment); }
+                    _ => break,
+                }
+            },
+            _ => break,
         }
-        DfaMatch { best_len, best_kind, scanned: pos - start }
     }
+    DfaMatch { best_len, best_kind, scanned: pos - start }
 }
 
 
 /// Lookahead required to disambiguate every alternative (LL(k)).
 pub const K: usize = 1;
 const ENTRY_FILE: u32 = 1;
-const ENTRY_DECL: u32 = 5;
-const ENTRY_ANNOTS: u32 = 11;
-const ENTRY_ANNOT: u32 = 16;
-const ENTRY_ALT_EXPR: u32 = 19;
-const ENTRY_SEQ_EXPR: u32 = 22;
-const ENTRY_GROUP: u32 = 27;
-const ENTRY_ATOM: u32 = 31;
-const ENTRY_CHAR_PRIMARY: u32 = 34;
-const ENTRY_NEG_CLASS: u32 = 39;
+const ENTRY_ITEM: u32 = 5;
+const ENTRY_MODE_PRE: u32 = 9;
+const ENTRY_DECL: u32 = 16;
+const ENTRY_ACTIONS: u32 = 22;
+const ENTRY_ACTION: u32 = 26;
+const ENTRY_ACTION_ARG: u32 = 30;
+const ENTRY_ALT_EXPR: u32 = 35;
+const ENTRY_SEQ_EXPR: u32 = 38;
+const ENTRY_GROUP: u32 = 43;
+const ENTRY_ATOM: u32 = 47;
+const ENTRY_CHAR_PRIMARY: u32 = 50;
+const ENTRY_NEG_CLASS: u32 = 55;
 
 
 static SYNC_0: &[TokenKind] = &[TokenKind::Eof];
-static SYNC_1: &[TokenKind] = &[TokenKind::Eof, TokenKind::Ident];
-static SYNC_2: &[TokenKind] = &[TokenKind::Eof, TokenKind::Rbrack, TokenKind::Comma, TokenKind::Ident];
-static SYNC_3: &[TokenKind] = &[TokenKind::Eof, TokenKind::Lparen, TokenKind::Rparen, TokenKind::Lbrack, TokenKind::Semi, TokenKind::Pipe, TokenKind::Question, TokenKind::Star, TokenKind::Plus, TokenKind::Dot, TokenKind::Bang, TokenKind::String, TokenKind::Char, TokenKind::Ident];
+static SYNC_1: &[TokenKind] = &[TokenKind::Eof, TokenKind::At, TokenKind::Ident];
+static SYNC_2: &[TokenKind] = &[TokenKind::Eof, TokenKind::Comma, TokenKind::At, TokenKind::Ident];
+static SYNC_3: &[TokenKind] = &[TokenKind::Eof, TokenKind::Lparen, TokenKind::Rparen, TokenKind::Semi, TokenKind::Pipe, TokenKind::Question, TokenKind::Star, TokenKind::Plus, TokenKind::Dot, TokenKind::Bang, TokenKind::At, TokenKind::Arrow, TokenKind::String, TokenKind::Char, TokenKind::Ident];
 
 
 /// Zero-sized marker type that carries the generated dispatch logic via
@@ -426,9 +447,14 @@ static SYNC_3: &[TokenKind] = &[TokenKind::Eof, TokenKind::Lparen, TokenKind::Rp
 pub struct Grammar;
 
 /// Parser alias pinning the grammar and lookahead. `L` is any
-/// [`LexerBackend`]; the generated `parse_*_from_str`/`parse_*_from_reader`
-/// helpers build a parser with either [`Scanner`] or [`StreamingLexer`].
-pub type Parser<'a, L> = parsuna_rt::Parser<'a, L, K, Grammar>;
+/// [`LexerBackend`]; `C` is a [`parsuna_rt::ParserConfig`] (defaults to
+/// [`parsuna_rt::EmitSkips`], which surfaces skip tokens in the event
+/// stream — pass [`parsuna_rt::DropSkips`] to silently consume them).
+/// The generated `parse_*_from_str`/`parse_*_from_reader` helpers build a
+/// parser with either [`Scanner`] or [`StreamingLexer`]; their `_with`
+/// counterparts let the caller pin a custom config via turbofish, e.g.
+/// `parse_foo_from_str_with::<_, parsuna_rt::DropSkips>(src)`.
+pub type Parser<'a, L, C = parsuna_rt::EmitSkips> = parsuna_rt::Parser<'a, L, K, Grammar, C>;
 impl parsuna_rt::Grammar<K> for Grammar {
     type TokenKind = TokenKind;
     type RuleKind = RuleKind;
@@ -440,14 +466,14 @@ impl parsuna_rt::Grammar<K> for Grammar {
     }
 
     #[inline]
-    fn step<'a, 'p, L: LexerBackend<'a, Self::TokenKind>>(p: &mut parsuna_rt::Cursor<'p, 'a, L, K, Self>) -> Option<parsuna_rt::Event<'a, TokenKind, RuleKind>> {
+    fn step<'a, 'p, L: LexerBackend<'a, Self::TokenKind>, C: parsuna_rt::ParserConfig>(p: &mut parsuna_rt::Cursor<'p, 'a, L, K, Self, C>) -> Option<parsuna_rt::Event<'a, TokenKind, RuleKind>> {
         let mut cur = p.state();
         let mut event: Option<parsuna_rt::Event<'a, TokenKind, RuleKind>> = None;
         match cur {
             1 => { // file:enter
                 event = Some(p.enter(RuleKind::File));
                 match p.look(0).kind {
-                    Some(TokenKind::Ident) => {
+                    Some(TokenKind::At) | Some(TokenKind::Ident) => {
                         p.push_ret(2);
                         cur = 4;
                     }
@@ -458,10 +484,9 @@ impl parsuna_rt::Grammar<K> for Grammar {
             }
             2 => { // file:star
                 match p.look(0).kind {
-                    Some(TokenKind::Ident) => {
+                    Some(TokenKind::At) | Some(TokenKind::Ident) => {
                         p.push_ret(2);
-                        event = Some(p.enter(RuleKind::Decl));
-                        cur = 6;
+                        cur = 4;
                     }
                     _ => {
                         cur = 3;
@@ -472,146 +497,235 @@ impl parsuna_rt::Grammar<K> for Grammar {
                 event = Some(p.exit(RuleKind::File));
                 cur = p.ret();
             }
-            4 => { // file:star-body:call:decl
-                event = Some(p.enter(RuleKind::Decl));
-                cur = 6;
-            }
-            5 => { // decl:enter
-                event = Some(p.enter(RuleKind::Decl));
-                cur = 6;
-            }
-            6 => { // decl:expect:IDENT
-                event = Some(p.expect(TokenKind::Ident, SYNC_1, "expected IDENT"));
-                cur = 7;
-            }
-            7 => { // decl:expect:EQ
-                event = Some(p.expect(TokenKind::Eq, SYNC_1, "expected EQ"));
-                p.push_ret(8);
-                cur = 19;
-            }
-            8 => { // decl:opt
+            4 => { // file:star-body:call:item
+                event = Some(p.enter(RuleKind::Item));
                 match p.look(0).kind {
-                    Some(TokenKind::Lbrack) => {
-                        p.push_ret(9);
-                        event = Some(p.enter(RuleKind::Annots));
-                        cur = 12;
+                    Some(TokenKind::At) => {
+                        p.push_ret(6);
+                        cur = 8;
                     }
                     _ => {
-                        cur = 9;
+                        cur = 6;
                     }
                 }
             }
-            9 => { // decl:expect:SEMI
-                event = Some(p.expect(TokenKind::Semi, SYNC_1, "expected SEMI"));
+            5 => { // item:enter
+                event = Some(p.enter(RuleKind::Item));
+                match p.look(0).kind {
+                    Some(TokenKind::At) => {
+                        p.push_ret(6);
+                        cur = 8;
+                    }
+                    _ => {
+                        cur = 6;
+                    }
+                }
+            }
+            6 => { // item:call:decl
+                p.push_ret(7);
+                event = Some(p.enter(RuleKind::Decl));
+                cur = 17;
+            }
+            7 => { // item:exit
+                event = Some(p.exit(RuleKind::Item));
+                cur = p.ret();
+            }
+            8 => { // item:opt-body:call:mode_pre
+                event = Some(p.enter(RuleKind::ModePre));
                 cur = 10;
             }
-            10 => { // decl:exit
+            9 => { // mode_pre:enter
+                event = Some(p.enter(RuleKind::ModePre));
+                cur = 10;
+            }
+            10 => { // mode_pre:expect:AT
+                event = Some(p.expect(TokenKind::At, SYNC_1, "expected AT"));
+                cur = 11;
+            }
+            11 => { // mode_pre:expect:IDENT
+                event = Some(p.expect(TokenKind::Ident, SYNC_1, "expected IDENT"));
+                cur = 12;
+            }
+            12 => { // mode_pre:expect:LPAREN
+                event = Some(p.expect(TokenKind::Lparen, SYNC_1, "expected LPAREN"));
+                cur = 13;
+            }
+            13 => { // mode_pre:expect:IDENT
+                event = Some(p.expect(TokenKind::Ident, SYNC_1, "expected IDENT"));
+                cur = 14;
+            }
+            14 => { // mode_pre:expect:RPAREN
+                event = Some(p.expect(TokenKind::Rparen, SYNC_1, "expected RPAREN"));
+                cur = 15;
+            }
+            15 => { // mode_pre:exit
+                event = Some(p.exit(RuleKind::ModePre));
+                cur = p.ret();
+            }
+            16 => { // decl:enter
+                event = Some(p.enter(RuleKind::Decl));
+                cur = 17;
+            }
+            17 => { // decl:expect:IDENT
+                event = Some(p.expect(TokenKind::Ident, SYNC_1, "expected IDENT"));
+                cur = 18;
+            }
+            18 => { // decl:expect:EQ
+                event = Some(p.expect(TokenKind::Eq, SYNC_1, "expected EQ"));
+                p.push_ret(19);
+                cur = 35;
+            }
+            19 => { // decl:opt
+                match p.look(0).kind {
+                    Some(TokenKind::Arrow) => {
+                        p.push_ret(20);
+                        event = Some(p.enter(RuleKind::Actions));
+                        cur = 23;
+                    }
+                    _ => {
+                        cur = 20;
+                    }
+                }
+            }
+            20 => { // decl:expect:SEMI
+                event = Some(p.expect(TokenKind::Semi, SYNC_1, "expected SEMI"));
+                cur = 21;
+            }
+            21 => { // decl:exit
                 event = Some(p.exit(RuleKind::Decl));
                 cur = p.ret();
             }
-            11 => { // annots:enter
-                event = Some(p.enter(RuleKind::Annots));
-                cur = 12;
+            22 => { // actions:enter
+                event = Some(p.enter(RuleKind::Actions));
+                cur = 23;
             }
-            12 => { // annots:expect:LBRACK
-                event = Some(p.expect(TokenKind::Lbrack, SYNC_1, "expected LBRACK"));
-                p.push_ret(13);
-                cur = 16;
+            23 => { // actions:expect:ARROW
+                event = Some(p.expect(TokenKind::Arrow, SYNC_1, "expected ARROW"));
+                p.push_ret(24);
+                cur = 26;
             }
-            13 => { // annots:star
+            24 => { // actions:star
                 match p.look(0).kind {
                     Some(TokenKind::Comma) => {
-                        p.push_ret(13);
+                        p.push_ret(24);
                         event = Some(p.expect(TokenKind::Comma, SYNC_1, "expected COMMA"));
-                        cur = 16;
+                        cur = 26;
                     }
                     _ => {
-                        cur = 14;
+                        cur = 25;
                     }
                 }
             }
-            14 => { // annots:expect:RBRACK
-                event = Some(p.expect(TokenKind::Rbrack, SYNC_1, "expected RBRACK"));
-                cur = 15;
-            }
-            15 => { // annots:exit
-                event = Some(p.exit(RuleKind::Annots));
+            25 => { // actions:exit
+                event = Some(p.exit(RuleKind::Actions));
                 cur = p.ret();
             }
-            16 => { // annot:enter
-                event = Some(p.enter(RuleKind::Annot));
-                cur = 17;
+            26 => { // action:enter
+                event = Some(p.enter(RuleKind::Action));
+                cur = 27;
             }
-            17 => { // annot:expect:IDENT
+            27 => { // action:expect:IDENT
                 event = Some(p.expect(TokenKind::Ident, SYNC_2, "expected IDENT"));
-                cur = 18;
+                cur = 28;
             }
-            18 => { // annot:exit
-                event = Some(p.exit(RuleKind::Annot));
+            28 => { // action:opt
+                match p.look(0).kind {
+                    Some(TokenKind::Lparen) => {
+                        p.push_ret(29);
+                        event = Some(p.enter(RuleKind::ActionArg));
+                        cur = 31;
+                    }
+                    _ => {
+                        cur = 29;
+                    }
+                }
+            }
+            29 => { // action:exit
+                event = Some(p.exit(RuleKind::Action));
                 cur = p.ret();
             }
-            19 => { // alt_expr:enter
-                event = Some(p.enter(RuleKind::AltExpr));
-                p.push_ret(20);
-                cur = 22;
+            30 => { // action_arg:enter
+                event = Some(p.enter(RuleKind::ActionArg));
+                cur = 31;
             }
-            20 => { // alt_expr:star
+            31 => { // action_arg:expect:LPAREN
+                event = Some(p.expect(TokenKind::Lparen, SYNC_2, "expected LPAREN"));
+                cur = 32;
+            }
+            32 => { // action_arg:expect:IDENT
+                event = Some(p.expect(TokenKind::Ident, SYNC_2, "expected IDENT"));
+                cur = 33;
+            }
+            33 => { // action_arg:expect:RPAREN
+                event = Some(p.expect(TokenKind::Rparen, SYNC_2, "expected RPAREN"));
+                cur = 34;
+            }
+            34 => { // action_arg:exit
+                event = Some(p.exit(RuleKind::ActionArg));
+                cur = p.ret();
+            }
+            35 => { // alt_expr:enter
+                event = Some(p.enter(RuleKind::AltExpr));
+                p.push_ret(36);
+                cur = 38;
+            }
+            36 => { // alt_expr:star
                 match p.look(0).kind {
                     Some(TokenKind::Pipe) => {
-                        p.push_ret(20);
+                        p.push_ret(36);
                         event = Some(p.expect(TokenKind::Pipe, SYNC_3, "expected PIPE"));
-                        cur = 22;
+                        cur = 38;
                     }
                     _ => {
-                        cur = 21;
+                        cur = 37;
                     }
                 }
             }
-            21 => { // alt_expr:exit
+            37 => { // alt_expr:exit
                 event = Some(p.exit(RuleKind::AltExpr));
                 cur = p.ret();
             }
-            22 => { // seq_expr:enter
+            38 => { // seq_expr:enter
                 event = Some(p.enter(RuleKind::SeqExpr));
                 match p.look(0).kind {
                     Some(TokenKind::Lparen) | Some(TokenKind::Dot) | Some(TokenKind::Bang) | Some(TokenKind::String) | Some(TokenKind::Char) | Some(TokenKind::Ident) => {
-                        p.push_ret(23);
-                        cur = 25;
+                        p.push_ret(39);
+                        cur = 41;
                     }
                     _ => {
-                        cur = 24;
+                        cur = 40;
                     }
                 }
             }
-            23 => { // seq_expr:star
+            39 => { // seq_expr:star
                 match p.look(0).kind {
                     Some(TokenKind::Lparen) | Some(TokenKind::Dot) | Some(TokenKind::Bang) | Some(TokenKind::String) | Some(TokenKind::Char) | Some(TokenKind::Ident) => {
-                        p.push_ret(23);
-                        p.push_ret(26);
+                        p.push_ret(39);
+                        p.push_ret(42);
                         match p.look(0).kind {
                             Some(TokenKind::Lparen) => {
                                 event = Some(p.enter(RuleKind::Group));
-                                cur = 28;
+                                cur = 44;
                             }
                             Some(TokenKind::Dot) => {
                                 event = Some(p.enter(RuleKind::Atom));
-                                cur = 32;
+                                cur = 48;
                             }
                             Some(TokenKind::Bang) => {
                                 event = Some(p.enter(RuleKind::Atom));
-                                cur = 32;
+                                cur = 48;
                             }
                             Some(TokenKind::String) => {
                                 event = Some(p.enter(RuleKind::Atom));
-                                cur = 32;
+                                cur = 48;
                             }
                             Some(TokenKind::Char) => {
                                 event = Some(p.enter(RuleKind::Atom));
-                                cur = 32;
+                                cur = 48;
                             }
                             Some(TokenKind::Ident) => {
                                 event = Some(p.enter(RuleKind::Atom));
-                                cur = 32;
+                                cur = 48;
                             }
                             _ => {
                                 event = Some(p.error_here("unexpected token"));
@@ -621,40 +735,40 @@ impl parsuna_rt::Grammar<K> for Grammar {
                         }
                     }
                     _ => {
-                        cur = 24;
+                        cur = 40;
                     }
                 }
             }
-            24 => { // seq_expr:exit
+            40 => { // seq_expr:exit
                 event = Some(p.exit(RuleKind::SeqExpr));
                 cur = p.ret();
             }
-            25 => { // seq_expr:star-body:call:_postfix_expr
-                p.push_ret(26);
+            41 => { // seq_expr:star-body:call:_postfix_expr
+                p.push_ret(42);
                 match p.look(0).kind {
                     Some(TokenKind::Lparen) => {
                         event = Some(p.enter(RuleKind::Group));
-                        cur = 28;
+                        cur = 44;
                     }
                     Some(TokenKind::Dot) => {
                         event = Some(p.enter(RuleKind::Atom));
-                        cur = 32;
+                        cur = 48;
                     }
                     Some(TokenKind::Bang) => {
                         event = Some(p.enter(RuleKind::Atom));
-                        cur = 32;
+                        cur = 48;
                     }
                     Some(TokenKind::String) => {
                         event = Some(p.enter(RuleKind::Atom));
-                        cur = 32;
+                        cur = 48;
                     }
                     Some(TokenKind::Char) => {
                         event = Some(p.enter(RuleKind::Atom));
-                        cur = 32;
+                        cur = 48;
                     }
                     Some(TokenKind::Ident) => {
                         event = Some(p.enter(RuleKind::Atom));
-                        cur = 32;
+                        cur = 48;
                     }
                     _ => {
                         event = Some(p.error_here("unexpected token"));
@@ -663,10 +777,10 @@ impl parsuna_rt::Grammar<K> for Grammar {
                     }
                 }
             }
-            26 => { // _postfix_expr:star
+            42 => { // _postfix_expr:star
                 match p.look(0).kind {
                     Some(TokenKind::Question) | Some(TokenKind::Star) | Some(TokenKind::Plus) => {
-                        p.push_ret(26);
+                        p.push_ret(42);
                         match p.look(0).kind {
                             Some(TokenKind::Question) => {
                                 event = Some(p.expect(TokenKind::Question, SYNC_3, "expected QUESTION"));
@@ -692,157 +806,157 @@ impl parsuna_rt::Grammar<K> for Grammar {
                     }
                 }
             }
-            27 => { // group:enter
+            43 => { // group:enter
                 event = Some(p.enter(RuleKind::Group));
-                cur = 28;
+                cur = 44;
             }
-            28 => { // group:expect:LPAREN
+            44 => { // group:expect:LPAREN
                 event = Some(p.expect(TokenKind::Lparen, SYNC_3, "expected LPAREN"));
-                p.push_ret(29);
-                cur = 19;
+                p.push_ret(45);
+                cur = 35;
             }
-            29 => { // group:expect:RPAREN
+            45 => { // group:expect:RPAREN
                 event = Some(p.expect(TokenKind::Rparen, SYNC_3, "expected RPAREN"));
-                cur = 30;
+                cur = 46;
             }
-            30 => { // group:exit
+            46 => { // group:exit
                 event = Some(p.exit(RuleKind::Group));
                 cur = p.ret();
             }
-            31 => { // atom:enter
+            47 => { // atom:enter
                 event = Some(p.enter(RuleKind::Atom));
-                cur = 32;
+                cur = 48;
             }
-            32 => { // atom:dispatch
+            48 => { // atom:dispatch
                 match p.look(0).kind {
                     Some(TokenKind::Dot) => {
-                        p.push_ret(33);
+                        p.push_ret(49);
                         event = Some(p.enter(RuleKind::CharPrimary));
-                        cur = 35;
+                        cur = 51;
                     }
                     Some(TokenKind::Bang) => {
-                        p.push_ret(33);
+                        p.push_ret(49);
                         event = Some(p.enter(RuleKind::NegClass));
-                        cur = 40;
+                        cur = 56;
                     }
                     Some(TokenKind::String) => {
-                        p.push_ret(33);
+                        p.push_ret(49);
                         event = Some(p.expect(TokenKind::String, SYNC_3, "expected STRING"));
                         cur = p.ret();
                     }
                     Some(TokenKind::Char) => {
-                        p.push_ret(33);
+                        p.push_ret(49);
                         event = Some(p.enter(RuleKind::CharPrimary));
-                        cur = 35;
+                        cur = 51;
                     }
                     Some(TokenKind::Ident) => {
-                        p.push_ret(33);
+                        p.push_ret(49);
                         event = Some(p.expect(TokenKind::Ident, SYNC_3, "expected IDENT"));
                         cur = p.ret();
                     }
                     _ => {
-                        cur = 33;
+                        cur = 49;
                         event = Some(p.error_here("unexpected token"));
                         p.recover_to(SYNC_3);
                     }
                 }
             }
-            33 => { // atom:exit
+            49 => { // atom:exit
                 event = Some(p.exit(RuleKind::Atom));
                 cur = p.ret();
             }
-            34 => { // char_primary:enter
+            50 => { // char_primary:enter
                 event = Some(p.enter(RuleKind::CharPrimary));
-                cur = 35;
+                cur = 51;
             }
-            35 => { // char_primary:dispatch
+            51 => { // char_primary:dispatch
                 match p.look(0).kind {
                     Some(TokenKind::Dot) => {
-                        p.push_ret(36);
+                        p.push_ret(52);
                         event = Some(p.expect(TokenKind::Dot, SYNC_3, "expected DOT"));
                         cur = p.ret();
                     }
                     Some(TokenKind::Char) => {
-                        p.push_ret(36);
+                        p.push_ret(52);
                         event = Some(p.expect(TokenKind::Char, SYNC_3, "expected CHAR"));
-                        cur = 37;
+                        cur = 53;
                     }
                     _ => {
-                        cur = 36;
+                        cur = 52;
                         event = Some(p.error_here("unexpected token"));
                         p.recover_to(SYNC_3);
                     }
                 }
             }
-            36 => { // char_primary:exit
+            52 => { // char_primary:exit
                 event = Some(p.exit(RuleKind::CharPrimary));
                 cur = p.ret();
             }
-            37 => { // char_primary:alt0:opt
+            53 => { // char_primary:alt0:opt
                 match p.look(0).kind {
                     Some(TokenKind::Dotdot) => {
                         event = Some(p.expect(TokenKind::Dotdot, SYNC_3, "expected DOTDOT"));
-                        cur = 38;
+                        cur = 54;
                     }
                     _ => {
                         cur = p.ret();
                     }
                 }
             }
-            38 => { // char_primary:alt0:opt-body:expect:CHAR
+            54 => { // char_primary:alt0:opt-body:expect:CHAR
                 event = Some(p.expect(TokenKind::Char, SYNC_3, "expected CHAR"));
                 cur = p.ret();
             }
-            39 => { // neg_class:enter
+            55 => { // neg_class:enter
                 event = Some(p.enter(RuleKind::NegClass));
-                cur = 40;
+                cur = 56;
             }
-            40 => { // neg_class:expect:BANG
+            56 => { // neg_class:expect:BANG
                 event = Some(p.expect(TokenKind::Bang, SYNC_3, "expected BANG"));
-                cur = 41;
+                cur = 57;
             }
-            41 => { // neg_class:dispatch
+            57 => { // neg_class:dispatch
                 match p.look(0).kind {
                     Some(TokenKind::Lparen) => {
-                        p.push_ret(42);
+                        p.push_ret(58);
                         event = Some(p.expect(TokenKind::Lparen, SYNC_3, "expected LPAREN"));
-                        p.push_ret(43);
-                        cur = 34;
+                        p.push_ret(59);
+                        cur = 50;
                     }
                     Some(TokenKind::Dot) => {
-                        p.push_ret(42);
+                        p.push_ret(58);
                         event = Some(p.enter(RuleKind::CharPrimary));
-                        cur = 35;
+                        cur = 51;
                     }
                     Some(TokenKind::Char) => {
-                        p.push_ret(42);
+                        p.push_ret(58);
                         event = Some(p.enter(RuleKind::CharPrimary));
-                        cur = 35;
+                        cur = 51;
                     }
                     _ => {
-                        cur = 42;
+                        cur = 58;
                         event = Some(p.error_here("unexpected token"));
                         p.recover_to(SYNC_3);
                     }
                 }
             }
-            42 => { // neg_class:exit
+            58 => { // neg_class:exit
                 event = Some(p.exit(RuleKind::NegClass));
                 cur = p.ret();
             }
-            43 => { // neg_class:alt1:star
+            59 => { // neg_class:alt1:star
                 match p.look(0).kind {
                     Some(TokenKind::Pipe) => {
-                        p.push_ret(43);
+                        p.push_ret(59);
                         event = Some(p.expect(TokenKind::Pipe, SYNC_3, "expected PIPE"));
-                        cur = 34;
+                        cur = 50;
                     }
                     _ => {
-                        cur = 44;
+                        cur = 60;
                     }
                 }
             }
-            44 => { // neg_class:alt1:expect:RPAREN
+            60 => { // neg_class:alt1:expect:RPAREN
                 event = Some(p.expect(TokenKind::Rparen, SYNC_3, "expected RPAREN"));
                 cur = p.ret();
             }
@@ -851,6 +965,11 @@ impl parsuna_rt::Grammar<K> for Grammar {
         p.set_state(cur);
         event
     }
+
+    #[inline]
+    fn apply_actions<'a, L: parsuna_rt::LexerBackend<'a, Self::TokenKind>>(kind: Option<TokenKind>, lex: &mut L) {
+        let _ = (kind, lex);
+    }
 }
 
 
@@ -858,150 +977,442 @@ impl parsuna_rt::Grammar<K> for Grammar {
 /// Parse the `file` rule from an in-memory string.
 ///
 /// Zero-copy: tokens borrow their text from `src`.
+/// Skip tokens (whitespace, comments) are surfaced as
+/// `Event::Token`. Use [`parse_file_from_str_with`] to pick a
+/// different [`parsuna_rt::ParserConfig`].
 pub fn parse_file_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>> {
+    Parser::new(Scanner::new(src), ENTRY_FILE)
+}
+
+/// Parse the `file` rule from an in-memory string with a caller-chosen config.
+///
+/// Pin the config via turbofish: `parse_file_from_str_with::<_, parsuna_rt::DropSkips>(src)`
+/// to silently consume skip tokens. Monomorphization removes the skip-emit
+/// branch for any config whose `EMIT_SKIPS` is `false`.
+pub fn parse_file_from_str_with<'a, C: parsuna_rt::ParserConfig>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>, C> {
     Parser::new(Scanner::new(src), ENTRY_FILE)
 }
 
 /// Parse the `file` rule from any [`Read`] source.
 ///
 /// Streaming: tokens own their text; memory use stays bounded regardless of
-/// input size.
+/// input size. See [`parse_file_from_reader_with`] to pick a config.
 pub fn parse_file_from_reader<R: Read>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>> {
     Parser::new(StreamingLexer::new(reader), ENTRY_FILE)
+}
+
+/// Parse the `file` rule from any [`Read`] source with a caller-chosen config.
+///
+/// See [`parse_file_from_str_with`] for how to pick a [`parsuna_rt::ParserConfig`].
+pub fn parse_file_from_reader_with<R: Read, C: parsuna_rt::ParserConfig>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>, C> {
+    Parser::new(StreamingLexer::new(reader), ENTRY_FILE)
+}
+
+/// Parse the `item` rule from an in-memory string.
+///
+/// Zero-copy: tokens borrow their text from `src`.
+/// Skip tokens (whitespace, comments) are surfaced as
+/// `Event::Token`. Use [`parse_item_from_str_with`] to pick a
+/// different [`parsuna_rt::ParserConfig`].
+pub fn parse_item_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>> {
+    Parser::new(Scanner::new(src), ENTRY_ITEM)
+}
+
+/// Parse the `item` rule from an in-memory string with a caller-chosen config.
+///
+/// Pin the config via turbofish: `parse_item_from_str_with::<_, parsuna_rt::DropSkips>(src)`
+/// to silently consume skip tokens. Monomorphization removes the skip-emit
+/// branch for any config whose `EMIT_SKIPS` is `false`.
+pub fn parse_item_from_str_with<'a, C: parsuna_rt::ParserConfig>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>, C> {
+    Parser::new(Scanner::new(src), ENTRY_ITEM)
+}
+
+/// Parse the `item` rule from any [`Read`] source.
+///
+/// Streaming: tokens own their text; memory use stays bounded regardless of
+/// input size. See [`parse_item_from_reader_with`] to pick a config.
+pub fn parse_item_from_reader<R: Read>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>> {
+    Parser::new(StreamingLexer::new(reader), ENTRY_ITEM)
+}
+
+/// Parse the `item` rule from any [`Read`] source with a caller-chosen config.
+///
+/// See [`parse_item_from_str_with`] for how to pick a [`parsuna_rt::ParserConfig`].
+pub fn parse_item_from_reader_with<R: Read, C: parsuna_rt::ParserConfig>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>, C> {
+    Parser::new(StreamingLexer::new(reader), ENTRY_ITEM)
+}
+
+/// Parse the `mode_pre` rule from an in-memory string.
+///
+/// Zero-copy: tokens borrow their text from `src`.
+/// Skip tokens (whitespace, comments) are surfaced as
+/// `Event::Token`. Use [`parse_mode_pre_from_str_with`] to pick a
+/// different [`parsuna_rt::ParserConfig`].
+pub fn parse_mode_pre_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>> {
+    Parser::new(Scanner::new(src), ENTRY_MODE_PRE)
+}
+
+/// Parse the `mode_pre` rule from an in-memory string with a caller-chosen config.
+///
+/// Pin the config via turbofish: `parse_mode_pre_from_str_with::<_, parsuna_rt::DropSkips>(src)`
+/// to silently consume skip tokens. Monomorphization removes the skip-emit
+/// branch for any config whose `EMIT_SKIPS` is `false`.
+pub fn parse_mode_pre_from_str_with<'a, C: parsuna_rt::ParserConfig>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>, C> {
+    Parser::new(Scanner::new(src), ENTRY_MODE_PRE)
+}
+
+/// Parse the `mode_pre` rule from any [`Read`] source.
+///
+/// Streaming: tokens own their text; memory use stays bounded regardless of
+/// input size. See [`parse_mode_pre_from_reader_with`] to pick a config.
+pub fn parse_mode_pre_from_reader<R: Read>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>> {
+    Parser::new(StreamingLexer::new(reader), ENTRY_MODE_PRE)
+}
+
+/// Parse the `mode_pre` rule from any [`Read`] source with a caller-chosen config.
+///
+/// See [`parse_mode_pre_from_str_with`] for how to pick a [`parsuna_rt::ParserConfig`].
+pub fn parse_mode_pre_from_reader_with<R: Read, C: parsuna_rt::ParserConfig>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>, C> {
+    Parser::new(StreamingLexer::new(reader), ENTRY_MODE_PRE)
 }
 
 /// Parse the `decl` rule from an in-memory string.
 ///
 /// Zero-copy: tokens borrow their text from `src`.
+/// Skip tokens (whitespace, comments) are surfaced as
+/// `Event::Token`. Use [`parse_decl_from_str_with`] to pick a
+/// different [`parsuna_rt::ParserConfig`].
 pub fn parse_decl_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>> {
+    Parser::new(Scanner::new(src), ENTRY_DECL)
+}
+
+/// Parse the `decl` rule from an in-memory string with a caller-chosen config.
+///
+/// Pin the config via turbofish: `parse_decl_from_str_with::<_, parsuna_rt::DropSkips>(src)`
+/// to silently consume skip tokens. Monomorphization removes the skip-emit
+/// branch for any config whose `EMIT_SKIPS` is `false`.
+pub fn parse_decl_from_str_with<'a, C: parsuna_rt::ParserConfig>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>, C> {
     Parser::new(Scanner::new(src), ENTRY_DECL)
 }
 
 /// Parse the `decl` rule from any [`Read`] source.
 ///
 /// Streaming: tokens own their text; memory use stays bounded regardless of
-/// input size.
+/// input size. See [`parse_decl_from_reader_with`] to pick a config.
 pub fn parse_decl_from_reader<R: Read>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>> {
     Parser::new(StreamingLexer::new(reader), ENTRY_DECL)
 }
 
-/// Parse the `annots` rule from an in-memory string.
+/// Parse the `decl` rule from any [`Read`] source with a caller-chosen config.
+///
+/// See [`parse_decl_from_str_with`] for how to pick a [`parsuna_rt::ParserConfig`].
+pub fn parse_decl_from_reader_with<R: Read, C: parsuna_rt::ParserConfig>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>, C> {
+    Parser::new(StreamingLexer::new(reader), ENTRY_DECL)
+}
+
+/// Parse the `actions` rule from an in-memory string.
 ///
 /// Zero-copy: tokens borrow their text from `src`.
-pub fn parse_annots_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>> {
-    Parser::new(Scanner::new(src), ENTRY_ANNOTS)
+/// Skip tokens (whitespace, comments) are surfaced as
+/// `Event::Token`. Use [`parse_actions_from_str_with`] to pick a
+/// different [`parsuna_rt::ParserConfig`].
+pub fn parse_actions_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>> {
+    Parser::new(Scanner::new(src), ENTRY_ACTIONS)
 }
 
-/// Parse the `annots` rule from any [`Read`] source.
+/// Parse the `actions` rule from an in-memory string with a caller-chosen config.
+///
+/// Pin the config via turbofish: `parse_actions_from_str_with::<_, parsuna_rt::DropSkips>(src)`
+/// to silently consume skip tokens. Monomorphization removes the skip-emit
+/// branch for any config whose `EMIT_SKIPS` is `false`.
+pub fn parse_actions_from_str_with<'a, C: parsuna_rt::ParserConfig>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>, C> {
+    Parser::new(Scanner::new(src), ENTRY_ACTIONS)
+}
+
+/// Parse the `actions` rule from any [`Read`] source.
 ///
 /// Streaming: tokens own their text; memory use stays bounded regardless of
-/// input size.
-pub fn parse_annots_from_reader<R: Read>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>> {
-    Parser::new(StreamingLexer::new(reader), ENTRY_ANNOTS)
+/// input size. See [`parse_actions_from_reader_with`] to pick a config.
+pub fn parse_actions_from_reader<R: Read>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>> {
+    Parser::new(StreamingLexer::new(reader), ENTRY_ACTIONS)
 }
 
-/// Parse the `annot` rule from an in-memory string.
+/// Parse the `actions` rule from any [`Read`] source with a caller-chosen config.
+///
+/// See [`parse_actions_from_str_with`] for how to pick a [`parsuna_rt::ParserConfig`].
+pub fn parse_actions_from_reader_with<R: Read, C: parsuna_rt::ParserConfig>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>, C> {
+    Parser::new(StreamingLexer::new(reader), ENTRY_ACTIONS)
+}
+
+/// Parse the `action` rule from an in-memory string.
 ///
 /// Zero-copy: tokens borrow their text from `src`.
-pub fn parse_annot_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>> {
-    Parser::new(Scanner::new(src), ENTRY_ANNOT)
+/// Skip tokens (whitespace, comments) are surfaced as
+/// `Event::Token`. Use [`parse_action_from_str_with`] to pick a
+/// different [`parsuna_rt::ParserConfig`].
+pub fn parse_action_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>> {
+    Parser::new(Scanner::new(src), ENTRY_ACTION)
 }
 
-/// Parse the `annot` rule from any [`Read`] source.
+/// Parse the `action` rule from an in-memory string with a caller-chosen config.
+///
+/// Pin the config via turbofish: `parse_action_from_str_with::<_, parsuna_rt::DropSkips>(src)`
+/// to silently consume skip tokens. Monomorphization removes the skip-emit
+/// branch for any config whose `EMIT_SKIPS` is `false`.
+pub fn parse_action_from_str_with<'a, C: parsuna_rt::ParserConfig>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>, C> {
+    Parser::new(Scanner::new(src), ENTRY_ACTION)
+}
+
+/// Parse the `action` rule from any [`Read`] source.
 ///
 /// Streaming: tokens own their text; memory use stays bounded regardless of
-/// input size.
-pub fn parse_annot_from_reader<R: Read>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>> {
-    Parser::new(StreamingLexer::new(reader), ENTRY_ANNOT)
+/// input size. See [`parse_action_from_reader_with`] to pick a config.
+pub fn parse_action_from_reader<R: Read>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>> {
+    Parser::new(StreamingLexer::new(reader), ENTRY_ACTION)
+}
+
+/// Parse the `action` rule from any [`Read`] source with a caller-chosen config.
+///
+/// See [`parse_action_from_str_with`] for how to pick a [`parsuna_rt::ParserConfig`].
+pub fn parse_action_from_reader_with<R: Read, C: parsuna_rt::ParserConfig>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>, C> {
+    Parser::new(StreamingLexer::new(reader), ENTRY_ACTION)
+}
+
+/// Parse the `action_arg` rule from an in-memory string.
+///
+/// Zero-copy: tokens borrow their text from `src`.
+/// Skip tokens (whitespace, comments) are surfaced as
+/// `Event::Token`. Use [`parse_action_arg_from_str_with`] to pick a
+/// different [`parsuna_rt::ParserConfig`].
+pub fn parse_action_arg_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>> {
+    Parser::new(Scanner::new(src), ENTRY_ACTION_ARG)
+}
+
+/// Parse the `action_arg` rule from an in-memory string with a caller-chosen config.
+///
+/// Pin the config via turbofish: `parse_action_arg_from_str_with::<_, parsuna_rt::DropSkips>(src)`
+/// to silently consume skip tokens. Monomorphization removes the skip-emit
+/// branch for any config whose `EMIT_SKIPS` is `false`.
+pub fn parse_action_arg_from_str_with<'a, C: parsuna_rt::ParserConfig>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>, C> {
+    Parser::new(Scanner::new(src), ENTRY_ACTION_ARG)
+}
+
+/// Parse the `action_arg` rule from any [`Read`] source.
+///
+/// Streaming: tokens own their text; memory use stays bounded regardless of
+/// input size. See [`parse_action_arg_from_reader_with`] to pick a config.
+pub fn parse_action_arg_from_reader<R: Read>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>> {
+    Parser::new(StreamingLexer::new(reader), ENTRY_ACTION_ARG)
+}
+
+/// Parse the `action_arg` rule from any [`Read`] source with a caller-chosen config.
+///
+/// See [`parse_action_arg_from_str_with`] for how to pick a [`parsuna_rt::ParserConfig`].
+pub fn parse_action_arg_from_reader_with<R: Read, C: parsuna_rt::ParserConfig>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>, C> {
+    Parser::new(StreamingLexer::new(reader), ENTRY_ACTION_ARG)
 }
 
 /// Parse the `alt_expr` rule from an in-memory string.
 ///
 /// Zero-copy: tokens borrow their text from `src`.
+/// Skip tokens (whitespace, comments) are surfaced as
+/// `Event::Token`. Use [`parse_alt_expr_from_str_with`] to pick a
+/// different [`parsuna_rt::ParserConfig`].
 pub fn parse_alt_expr_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>> {
+    Parser::new(Scanner::new(src), ENTRY_ALT_EXPR)
+}
+
+/// Parse the `alt_expr` rule from an in-memory string with a caller-chosen config.
+///
+/// Pin the config via turbofish: `parse_alt_expr_from_str_with::<_, parsuna_rt::DropSkips>(src)`
+/// to silently consume skip tokens. Monomorphization removes the skip-emit
+/// branch for any config whose `EMIT_SKIPS` is `false`.
+pub fn parse_alt_expr_from_str_with<'a, C: parsuna_rt::ParserConfig>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>, C> {
     Parser::new(Scanner::new(src), ENTRY_ALT_EXPR)
 }
 
 /// Parse the `alt_expr` rule from any [`Read`] source.
 ///
 /// Streaming: tokens own their text; memory use stays bounded regardless of
-/// input size.
+/// input size. See [`parse_alt_expr_from_reader_with`] to pick a config.
 pub fn parse_alt_expr_from_reader<R: Read>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>> {
+    Parser::new(StreamingLexer::new(reader), ENTRY_ALT_EXPR)
+}
+
+/// Parse the `alt_expr` rule from any [`Read`] source with a caller-chosen config.
+///
+/// See [`parse_alt_expr_from_str_with`] for how to pick a [`parsuna_rt::ParserConfig`].
+pub fn parse_alt_expr_from_reader_with<R: Read, C: parsuna_rt::ParserConfig>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>, C> {
     Parser::new(StreamingLexer::new(reader), ENTRY_ALT_EXPR)
 }
 
 /// Parse the `seq_expr` rule from an in-memory string.
 ///
 /// Zero-copy: tokens borrow their text from `src`.
+/// Skip tokens (whitespace, comments) are surfaced as
+/// `Event::Token`. Use [`parse_seq_expr_from_str_with`] to pick a
+/// different [`parsuna_rt::ParserConfig`].
 pub fn parse_seq_expr_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>> {
+    Parser::new(Scanner::new(src), ENTRY_SEQ_EXPR)
+}
+
+/// Parse the `seq_expr` rule from an in-memory string with a caller-chosen config.
+///
+/// Pin the config via turbofish: `parse_seq_expr_from_str_with::<_, parsuna_rt::DropSkips>(src)`
+/// to silently consume skip tokens. Monomorphization removes the skip-emit
+/// branch for any config whose `EMIT_SKIPS` is `false`.
+pub fn parse_seq_expr_from_str_with<'a, C: parsuna_rt::ParserConfig>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>, C> {
     Parser::new(Scanner::new(src), ENTRY_SEQ_EXPR)
 }
 
 /// Parse the `seq_expr` rule from any [`Read`] source.
 ///
 /// Streaming: tokens own their text; memory use stays bounded regardless of
-/// input size.
+/// input size. See [`parse_seq_expr_from_reader_with`] to pick a config.
 pub fn parse_seq_expr_from_reader<R: Read>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>> {
+    Parser::new(StreamingLexer::new(reader), ENTRY_SEQ_EXPR)
+}
+
+/// Parse the `seq_expr` rule from any [`Read`] source with a caller-chosen config.
+///
+/// See [`parse_seq_expr_from_str_with`] for how to pick a [`parsuna_rt::ParserConfig`].
+pub fn parse_seq_expr_from_reader_with<R: Read, C: parsuna_rt::ParserConfig>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>, C> {
     Parser::new(StreamingLexer::new(reader), ENTRY_SEQ_EXPR)
 }
 
 /// Parse the `group` rule from an in-memory string.
 ///
 /// Zero-copy: tokens borrow their text from `src`.
+/// Skip tokens (whitespace, comments) are surfaced as
+/// `Event::Token`. Use [`parse_group_from_str_with`] to pick a
+/// different [`parsuna_rt::ParserConfig`].
 pub fn parse_group_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>> {
+    Parser::new(Scanner::new(src), ENTRY_GROUP)
+}
+
+/// Parse the `group` rule from an in-memory string with a caller-chosen config.
+///
+/// Pin the config via turbofish: `parse_group_from_str_with::<_, parsuna_rt::DropSkips>(src)`
+/// to silently consume skip tokens. Monomorphization removes the skip-emit
+/// branch for any config whose `EMIT_SKIPS` is `false`.
+pub fn parse_group_from_str_with<'a, C: parsuna_rt::ParserConfig>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>, C> {
     Parser::new(Scanner::new(src), ENTRY_GROUP)
 }
 
 /// Parse the `group` rule from any [`Read`] source.
 ///
 /// Streaming: tokens own their text; memory use stays bounded regardless of
-/// input size.
+/// input size. See [`parse_group_from_reader_with`] to pick a config.
 pub fn parse_group_from_reader<R: Read>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>> {
+    Parser::new(StreamingLexer::new(reader), ENTRY_GROUP)
+}
+
+/// Parse the `group` rule from any [`Read`] source with a caller-chosen config.
+///
+/// See [`parse_group_from_str_with`] for how to pick a [`parsuna_rt::ParserConfig`].
+pub fn parse_group_from_reader_with<R: Read, C: parsuna_rt::ParserConfig>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>, C> {
     Parser::new(StreamingLexer::new(reader), ENTRY_GROUP)
 }
 
 /// Parse the `atom` rule from an in-memory string.
 ///
 /// Zero-copy: tokens borrow their text from `src`.
+/// Skip tokens (whitespace, comments) are surfaced as
+/// `Event::Token`. Use [`parse_atom_from_str_with`] to pick a
+/// different [`parsuna_rt::ParserConfig`].
 pub fn parse_atom_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>> {
+    Parser::new(Scanner::new(src), ENTRY_ATOM)
+}
+
+/// Parse the `atom` rule from an in-memory string with a caller-chosen config.
+///
+/// Pin the config via turbofish: `parse_atom_from_str_with::<_, parsuna_rt::DropSkips>(src)`
+/// to silently consume skip tokens. Monomorphization removes the skip-emit
+/// branch for any config whose `EMIT_SKIPS` is `false`.
+pub fn parse_atom_from_str_with<'a, C: parsuna_rt::ParserConfig>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>, C> {
     Parser::new(Scanner::new(src), ENTRY_ATOM)
 }
 
 /// Parse the `atom` rule from any [`Read`] source.
 ///
 /// Streaming: tokens own their text; memory use stays bounded regardless of
-/// input size.
+/// input size. See [`parse_atom_from_reader_with`] to pick a config.
 pub fn parse_atom_from_reader<R: Read>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>> {
+    Parser::new(StreamingLexer::new(reader), ENTRY_ATOM)
+}
+
+/// Parse the `atom` rule from any [`Read`] source with a caller-chosen config.
+///
+/// See [`parse_atom_from_str_with`] for how to pick a [`parsuna_rt::ParserConfig`].
+pub fn parse_atom_from_reader_with<R: Read, C: parsuna_rt::ParserConfig>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>, C> {
     Parser::new(StreamingLexer::new(reader), ENTRY_ATOM)
 }
 
 /// Parse the `char_primary` rule from an in-memory string.
 ///
 /// Zero-copy: tokens borrow their text from `src`.
+/// Skip tokens (whitespace, comments) are surfaced as
+/// `Event::Token`. Use [`parse_char_primary_from_str_with`] to pick a
+/// different [`parsuna_rt::ParserConfig`].
 pub fn parse_char_primary_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>> {
+    Parser::new(Scanner::new(src), ENTRY_CHAR_PRIMARY)
+}
+
+/// Parse the `char_primary` rule from an in-memory string with a caller-chosen config.
+///
+/// Pin the config via turbofish: `parse_char_primary_from_str_with::<_, parsuna_rt::DropSkips>(src)`
+/// to silently consume skip tokens. Monomorphization removes the skip-emit
+/// branch for any config whose `EMIT_SKIPS` is `false`.
+pub fn parse_char_primary_from_str_with<'a, C: parsuna_rt::ParserConfig>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>, C> {
     Parser::new(Scanner::new(src), ENTRY_CHAR_PRIMARY)
 }
 
 /// Parse the `char_primary` rule from any [`Read`] source.
 ///
 /// Streaming: tokens own their text; memory use stays bounded regardless of
-/// input size.
+/// input size. See [`parse_char_primary_from_reader_with`] to pick a config.
 pub fn parse_char_primary_from_reader<R: Read>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>> {
+    Parser::new(StreamingLexer::new(reader), ENTRY_CHAR_PRIMARY)
+}
+
+/// Parse the `char_primary` rule from any [`Read`] source with a caller-chosen config.
+///
+/// See [`parse_char_primary_from_str_with`] for how to pick a [`parsuna_rt::ParserConfig`].
+pub fn parse_char_primary_from_reader_with<R: Read, C: parsuna_rt::ParserConfig>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>, C> {
     Parser::new(StreamingLexer::new(reader), ENTRY_CHAR_PRIMARY)
 }
 
 /// Parse the `neg_class` rule from an in-memory string.
 ///
 /// Zero-copy: tokens borrow their text from `src`.
+/// Skip tokens (whitespace, comments) are surfaced as
+/// `Event::Token`. Use [`parse_neg_class_from_str_with`] to pick a
+/// different [`parsuna_rt::ParserConfig`].
 pub fn parse_neg_class_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>> {
+    Parser::new(Scanner::new(src), ENTRY_NEG_CLASS)
+}
+
+/// Parse the `neg_class` rule from an in-memory string with a caller-chosen config.
+///
+/// Pin the config via turbofish: `parse_neg_class_from_str_with::<_, parsuna_rt::DropSkips>(src)`
+/// to silently consume skip tokens. Monomorphization removes the skip-emit
+/// branch for any config whose `EMIT_SKIPS` is `false`.
+pub fn parse_neg_class_from_str_with<'a, C: parsuna_rt::ParserConfig>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>, C> {
     Parser::new(Scanner::new(src), ENTRY_NEG_CLASS)
 }
 
 /// Parse the `neg_class` rule from any [`Read`] source.
 ///
 /// Streaming: tokens own their text; memory use stays bounded regardless of
-/// input size.
+/// input size. See [`parse_neg_class_from_reader_with`] to pick a config.
 pub fn parse_neg_class_from_reader<R: Read>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>> {
+    Parser::new(StreamingLexer::new(reader), ENTRY_NEG_CLASS)
+}
+
+/// Parse the `neg_class` rule from any [`Read`] source with a caller-chosen config.
+///
+/// See [`parse_neg_class_from_str_with`] for how to pick a [`parsuna_rt::ParserConfig`].
+pub fn parse_neg_class_from_reader_with<R: Read, C: parsuna_rt::ParserConfig>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>, C> {
     Parser::new(StreamingLexer::new(reader), ENTRY_NEG_CLASS)
 }
 

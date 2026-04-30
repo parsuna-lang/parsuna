@@ -685,6 +685,8 @@ mod tests {
             pattern: TokenPattern::Empty,
             skip: false,
             is_fragment: false,
+            mode: None,
+            mode_actions: Vec::new(),
             span: Span::default(),
         }
     }

@@ -472,7 +472,6 @@ mod tests {
             id: 0,
             arms: vec![],
             accept: None,
-            self_loop: vec![],
         }]
     }
 
@@ -494,7 +493,11 @@ mod tests {
             states,
             entry_states: vec![("main".into(), entry)],
             k: 1,
-            lexer_dfa: empty_dfa(),
+            modes: vec![crate::lowering::ModeInfo {
+                id: 0,
+                name: "default".into(),
+                dfa: empty_dfa(),
+            }],
         }
     }
 

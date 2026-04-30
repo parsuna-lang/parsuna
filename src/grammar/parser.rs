@@ -25,8 +25,8 @@ pub fn parse_grammar(source: &str) -> Result<Grammar, Vec<Error>> {
     let mut g = Grammar::default();
 
     r.expect_enter(RuleKind::File);
-    while r.peek_enter() == Some(RuleKind::Decl) {
-        read_decl(&mut r, &mut g);
+    while r.peek_enter() == Some(RuleKind::Item) {
+        read_item(&mut r, &mut g);
     }
     r.expect_exit(RuleKind::File);
 
@@ -152,14 +152,59 @@ fn is_skip(kind: TokenKind) -> bool {
     kind == TokenKind::Ws || kind == TokenKind::Comment
 }
 
-fn read_decl<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>, g: &mut Grammar) {
+/// One item at the file's top level: an optional `@mode(name)`
+/// pre-annotation followed by a single decl. Mode is a per-token
+/// attribute, not a scope — applying it to many decls is just a
+/// repetition of `@mode(name)`, not a syntactic group.
+fn read_item<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>, g: &mut Grammar) {
+    r.expect_enter(RuleKind::Item);
+
+    let mode = if r.peek_enter() == Some(RuleKind::ModePre) {
+        Some(read_mode_pre(r))
+    } else {
+        None
+    };
+    read_decl(r, g, mode.as_deref());
+
+    r.expect_exit(RuleKind::Item);
+}
+
+/// `mode_pre = AT IDENT LPAREN IDENT RPAREN` — the only annotation kind
+/// today is `@mode(name)`. Returns the mode name. Other annotation names
+/// are recorded as an error and the mode name from the argument is still
+/// returned so we keep going.
+fn read_mode_pre<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>) -> String {
+    r.expect_enter(RuleKind::ModePre);
+    let _at = r.next_token();
+    let name_tok = r.next_token();
+    let _lparen = r.next_token();
+    let arg_tok = r.next_token();
+    let _rparen = r.next_token();
+    r.expect_exit(RuleKind::ModePre);
+
+    let kind = name_tok.text.as_ref();
+    if kind != "mode" {
+        r.issues.push(
+            Error::new(format!(
+                "unknown pre-annotation `@{}`; supported pre-annotations: mode",
+                kind
+            ))
+            .at(name_tok.span),
+        );
+    }
+    arg_tok.text.into_owned()
+}
+
+fn read_decl<'a, I: Iterator<Item = Event<'a>>>(
+    r: &mut Reader<'a, I>,
+    g: &mut Grammar,
+    mode: Option<&str>,
+) {
     r.expect_enter(RuleKind::Decl);
 
     // Case conventions disambiguate tokens from rules: the first letter
     // (skipping any leading `_` fragment marker) must be uppercase for a
-    // token and lowercase for a rule. A trailing `[skip, ...]` block
-    // attaches per-declaration annotations; the only one currently
-    // recognized is `skip`, which marks a token as a skip-token.
+    // token and lowercase for a rule.
     let name_tok = r.next_token();
     let name: String = name_tok.text.clone().into_owned();
     let is_fragment = name.starts_with('_');
@@ -173,30 +218,77 @@ fn read_decl<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>, g: &mut G
     } else {
         (Some(read_alt(r)), None)
     };
-    let annots = read_annots(r);
+
+    let actions_raw = read_actions(r);
     let semi = r.next_token();
     r.expect_exit(RuleKind::Decl);
 
     let decl_span = Span::join(name_tok.span, semi.span);
 
+    // Resolve `-> ...` actions into `(skip, mode_actions)`. Mode actions
+    // are kept as a sequence (in source order) so combinations like
+    // `-> pop, push(b)` (swap top) and `-> push(a), push(b)` (push two)
+    // round-trip cleanly. The only forbidden combo is `skip` together
+    // with any mode action.
+    let mut skip = false;
     let mut skip_span: Option<Span> = None;
-    for (aname, aspan) in &annots {
-        match aname.as_str() {
+    let mut mode_actions: Vec<ModeAction> = Vec::new();
+    let mut first_mode_action_span: Option<Span> = None;
+
+    for raw in &actions_raw {
+        match raw.name.as_str() {
             "skip" => {
-                skip_span = Some(*aspan);
+                if raw.arg.is_some() {
+                    r.issues.push(
+                        Error::new("`skip` action takes no argument").at(raw.span),
+                    );
+                }
+                if skip {
+                    r.issues
+                        .push(Error::new("duplicate `skip` action").at(raw.span));
+                }
+                skip = true;
+                skip_span.get_or_insert(raw.span);
+            }
+            "push" => {
+                let Some(arg) = raw.arg.clone() else {
+                    r.issues.push(
+                        Error::new("`push` action requires a mode name argument: `push(mode)`")
+                            .at(raw.span),
+                    );
+                    continue;
+                };
+                mode_actions.push(ModeAction::Push(arg));
+                first_mode_action_span.get_or_insert(raw.span);
+            }
+            "pop" => {
+                if raw.arg.is_some() {
+                    r.issues.push(
+                        Error::new("`pop` action takes no argument").at(raw.span),
+                    );
+                }
+                mode_actions.push(ModeAction::Pop);
+                first_mode_action_span.get_or_insert(raw.span);
             }
             other => {
                 r.issues.push(
                     Error::new(format!(
-                        "unknown annotation `{}`; supported annotations: skip",
+                        "unknown action `{}`; supported actions: skip, push(mode), pop",
                         other
                     ))
-                    .at(*aspan),
+                    .at(raw.span),
                 );
             }
         }
     }
-    let skip = skip_span.is_some();
+
+    if skip && !mode_actions.is_empty() {
+        let span = first_mode_action_span.or(skip_span).unwrap_or(decl_span);
+        r.issues.push(
+            Error::new("`skip` cannot be combined with `push` or `pop` on the same token")
+                .at(span),
+        );
+    }
 
     if is_token {
         if skip && is_fragment {
@@ -217,16 +309,36 @@ fn read_decl<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>, g: &mut G
             pattern: pattern.unwrap_or(TokenPattern::Empty),
             skip,
             is_fragment,
+            mode: mode.map(|s| s.to_string()),
+            mode_actions,
             span: decl_span,
         });
     } else if initial.is_some() {
         if let Some(span) = skip_span {
             r.issues.push(
                 Error::new(format!(
-                    "annotation `skip` only applies to tokens, not rules; drop it on `{}`",
+                    "action `skip` only applies to tokens, not rules; drop it on `{}`",
                     name
                 ))
                 .at(span),
+            );
+        }
+        if let Some(span) = first_mode_action_span {
+            r.issues.push(
+                Error::new(format!(
+                    "actions `push`/`pop` only apply to tokens, not rules; drop them on `{}`",
+                    name
+                ))
+                .at(span),
+            );
+        }
+        if mode.is_some() {
+            r.issues.push(
+                Error::new(format!(
+                    "`@mode(...)` only applies to tokens, not rules; drop it on `{}`",
+                    name
+                ))
+                .at(name_tok.span),
             );
         }
         if g.rules.contains_key(&name) {
@@ -250,25 +362,53 @@ fn read_decl<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>, g: &mut G
     }
 }
 
-fn read_annots<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>) -> Vec<(String, Span)> {
-    if r.peek_enter() != Some(RuleKind::Annots) {
+/// One raw `-> action` entry, before semantic resolution. The `arg`
+/// captures the optional `(name)` payload (e.g. `push(mode_name)`).
+struct RawAction {
+    name: String,
+    arg: Option<String>,
+    span: Span,
+}
+
+/// `actions = ARROW action (COMMA action)*` — returns the parsed list, or
+/// an empty Vec if no `->` appeared.
+fn read_actions<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>) -> Vec<RawAction> {
+    if r.peek_enter() != Some(RuleKind::Actions) {
         return Vec::new();
     }
-    r.expect_enter(RuleKind::Annots);
-    let _lbrack = r.next_token();
+    r.expect_enter(RuleKind::Actions);
+    let _arrow = r.next_token();
     let mut out = Vec::new();
-    while r.peek_enter() == Some(RuleKind::Annot) {
-        r.expect_enter(RuleKind::Annot);
-        let name_tok = r.next_token();
-        r.expect_exit(RuleKind::Annot);
-        out.push((name_tok.text.into_owned(), name_tok.span));
+    while r.peek_enter() == Some(RuleKind::Action) {
+        out.push(read_action(r));
         if r.eat_token(TokenKind::Comma).is_none() {
             break;
         }
     }
-    let _rbrack = r.next_token();
-    r.expect_exit(RuleKind::Annots);
+    r.expect_exit(RuleKind::Actions);
     out
+}
+
+/// `action = IDENT action_arg?`, `action_arg = LPAREN IDENT RPAREN`.
+fn read_action<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>) -> RawAction {
+    r.expect_enter(RuleKind::Action);
+    let name_tok = r.next_token();
+    let arg = if r.peek_enter() == Some(RuleKind::ActionArg) {
+        r.expect_enter(RuleKind::ActionArg);
+        let _lparen = r.next_token();
+        let arg_tok = r.next_token();
+        let _rparen = r.next_token();
+        r.expect_exit(RuleKind::ActionArg);
+        Some(arg_tok.text.into_owned())
+    } else {
+        None
+    };
+    r.expect_exit(RuleKind::Action);
+    RawAction {
+        name: name_tok.text.into_owned(),
+        arg,
+        span: name_tok.span,
+    }
 }
 
 fn initial_letter(name: &str) -> Option<char> {
@@ -696,22 +836,19 @@ mod tests {
     }
 
     #[test]
-    fn skip_annotation_marks_token_as_skip() {
-        let g = parse_grammar("WS = \" \"+ [skip]; T = \"t\"; main = T;").expect("ok");
+    fn skip_action_marks_token_as_skip() {
+        let g = parse_grammar("WS = \" \"+ -> skip; T = \"t\"; main = T;").expect("ok");
         let ws = g.tokens.get("WS").expect("WS");
         assert!(ws.skip);
         assert!(!ws.is_fragment);
     }
 
     #[test]
-    fn multiple_annotations_in_brackets() {
-        // Only `skip` is recognized today; unknown names should error.
-        let errs = parse_grammar("WS = \" \"+ [skip, foo]; T = \"t\"; main = T;")
+    fn unknown_action_is_rejected() {
+        let errs = parse_grammar("WS = \" \"+ -> bogus; T = \"t\"; main = T;")
             .err()
             .expect("err");
-        assert!(errs
-            .iter()
-            .any(|e| e.message.contains("unknown annotation `foo`")));
+        assert!(errs.iter().any(|e| e.message.contains("unknown action")));
     }
 
     #[test]
@@ -724,8 +861,7 @@ mod tests {
 
     #[test]
     fn skip_and_fragment_combo_rejected() {
-        // `_X` (fragment) marked `[skip]` should produce an error.
-        let errs = parse_grammar("_X = \"x\" [skip]; T = \"t\"; main = T;")
+        let errs = parse_grammar("_X = \"x\" -> skip; T = \"t\"; main = T;")
             .err()
             .expect("err");
         assert!(errs
@@ -735,8 +871,7 @@ mod tests {
 
     #[test]
     fn skip_on_rule_is_rejected() {
-        // `[skip]` is only valid on tokens, not rules.
-        let errs = parse_grammar("T = \"t\"; main = T [skip];")
+        let errs = parse_grammar("T = \"t\"; main = T -> skip;")
             .err()
             .expect("err");
         assert!(errs
@@ -787,7 +922,6 @@ mod tests {
 
     #[test]
     fn dot_atom_means_negated_empty_class_any_char() {
-        // `.` is "any byte" — represented as a negated empty class.
         let g = parse_grammar("ANY = .; main = ANY;").expect("ok");
         let pat = &g.tokens.get("ANY").unwrap().pattern;
         match pat {
@@ -817,13 +951,11 @@ mod tests {
     fn unicode_escape_in_char_literal() {
         let g = parse_grammar("X = '\\u{0041}'; main = X;").expect("ok");
         let pat = &g.tokens.get("X").unwrap().pattern;
-        // `'A'` (a single char literal) folds to a one-character literal pattern.
         assert!(matches!(pat, TokenPattern::Literal(ref s) if s == "A"));
     }
 
     #[test]
     fn string_atom_in_rule_body_is_rejected() {
-        // String literals are token-only.
         let errs = parse_grammar("T = \"t\"; main = \"t\";")
             .err()
             .expect("err");
@@ -880,7 +1012,6 @@ mod tests {
 
     #[test]
     fn negated_class_with_grouped_alternatives() {
-        // `!('a' | 'b')` is a negated class with two char items.
         let g = parse_grammar("X = !('a' | 'b'); main = X;").expect("ok");
         let pat = &g.tokens.get("X").unwrap().pattern;
         match pat {
@@ -897,5 +1028,184 @@ mod tests {
         let g = parse_grammar(r#"NL = "\n"; main = NL;"#).expect("ok");
         let pat = &g.tokens.get("NL").unwrap().pattern;
         assert!(matches!(pat, TokenPattern::Literal(ref s) if s == "\n"));
+    }
+
+    // ----- Modes & action syntax ---------------------------------------
+
+    #[test]
+    fn inline_mode_pre_tags_single_token() {
+        let g = parse_grammar(
+            "@mode(tag) NAME = \"x\"; OUTSIDE = \"y\"; main = NAME OUTSIDE;",
+        )
+        .expect("ok");
+        assert_eq!(g.tokens.get("NAME").unwrap().mode.as_deref(), Some("tag"));
+        assert_eq!(g.tokens.get("OUTSIDE").unwrap().mode, None);
+    }
+
+    #[test]
+    fn mode_pre_repeats_per_decl() {
+        // Mode is a per-token attribute, not a scope. Applying it to
+        // multiple decls is plain repetition.
+        let src = r#"
+            @mode(tag) NAME = "x";
+            @mode(tag) EQ_T = "=";
+            OUTSIDE = "o";
+            main = NAME EQ_T OUTSIDE;
+        "#;
+        let g = parse_grammar(src).expect("ok");
+        assert_eq!(g.tokens.get("NAME").unwrap().mode.as_deref(), Some("tag"));
+        assert_eq!(g.tokens.get("EQ_T").unwrap().mode.as_deref(), Some("tag"));
+        assert_eq!(g.tokens.get("OUTSIDE").unwrap().mode, None);
+    }
+
+    #[test]
+    fn push_action_records_mode_action() {
+        let g = parse_grammar(
+            "ENTER = \"enter\" -> push(tag); T = \"t\"; main = ENTER T;",
+        )
+        .expect("ok");
+        let enter = g.tokens.get("ENTER").unwrap();
+        assert_eq!(enter.mode_actions, vec![ModeAction::Push("tag".into())]);
+        assert!(!enter.skip);
+    }
+
+    #[test]
+    fn pop_action_records_mode_action() {
+        let g = parse_grammar(
+            "@mode(tag) EXIT = \"exit\" -> pop; T = \"t\"; main = T;",
+        )
+        .expect("ok");
+        let exit = g.tokens.get("EXIT").unwrap();
+        assert_eq!(exit.mode_actions, vec![ModeAction::Pop]);
+    }
+
+    #[test]
+    fn pop_then_push_is_a_swap_top() {
+        // `-> pop, push(b)` replaces the top of the stack — both actions
+        // are kept in source order so codegen can emit them as written.
+        let g = parse_grammar(
+            "@mode(a) SWAP = \"s\" -> pop, push(b); T = \"t\"; main = T;",
+        )
+        .expect("ok");
+        let swap = g.tokens.get("SWAP").unwrap();
+        assert_eq!(
+            swap.mode_actions,
+            vec![ModeAction::Pop, ModeAction::Push("b".into())]
+        );
+    }
+
+    #[test]
+    fn multiple_pushes_are_kept_in_order() {
+        let g = parse_grammar(
+            "DEEP = \"d\" -> push(a), push(b); T = \"t\"; main = T;",
+        )
+        .expect("ok");
+        let deep = g.tokens.get("DEEP").unwrap();
+        assert_eq!(
+            deep.mode_actions,
+            vec![ModeAction::Push("a".into()), ModeAction::Push("b".into())]
+        );
+    }
+
+    #[test]
+    fn skip_with_push_is_rejected() {
+        let errs = parse_grammar(
+            "BUTTS = \"butts\" -> skip, push(foo); T = \"t\"; main = T;",
+        )
+        .err()
+        .expect("err");
+        assert!(errs
+            .iter()
+            .any(|e| e.message.contains("`skip` cannot be combined")));
+    }
+
+    #[test]
+    fn push_without_arg_is_rejected() {
+        let errs = parse_grammar("ENTER = \"e\" -> push; T = \"t\"; main = T;")
+            .err()
+            .expect("err");
+        assert!(errs
+            .iter()
+            .any(|e| e.message.contains("requires a mode name argument")));
+    }
+
+    #[test]
+    fn pop_with_arg_is_rejected() {
+        let errs = parse_grammar("EXIT = \"e\" -> pop(foo); T = \"t\"; main = T;")
+            .err()
+            .expect("err");
+        assert!(errs
+            .iter()
+            .any(|e| e.message.contains("`pop` action takes no argument")));
+    }
+
+    #[test]
+    fn unknown_pre_annotation_is_rejected() {
+        let errs = parse_grammar("@bogus(x) T = \"t\"; main = T;")
+            .err()
+            .expect("err");
+        assert!(errs
+            .iter()
+            .any(|e| e.message.contains("unknown pre-annotation `@bogus`")));
+    }
+
+    #[test]
+    fn mode_pre_on_rule_is_rejected() {
+        let errs = parse_grammar("T = \"t\"; @mode(tag) main = T;")
+            .err()
+            .expect("err");
+        assert!(errs
+            .iter()
+            .any(|e| e.message.contains("`@mode(...)` only applies to tokens")));
+    }
+
+    // ----- ParserConfig (rust runtime) --------------------------------
+
+    #[test]
+    fn parser_config_emit_skips_yields_ws_tokens() {
+        use crate::grammar::generated;
+        use parsuna_rt::EmitSkips;
+
+        // The bootstrap grammar marks WS / COMMENT as skip tokens; the
+        // default config surfaces them as `Event::Token` events.
+        let p = generated::parse_file_from_str_with::<EmitSkips>("  // hi\n");
+        let saw_ws = p.into_iter().any(|e| match e {
+            generated::Event::Token(t) => matches!(
+                t.kind,
+                Some(generated::TokenKind::Ws) | Some(generated::TokenKind::Comment),
+            ),
+            _ => false,
+        });
+        assert!(saw_ws, "EmitSkips should yield skip tokens in the stream");
+    }
+
+    #[test]
+    fn parser_config_drop_skips_silences_ws_tokens() {
+        use crate::grammar::generated;
+        use parsuna_rt::DropSkips;
+
+        let p = generated::parse_file_from_str_with::<DropSkips>("  // hi\n");
+        let saw_ws = p.into_iter().any(|e| match e {
+            generated::Event::Token(t) => matches!(
+                t.kind,
+                Some(generated::TokenKind::Ws) | Some(generated::TokenKind::Comment),
+            ),
+            _ => false,
+        });
+        assert!(!saw_ws, "DropSkips should silently consume skip tokens");
+    }
+
+    #[test]
+    fn mode_pre_on_fragment_is_metadata_only() {
+        // A fragment with `@mode(foo)` carries the tag for completeness,
+        // but since fragments are inlined at lex time the field is
+        // effectively metadata.
+        let g = parse_grammar(
+            "@mode(tag) _NSTART = 'A'..'Z'; NAME = _NSTART; main = NAME;",
+        )
+        .expect("ok");
+        let frag = g.tokens.get("_NSTART").expect("_NSTART");
+        assert!(frag.is_fragment);
+        assert_eq!(frag.mode.as_deref(), Some("tag"));
     }
 }

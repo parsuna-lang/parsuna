@@ -1,7 +1,5 @@
 LPAREN   = "(";
 RPAREN   = ")";
-LBRACK   = "[";
-RBRACK   = "]";
 COMMA    = ",";
 EQ       = "=";
 SEMI     = ";";
@@ -12,6 +10,8 @@ PLUS     = "+";
 DOTDOT   = "..";
 DOT      = ".";
 BANG     = "!";
+AT       = "@";
+ARROW    = "->";
 
 _HEX_DIGIT = '0'..'9' | 'a'..'f' | 'A'..'F';
 _ESCAPE    = "\\" ("u{" _HEX_DIGIT+ "}" | 'n' | 'r' | 't' | '0' | '\\' | '\'' | '"');
@@ -20,15 +20,20 @@ STRING = "\"" ( !('"' | '\\' | '\n') | _ESCAPE )* "\"";
 CHAR   = "'"  ( !('\'' | '\\' | '\n') | _ESCAPE ) "'";
 IDENT  = ('A'..'Z' | 'a'..'z' | '_') ('A'..'Z' | 'a'..'z' | '_' | '0'..'9')*;
 
-WS      = (' ' | '\t' | '\r' | '\n')+  [skip];
-COMMENT = "//" (!'\n')*                [skip];
+WS      = (' ' | '\t' | '\r' | '\n')+  -> skip;
+COMMENT = "//" (!'\n')*                -> skip;
 
-file = decl*;
+file = item*;
 
-decl = IDENT EQ alt_expr annots? SEMI;
+item = mode_pre? decl;
 
-annots = LBRACK annot (COMMA annot)* RBRACK;
-annot  = IDENT;
+mode_pre = AT IDENT LPAREN IDENT RPAREN;
+
+decl = IDENT EQ alt_expr actions? SEMI;
+
+actions = ARROW action (COMMA action)*;
+action  = IDENT action_arg?;
+action_arg = LPAREN IDENT RPAREN;
 
 alt_expr = seq_expr (PIPE seq_expr)*;
 seq_expr = _postfix_expr*;

@@ -114,8 +114,36 @@ pub struct StateTable {
     pub entry_states: Vec<(String, StateId)>,
     /// Lookahead required to disambiguate every alternative (LL(k)).
     pub k: usize,
-    /// The compiled lexer DFA.
-    pub lexer_dfa: Vec<DfaState>,
+    /// One [`ModeInfo`] per declared lexer mode. `modes[0]` is always the
+    /// default (anonymous) mode; further entries come from `@mode(name)`
+    /// pre-annotations in declaration order. A grammar that doesn't use
+    /// modes ends up with a single-entry `modes` vec whose DFA matches
+    /// every token, identical to the pre-modes shape.
+    pub modes: Vec<ModeInfo>,
+}
+
+impl StateTable {
+    /// Shorthand for the default-mode DFA. Most consumers (single-mode
+    /// grammars and mode-unaware backends) only need this.
+    pub fn lexer_dfa(&self) -> &[DfaState] {
+        &self.modes[0].dfa
+    }
+}
+
+/// One lexer mode: a name, a numeric id, and the DFA that recognises
+/// the tokens declared in it. Mode 0 is the default (anonymous) mode;
+/// every grammar has at least this one.
+#[derive(Clone, Debug)]
+pub struct ModeInfo {
+    /// Dense numeric id. `0` is reserved for the default mode.
+    pub id: u32,
+    /// Mode name as written in `@mode(name)`. The default mode uses the
+    /// reserved name `"default"`.
+    pub name: String,
+    /// DFA matching only the tokens declared in this mode (with fragments
+    /// inlined as usual). Skip-kind tokens for this mode are also part of
+    /// it — `is_skip` filtering happens at the runtime, not at lex time.
+    pub dfa: Vec<DfaState>,
 }
 
 /// A single token as seen by the code generator: the name, the resolved
@@ -126,13 +154,32 @@ pub struct TokenInfo {
     pub name: String,
     /// Token body with every `Ref` inlined, ready for the DFA builder.
     pub pattern: TokenPattern,
-    /// True if the token is `[skip]`-annotated: matched but dropped from
+    /// True if the token has a `-> skip` action: matched but dropped from
     /// the structural stream.
     pub skip: bool,
     /// Dense, 1-based numeric id. `0` is reserved for EOF; lex failures
     /// are surfaced as `Option<TK>` (`None`) at the runtime boundary, so
     /// they consume no kind id.
     pub kind: u16,
+    /// Lexer mode this token lives in. Indexes into `StateTable::modes`.
+    /// `0` is the default mode; the lexer only matches a token while its
+    /// mode is on top of the mode stack.
+    pub mode_id: u32,
+    /// Mode-stack actions to apply after this token matches, in source
+    /// order. Resolved from `TokenDef::mode_actions` (mode names →
+    /// numeric ids). Empty for tokens with no `-> push(...)` / `-> pop`.
+    pub mode_actions: Vec<ModeActionInfo>,
+}
+
+/// Resolved mode-stack action: same shape as the grammar's
+/// [`crate::grammar::ir::ModeAction`] but with the mode name converted
+/// to a numeric id so codegen / runtime don't need a name table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModeActionInfo {
+    /// Push mode `id` onto the stack.
+    Push(u32),
+    /// Pop the topmost mode off the stack.
+    Pop,
 }
 
 /// A non-terminating instruction in a state body.
@@ -635,13 +682,13 @@ mod tests {
         let st = lower(&ag);
         // 1 dead + start + at least one accept per token = ≥ 4 states
         // start + at least one accept state per token (no dead in the vec).
-        assert!(st.lexer_dfa.len() >= 3);
-        assert_eq!(st.lexer_dfa[0].id, crate::lowering::lexer_dfa::START);
+        assert!(st.lexer_dfa().len() >= 3);
+        assert_eq!(st.lexer_dfa()[0].id, crate::lowering::lexer_dfa::START);
     }
 
     #[test]
     fn skip_tokens_get_kind_but_arent_referenced_by_rules() {
-        let ag = analyze_src("WS = \" \"+ [skip]; T = \"t\"; main = T;");
+        let ag = analyze_src("WS = \" \"+ -> skip; T = \"t\"; main = T;");
         let st = lower(&ag);
         let ws = st.tokens.iter().find(|t| t.name == "WS").expect("WS");
         assert!(ws.skip);
