@@ -60,10 +60,23 @@ pub enum Event<'a, TK = u16, RK = u16> {
         pos: Pos,
     },
     /// A token consumed from the input, including skip tokens interleaved
-    /// with structural events.
+    /// with structural events. After a recoverable error, the
+    /// "synced-to-expected" token (e.g. when `expect` mismatches and
+    /// the sync set lands on the kind it was expecting) also comes
+    /// through as `Token` because it's legitimate parse data.
     Token(Token<'a, TK>),
+    /// A token consumed by error-recovery. Emitted between a preceding
+    /// [`Event::Error`] and the recovery's sync point: each unexpected
+    /// token the runtime had to skip past appears here. Distinct from
+    /// [`Event::Token`] so consumers (AST builders, syntax
+    /// highlighters) can either drop it from the tree or render it
+    /// as an error span without tracking recovery state externally.
+    Garbage(Token<'a, TK>),
     /// A recoverable parse error. The parser may continue emitting events
     /// after an error so downstream tools still see a usable event stream.
+    /// Followed by zero or more `Garbage` events (the unexpected
+    /// tokens that recovery skipped) and then either a normal `Token`
+    /// (the synced-to-expected kind) or the next structural event.
     Error(Error),
 }
 

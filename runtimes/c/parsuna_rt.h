@@ -47,11 +47,14 @@ typedef struct { uint16_t kind; Span span; char *text; size_t text_len; } Token;
 typedef struct { char *message; Span span; } Error;
 
 /* Event discriminator: ENTER/EXIT delimit a rule subtree, TOKEN carries
- * a consumed token, ERROR is a recoverable diagnostic. */
+ * a consumed structural token (including skips), GARBAGE is a token
+ * dropped during error recovery (between an ERROR and its sync point),
+ * ERROR is a recoverable diagnostic. */
 typedef enum {
     EV_ENTER,
     EV_EXIT,
     EV_TOKEN,
+    EV_GARBAGE,
     EV_ERROR
 } EventTag;
 
@@ -92,38 +95,29 @@ typedef int (*ReadFn)(void *ctx, char *out, int max);
 
 /* ---------- monomorphization hooks ----------
  * The including translation unit (the generated `<stem>.c`) must supply
- * three things BEFORE including this header so the runtime can call them
- * directly instead of going through a Config vtable:
+ * one constant before including this header so the runtime can size the
+ * lookahead ring at compile time:
  *
- *   #define PARSUNA_K            <lookahead depth>
- *   #define PARSUNA_QUEUE_CAP    <event queue capacity>
+ *   #define PARSUNA_K  <lookahead depth>
  *
  * plus file-scope definitions of:
  *
  *   static int  is_skip(uint16_t kind);
- *   static void drive(Parser *p);
+ *   static int  step(Parser *p, Event *out);
  *   static void longest_match_impl(const char *buf, size_t buf_len,
  *                                  size_t start, uint16_t *best_kind,
  *                                  size_t *best_len, size_t *scanned);
  *
- * The generated .c provides all of these. PARSUNA_QUEUE_CAP is sized by
- * lowering from the longest emit burst across every state body, so the
- * fixed-size ring is exactly large enough for the worst case the grammar
- * can produce. PARSUNA_K is the LL(k) lookahead width.
- *
- * `is_skip`, `drive`, and `longest_match_impl` are forward-declared below
- * so the runtime's inline functions can reference them; the compiler links
- * every reference to the later real definitions within the same TU. */
+ * `step` runs one state body and either fills `*out` and returns 1
+ * (the state body emitted an event) or returns 0 (a pure transition
+ * step — parser_next loops and calls `step` again). */
 #ifndef PARSUNA_K
 #  error "define PARSUNA_K before including parsuna_rt.h"
-#endif
-#ifndef PARSUNA_QUEUE_CAP
-#  error "define PARSUNA_QUEUE_CAP before including parsuna_rt.h"
 #endif
 
 struct Parser;  /* fwd decl */
 static int  is_skip(uint16_t kind);
-static void drive(struct Parser *p);
+static int  step(struct Parser *p, Event *out);
 /* Compiled DFA: scans buf[start..buf_len] for the longest token. On return,
  * *best_kind/*best_len hold the longest match (best_len == 0 means no
  * accept), and *scanned is the total bytes walked past start. The runtime
@@ -132,15 +126,11 @@ static void drive(struct Parser *p);
 static void longest_match_impl(const char *buf, size_t buf_len, size_t start,
                                uint16_t *best_kind, size_t *best_len, size_t *scanned);
 
-/* Internal queue element; matches Event layout. */
-typedef Event EvQueued;
-
 /* In-flight error recovery. Armed by `try_consume`'s slow path and by
  * `recover_to`; cleared once the lookahead lands on a sync token (or
- * EOF). Each call to parser_next drains exactly one garbage token
- * before yielding, so a long run of unexpected input doesn't pile up
- * in the queue — the consumer sees recovery tokens interleaved with
- * their lex order. */
+ * EOF). Each call to parser_next advances recovery by exactly one
+ * step, so a long run of unexpected input doesn't pile up — each
+ * garbage token is yielded as its own EV_GARBAGE event. */
 typedef struct {
     int active;
     /* `expected_set` is non-zero when the recovery was triggered by a
@@ -175,20 +165,14 @@ typedef struct Parser {
     int   state;
     int   *ret; size_t ret_len, ret_cap;
 
-    /* Fixed-size event ring sized at compile time by PARSUNA_QUEUE_CAP.
-     * Sized to the longest emit burst across every state body, so the
-     * runtime never grows it: pump-mode and recovery-mode each yield
-     * after pushing at most one event, and the structural burst from
-     * one drive body is bounded by the grammar. */
-    EvQueued queue[PARSUNA_QUEUE_CAP];
-    size_t   queue_head, queue_len;
-
     Recovery recovery;
     int eof_checked;
 
-    /* ownership of last-yielded event strings until the next call */
-    Token last_token;
-    Error last_error;
+    /* Strings owned by the last yielded event. Freed at the top of the
+     * next parser_next call so the caller can keep reading them until
+     * they ask for a new event. */
+    char *last_token_text;
+    char *last_error_msg;
 } Parser;
 
 /* ---------- UTF-8 helper ---------- */
@@ -329,7 +313,7 @@ static inline Token lex_next(Parser *p) {
     return t;
 }
 
-/* ---------- queue / return stack ---------- */
+/* ---------- return stack ---------- */
 
 static inline void ret_push(Parser *p, int s) {
     if (p->ret_len == p->ret_cap) {
@@ -339,26 +323,7 @@ static inline void ret_push(Parser *p, int s) {
     p->ret[p->ret_len++] = s;
 }
 
-/* Push an event onto the fixed-size ring. The bound is enforced by
- * lowering: PARSUNA_QUEUE_CAP is the longest emit burst across every
- * state body, and pump/recover paths each push at most one event
- * before yielding, so an overflow here is a codegen bug. We don't
- * spend a runtime check on it. */
-static inline void queue_push(Parser *p, EvQueued e) {
-    size_t idx = (p->queue_head + p->queue_len) % PARSUNA_QUEUE_CAP;
-    p->queue[idx] = e;
-    p->queue_len++;
-}
-
-static inline int queue_pop(Parser *p, EvQueued *out) {
-    if (p->queue_len == 0) return 0;
-    *out = p->queue[p->queue_head];
-    p->queue_head = (p->queue_head + 1) % PARSUNA_QUEUE_CAP;
-    p->queue_len--;
-    return 1;
-}
-
-/* ---------- public driver helpers (called from generated drive()) ---------- */
+/* ---------- public driver helpers (called from generated step()) ---------- */
 
 static inline int get_state(const Parser *p) { return p->state; }
 static inline void set_state(Parser *p, int s) { p->state = s; }
@@ -367,7 +332,6 @@ static inline int pop_ret(Parser *p) {
     if (p->ret_len > 0) return p->ret[--p->ret_len];
     return TERMINATED;
 }
-static inline int queue_empty(const Parser *p) { return p->queue_len == 0; }
 static inline Token look(const Parser *p, int i) { return p->look_buf[i]; }
 
 static inline int matches_first(const Parser *p, const uint16_t *const *set) {
@@ -382,53 +346,93 @@ static inline int matches_first(const Parser *p, const uint16_t *const *set) {
     return 0;
 }
 
-static inline void emit_enter(Parser *p, int rule) {
-    p->prev_end = p->look_buf[0].span.start;
-    EvQueued e = {0};
+/* Build an Enter event for `rule`. Records the rule's start position so
+ * a later Exit without any intervening tokens still yields a zero-width
+ * span at the expected place. */
+static inline Event ev_enter(Parser *p, int rule) {
+    Pos pos = p->look_buf[0].span.start;
+    p->prev_end = pos;
+    Event e = {0};
     e.tag = EV_ENTER;
     e.rule = rule;
-    e.pos = p->look_buf[0].span.start;
-    queue_push(p, e);
+    e.pos = pos;
+    return e;
 }
 
-static inline void emit_exit(Parser *p, int rule) {
-    EvQueued e = {0};
+/* Build an Exit event for `rule`, positioned at the end of the last
+ * consumed token (or the rule's start for empty rules). */
+static inline Event ev_exit(Parser *p, int rule) {
+    Event e = {0};
     e.tag = EV_EXIT;
     e.rule = rule;
     e.pos = p->prev_end;
-    queue_push(p, e);
+    return e;
 }
 
-/* Consume the current lookahead token, emit it, and shift the buffer
- * up by one. Slot K-1 is left empty so the runtime's pump-mode in
- * parser_next can refill it (yielding one skip per call) before the
- * next drive() reads lookahead.
- *
- * The state-splitting invariant in `fuse` guarantees an Op::Expect
- * is always followed only by control ops in the same state body,
- * so consume never has to coexist with another lookahead-reading
- * op before the next yield. */
-static inline void consume(Parser *p) {
-    Token prev = p->look_buf[0];
-    p->prev_end = prev.span.end;
-    EvQueued e = {0};
-    e.tag = EV_TOKEN;
-    e.token = prev;
-    /* Shift lookahead down by one. With PARSUNA_K as a compile-time
-     * constant the loop trivially unrolls; for K=1 it degenerates
-     * away. */
+/* Pop the current lookahead token and shift the buffer up by one. Slot
+ * K-1 is left empty so pump-mode in parser_next can refill it (yielding
+ * one skip per call) before the next step() reads lookahead. */
+static inline Token take_token(Parser *p) {
+    Token t = p->look_buf[0];
+    p->prev_end = t.span.end;
+    /* With PARSUNA_K as a compile-time constant the loop trivially
+     * unrolls; for K=1 it degenerates away. */
     for (int i = 0; i < PARSUNA_K - 1; i++) {
         p->look_buf[i] = p->look_buf[i + 1];
         p->look_filled[i] = p->look_filled[i + 1];
     }
     p->look_filled[PARSUNA_K - 1] = 0;
-    queue_push(p, e);
+    return t;
 }
 
-/* Arm recovery-mode without an expected kind. Called from the
- * dispatch error leaf: the surrounding `cur` is already set to the
- * post-recovery state by codegen, and the queued Error event makes
- * drive() yield immediately so recovery-mode can take over. */
+/* Consume the current lookahead token and return it as a TokenEvent.
+ * Used on TryConsume's success path and on recovery's "synced-to-expected"
+ * path — both yield legitimate parse data. */
+static inline Event ev_consume(Parser *p) {
+    Event e = {0};
+    e.tag = EV_TOKEN;
+    e.token = take_token(p);
+    return e;
+}
+
+static inline Event ev_error_here(Parser *p, const char *msg) {
+    Event e = {0};
+    e.tag = EV_ERROR;
+    e.error.message = strdup(msg);
+    e.error.span.start = p->look_buf[0].span.start;
+    e.error.span.end = p->look_buf[0].span.end;
+    return e;
+}
+
+/* Try to consume a token of `kind`. On a hit returns a TokenEvent. On a
+ * miss returns an ErrorEvent and arms recovery — subsequent parser_next
+ * calls yield GarbageEvents until the lookahead lands on `sync` (when
+ * it does, a matching token comes through as a normal TokenEvent).
+ *
+ * `sync` is typically the caller rule's FOLLOW set: recovery skips
+ * unexpected tokens until the lookahead lands on one of these, which
+ * gives the surrounding rule a reasonable place to resume. */
+static inline Event try_consume(Parser *p, uint16_t kind, const uint16_t *sync, const char *name) {
+    if (p->look_buf[0].kind == kind) return ev_consume(p);
+    size_t nlen = strlen(name) + 16;
+    char *msg = (char*)malloc(nlen);
+    snprintf(msg, nlen, "expected %s", name);
+    Event e = {0};
+    e.tag = EV_ERROR;
+    e.error.message = msg;
+    e.error.span.start = p->look_buf[0].span.start;
+    e.error.span.end = p->look_buf[0].span.end;
+    p->recovery.active = 1;
+    p->recovery.expected_set = 1;
+    p->recovery.expected_kind = kind;
+    p->recovery.sync = sync;
+    return e;
+}
+
+/* Arm recovery-mode without an expected kind. Called from a dispatch
+ * error leaf: the surrounding `cur` is already pointing at the
+ * post-recovery state, and the ErrorEvent the caller pairs with this
+ * call makes step() yield so recovery-mode can take over. */
 static inline void recover_to(Parser *p, const uint16_t *sync) {
     p->recovery.active = 1;
     p->recovery.expected_set = 0;
@@ -436,106 +440,35 @@ static inline void recover_to(Parser *p, const uint16_t *sync) {
     p->recovery.sync = sync;
 }
 
-static inline void error_here(Parser *p, const char *msg) {
-    EvQueued e = {0};
-    e.tag = EV_ERROR;
-    e.error.message = strdup(msg);
-    e.error.span.start = p->look_buf[0].span.start;
-    e.error.span.end = p->look_buf[0].span.end;
-    queue_push(p, e);
-}
+/* ---------- pump (next_event helper) ---------- */
 
-/* Try to consume a token of `kind`; on mismatch, emit an error and
- * hand recovery off to the runtime's recovery-mode.
- *
- * `sync` is typically the caller rule's FOLLOW set: recovery skips
- * unexpected tokens until the lookahead lands on one of these,
- * which gives the surrounding rule a reasonable place to resume.
- * On the slow path we stage the error and arm recovery and return —
- * drive's loop sees the queued error and yields, then parser_next's
- * recovery-mode advances one garbage token per call until the sync
- * set is hit. */
-static inline void try_consume(Parser *p, uint16_t kind, const uint16_t *sync, const char *name) {
-    if (p->look_buf[0].kind == kind) { consume(p); return; }
-    size_t nlen = strlen(name) + 16;
-    char *msg = (char*)malloc(nlen);
-    snprintf(msg, nlen, "expected %s", name);
-    error_here(p, msg);
-    free(msg);
-    p->recovery.active = 1;
-    p->recovery.expected_set = 1;
-    p->recovery.expected_kind = kind;
-    p->recovery.sync = sync;
-}
-
-/* ---------- pump / recover (next_event helpers) ---------- */
-
-/* True iff some lookahead slot still needs to be filled. Pump-mode
- * runs whenever this holds, so generated drive() code can read any
- * look(i) unconditionally. */
+/* True iff some lookahead slot still needs to be filled. Empty slots
+ * are always a contiguous suffix — take_token parks the new empty at
+ * index K-1 and pump_one fills the leftmost empty slot — so checking
+ * slot K-1 is the O(1) form of "any slot is empty". */
 static inline int pump_pending(const Parser *p) {
-    for (int i = 0; i < PARSUNA_K; i++) {
-        if (!p->look_filled[i]) return 1;
-    }
-    return 0;
-}
-
-/* Lex one token. If it's a skip, push it directly onto the event
- * queue and leave pump-mode armed for another call. If it's a
- * structural token, fill the leftmost empty lookahead slot.
- *
- * Yielding per skip is what makes the queue cap honest — a long
- * comment run can't grow the queue past 1 (parser_next drains the
- * just-pushed skip on the next loop iteration before pumping again). */
-static inline void pump_one(Parser *p) {
-    Token t = lex_next(p);
-    if (is_skip(t.kind)) {
-        EvQueued e = {0};
-        e.tag = EV_TOKEN;
-        e.token = t;
-        queue_push(p, e);
-        return;
-    }
-    for (int i = 0; i < PARSUNA_K; i++) {
-        if (!p->look_filled[i]) {
-            p->look_buf[i] = t;
-            p->look_filled[i] = 1;
-            return;
-        }
-    }
-    /* All slots filled — pump_one should not have been called.
-     * Leak rather than corrupt: the caller is misbehaving. */
-}
-
-/* Advance recovery by one step. Either consume one garbage token
- * (one Token push, drive yield) or — if the lookahead is in the
- * sync set / EOF — finalise by clearing recovery and (when an
- * `expected_kind` was set) swallowing the synced-to token. */
-static inline void recover_one(Parser *p) {
-    uint16_t k = p->look_buf[0].kind;
-    if (k == PARSUNA_TK_EOF) {
-        p->recovery.active = 0;
-        return;
-    }
-    if (set_contains(p->recovery.sync, k)) {
-        int was_expected = p->recovery.expected_set && p->recovery.expected_kind == k;
-        p->recovery.active = 0;
-        if (was_expected) {
-            consume(p);
-        }
-        return;
-    }
-    /* Garbage: emit it as a Token event and shift lookahead. */
-    consume(p);
+    return !p->look_filled[PARSUNA_K - 1];
 }
 
 /* ---------- lifecycle ---------- */
 
 static inline void free_last(Parser *p) {
     /* Borrowed token text is pinned to the caller's buffer — never free it. */
-    if (!p->borrow_buf) free(p->last_token.text);
-    p->last_token.text = NULL;
-    free(p->last_error.message); p->last_error.message = NULL;
+    if (!p->borrow_buf) free(p->last_token_text);
+    p->last_token_text = NULL;
+    free(p->last_error_msg); p->last_error_msg = NULL;
+}
+
+/* Stamp the just-yielded event's owned strings so the next call to
+ * parser_next can free them. Returns 1 so callers can `return yield_event(...)`. */
+static inline int yield_event(Parser *p, Event ev, Event *out) {
+    if (ev.tag == EV_TOKEN || ev.tag == EV_GARBAGE) {
+        if (!p->borrow_buf) p->last_token_text = ev.token.text;
+    } else if (ev.tag == EV_ERROR) {
+        p->last_error_msg = ev.error.message;
+    }
+    *out = ev;
+    return 1;
 }
 
 /* Shared initialization used by both init variants. Lookahead slots
@@ -549,7 +482,7 @@ static inline void parser_init_common(Parser *p, int entry_state) {
     for (int i = 0; i < PARSUNA_K; i++) {
         p->look_filled[i] = 0;
     }
-    /* prev_end starts at origin; emit_enter overwrites it once a real
+    /* prev_end starts at origin; ev_enter overwrites it once a real
      * token is in lookahead, so this only matters if the entry rule
      * exits without consuming anything. */
     Pos zero = { 0, 1, 1 };
@@ -592,58 +525,62 @@ static inline void parser_init_from_string(Parser *p,
 /* Produce the next event from the parse, or 0 once the entire input
  * has been consumed.
  *
- * The loop layers four kinds of progress, ordered so the consumer
- * always sees the soonest-available event:
- *
- *   1. Drain a queued event.
- *   2. Pump one lex token (filling lookahead, or queuing a skip).
- *   3. Advance recovery by one step.
- *   4. Run the generated dispatch for one drive call.
- *
- * The bound on (2) and (3) per iteration is what keeps the queue
- * honest: each contributes at most one event before yielding, so
- * the queue never grows past PARSUNA_QUEUE_CAP (the structural burst
- * from a single drive body). */
+ * Each call runs in one of three modes — pump (refill lookahead,
+ * possibly yielding a skip), recovery (one Garbage / synced-Token
+ * event), or drive (one call to the generated step) — and yields at
+ * most one event before the loop runs again. */
 static inline int parser_next(Parser *p, Event *out) {
+    free_last(p);
     for (;;) {
-        EvQueued q;
-        if (queue_pop(p, &q)) {
-            free_last(p);
-            *out = q;
-            /* remember strings so caller can read them until next call */
-            if (q.tag == EV_TOKEN) p->last_token = q.token;
-            if (q.tag == EV_ERROR) p->last_error = q.error;
-            return 1;
-        }
         if (pump_pending(p)) {
-            pump_one(p);
+            Token t = lex_next(p);
+            if (is_skip(t.kind)) {
+                Event e = {0};
+                e.tag = EV_TOKEN;
+                e.token = t;
+                return yield_event(p, e, out);
+            }
+            for (int i = 0; i < PARSUNA_K; i++) {
+                if (!p->look_filled[i]) {
+                    p->look_buf[i] = t;
+                    p->look_filled[i] = 1;
+                    break;
+                }
+            }
             continue;
         }
         if (p->recovery.active) {
-            recover_one(p);
-            continue;
+            uint16_t k = p->look_buf[0].kind;
+            int synced = (k == PARSUNA_TK_EOF) || set_contains(p->recovery.sync, k);
+            if (synced) {
+                int was_expected = p->recovery.expected_set && p->recovery.expected_kind == k;
+                p->recovery.active = 0;
+                if (was_expected) return yield_event(p, ev_consume(p), out);
+                continue;
+            }
+            Event e = {0};
+            e.tag = EV_GARBAGE;
+            e.token = take_token(p);
+            return yield_event(p, e, out);
         }
         if (p->state == TERMINATED) {
             if (!p->eof_checked) {
                 p->eof_checked = 1;
                 if (p->look_buf[0].kind != PARSUNA_TK_EOF) {
-                    /* Trailing input past the entry rule. Synthesize
-                     * an error and use recovery-mode (with an empty
-                     * sync set) to drain the rest as Token events
-                     * one yield at a time. */
                     static const uint16_t empty_sync[] = { SENTINEL };
-                    error_here(p, "expected end of input");
+                    Event e = ev_error_here(p, "expected end of input");
                     p->recovery.active = 1;
                     p->recovery.expected_set = 0;
                     p->recovery.expected_kind = 0;
                     p->recovery.sync = empty_sync;
-                    continue;
+                    return yield_event(p, e, out);
                 }
                 continue;
             }
             return 0;
         }
-        drive(p);
+        Event e;
+        if (step(p, &e)) return yield_event(p, e, out);
     }
 }
 
@@ -651,19 +588,6 @@ static inline void parser_destroy(Parser *p) {
     if (!p) return;
     if (!p->borrow_buf) free(p->buf);
     free(p->ret);
-
-    /* Drain any in-flight queued events so their owned strings get
-     * freed. The ring is fixed-size; only its contents need cleanup. */
-    while (p->queue_len > 0) {
-        EvQueued *q = &p->queue[p->queue_head];
-        if (q->tag == EV_TOKEN) {
-            if (!p->borrow_buf) free(q->token.text);
-        } else if (q->tag == EV_ERROR) {
-            free(q->error.message);
-        }
-        p->queue_head = (p->queue_head + 1) % PARSUNA_QUEUE_CAP;
-        p->queue_len--;
-    }
 
     /* look_buf is an inline fixed-size array — no free. Free each
      * filled slot's owned text (skipped in borrow mode). */

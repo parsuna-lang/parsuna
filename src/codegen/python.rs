@@ -269,7 +269,7 @@ impl PyError {
 }
 
 /// A single pull-parser event. `tag` is one of "enter", "exit", "token",
-/// or "error"; the populated payload field depends on the tag.
+/// "garbage", or "error"; the populated payload field depends on the tag.
 #[pyclass(frozen, get_all, name = "Event")]
 #[derive(Clone, Debug)]
 struct PyEvent {
@@ -285,6 +285,7 @@ impl PyEvent {
     fn is_enter(&self) -> bool { self.tag == "enter" }
     fn is_exit(&self) -> bool { self.tag == "exit" }
     fn is_token(&self) -> bool { self.tag == "token" }
+    fn is_garbage(&self) -> bool { self.tag == "garbage" }
     fn is_error(&self) -> bool { self.tag == "error" }
     fn __repr__(&self) -> String {
         match (self.tag.as_str(), self.text.as_deref(), self.error.as_ref()) {
@@ -292,6 +293,8 @@ impl PyEvent {
             ("exit", _, _)  => format!("Event(exit rule={})", self.kind.unwrap_or(0)),
             ("token", Some(t), _) => format!("Event(token kind={} text={:?})", self.kind.unwrap_or(0), t),
             ("token", None, _)    => format!("Event(token kind={})", self.kind.unwrap_or(0)),
+            ("garbage", Some(t), _) => format!("Event(garbage kind={} text={:?})", self.kind.unwrap_or(0), t),
+            ("garbage", None, _)    => format!("Event(garbage kind={})", self.kind.unwrap_or(0)),
             ("error", _, Some(d)) => format!("Event(error {:?})", d.message),
             _ => "Event(?)".to_string(),
         }
@@ -326,6 +329,10 @@ fn to_py_event(ev: Event) -> PyEvent {
         parsuna_rt::Event::Token(t) => {
             let span = to_py_span(t.span);
             PyEvent { tag: "token".into(), span, kind: t.kind.map(|k| k as i32), text: Some(t.text.into_owned()), error: None }
+        }
+        parsuna_rt::Event::Garbage(t) => {
+            let span = to_py_span(t.span);
+            PyEvent { tag: "garbage".into(), span, kind: t.kind.map(|k| k as i32), text: Some(t.text.into_owned()), error: None }
         }
     }
 }

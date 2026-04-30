@@ -165,13 +165,24 @@ fn emit_header(h: &mut String, st: &StateTable, stem: &str, upper: &str) {
     .unwrap();
     writeln!(
         h,
-        " * a consumed token, ERROR is a recoverable diagnostic. */"
+        " * a consumed structural token (including skips), GARBAGE is a token"
+    )
+    .unwrap();
+    writeln!(
+        h,
+        " * dropped during error recovery (between an ERROR event and its sync"
+    )
+    .unwrap();
+    writeln!(
+        h,
+        " * point), ERROR is a recoverable diagnostic. */"
     )
     .unwrap();
     writeln!(h, "typedef enum {{").unwrap();
     writeln!(h, "  {upper}_EV_ENTER,").unwrap();
     writeln!(h, "  {upper}_EV_EXIT,").unwrap();
     writeln!(h, "  {upper}_EV_TOKEN,").unwrap();
+    writeln!(h, "  {upper}_EV_GARBAGE,").unwrap();
     writeln!(h, "  {upper}_EV_ERROR").unwrap();
     writeln!(h, "}} {stem}_EventTag;").unwrap();
     writeln!(h).unwrap();
@@ -383,21 +394,14 @@ fn emit_impl(c: &mut String, st: &StateTable, stem: &str, upper: &str) {
     writeln!(c, "#include <stdlib.h>").unwrap();
     writeln!(c, "#include <string.h>").unwrap();
     writeln!(c).unwrap();
-    /* Monomorphize the runtime: PARSUNA_K and PARSUNA_QUEUE_CAP are
-     * consumed inside parsuna_rt.h so `look_buf`, the event ring,
-     * is_skip, and drive are baked in at compile time rather than
-     * dispatched through a Config vtable. EOF is always token kind 0
-     * (PARSUNA_TK_EOF in the runtime, re-exported as `{upper}_TK_EOF`
-     * in the public header); lex failures use PARSUNA_LEX_ERROR
-     * (always 0xFFFF, re-exported as `{upper}_LEX_ERROR`).
-     *
-     * PARSUNA_QUEUE_CAP equals the longest emit burst across every
-     * state body, computed by lowering — the fixed-size ring is
-     * exactly large enough for the worst case the grammar can
-     * produce, so pump-mode and recovery-mode each yielding after
-     * one push keeps the queue honestly bounded. */
+    /* Monomorphize the runtime: PARSUNA_K is consumed inside
+     * parsuna_rt.h so `look_buf`, is_skip, and step are baked in at
+     * compile time rather than dispatched through a Config vtable.
+     * EOF is always token kind 0 (PARSUNA_TK_EOF in the runtime,
+     * re-exported as `{upper}_TK_EOF` in the public header); lex
+     * failures use PARSUNA_LEX_ERROR (always 0xFFFF, re-exported as
+     * `{upper}_LEX_ERROR`). */
     writeln!(c, "#define PARSUNA_K {}", st.k).unwrap();
-    writeln!(c, "#define PARSUNA_QUEUE_CAP {}", st.queue_cap).unwrap();
     writeln!(c, "#include \"parsuna_rt.h\"").unwrap();
     writeln!(c).unwrap();
     /* ABI compatibility between the public `<stem>_*` types exposed in
@@ -655,25 +659,21 @@ fn emit_skip(c: &mut String, st: &StateTable, upper: &str) {
 }
 
 fn emit_step(c: &mut String, st: &StateTable, _stem: &str, upper: &str) {
-    writeln!(c, "static void drive(Parser *p) {{").unwrap();
+    writeln!(c, "static int step(Parser *p, Event *out) {{").unwrap();
     writeln!(c, "  int cur = get_state(p);").unwrap();
-    writeln!(
-        c,
-        "  while (queue_empty(p) && cur != TERMINATED) {{"
-    )
-    .unwrap();
+    writeln!(c, "  int emitted = 0;").unwrap();
     writeln!(c, "  switch (cur) {{").unwrap();
     for state in st.states.values() {
         writeln!(c, "    case {}: {{ /* {} */", state.id, state.label).unwrap();
         for op in &state.ops {
-            emit_op(c, st, upper, op);
+            emit_op(c, st, upper, op, "      ");
         }
         writeln!(c, "      break;").unwrap();
         writeln!(c, "    }}").unwrap();
     }
     writeln!(c, "  }}").unwrap();
-    writeln!(c, "  }}").unwrap();
     writeln!(c, "  set_state(p, cur);").unwrap();
+    writeln!(c, "  return emitted;").unwrap();
     writeln!(c, "}}").unwrap();
     writeln!(c).unwrap();
 }
@@ -688,7 +688,7 @@ fn c_token_name(st: &StateTable, upper: &str, kind: u16) -> String {
     }
 }
 
-fn emit_op(c: &mut String, st: &StateTable, upper: &str, op: &Op) {
+fn emit_op(c: &mut String, st: &StateTable, upper: &str, op: &Op, ind: &str) {
     match op {
         Op::Enter(k) => {
             let name = st.rule_kinds.get(*k as usize).unwrap_or_else(|| {
@@ -696,7 +696,7 @@ fn emit_op(c: &mut String, st: &StateTable, upper: &str, op: &Op) {
             });
             writeln!(
                 c,
-                "      emit_enter(p, {upper}_RK_{});",
+                "{ind}*out = ev_enter(p, {upper}_RK_{}); emitted = 1;",
                 screaming_snake(name)
             )
             .unwrap()
@@ -707,7 +707,7 @@ fn emit_op(c: &mut String, st: &StateTable, upper: &str, op: &Op) {
             });
             writeln!(
                 c,
-                "      emit_exit(p, {upper}_RK_{});",
+                "{ind}*out = ev_exit(p, {upper}_RK_{}); emitted = 1;",
                 screaming_snake(name)
             )
             .unwrap()
@@ -720,64 +720,52 @@ fn emit_op(c: &mut String, st: &StateTable, upper: &str, op: &Op) {
             let name = c_token_name(st, upper, *kind);
             writeln!(
                 c,
-                "      try_consume(p, {name}, SYNC_{sync}, \"{token_name}\");"
+                "{ind}*out = try_consume(p, {name}, SYNC_{sync}, \"{token_name}\"); emitted = 1;"
             )
             .unwrap()
         }
-        Op::PushRet(r) => writeln!(c, "      push_ret(p, {r});").unwrap(),
-        Op::Jump(n) => writeln!(c, "      cur = {n};").unwrap(),
+        Op::PushRet(r) => writeln!(c, "{ind}push_ret(p, {r});").unwrap(),
+        Op::Jump(n) => writeln!(c, "{ind}cur = {n};").unwrap(),
         Op::Ret => {
-            writeln!(c, "      cur = pop_ret(p);").unwrap();
+            writeln!(c, "{ind}cur = pop_ret(p);").unwrap();
         }
         Op::Star { first, body, cont, head } => {
+            let inner = format!("{ind}  ");
             let miss = match cont {
                 Some(n) => format!("cur = {n};"),
                 None => "cur = pop_ret(p);".to_string(),
             };
-            writeln!(
-                c,
-                "      if (matches_first(p, FIRST_{first})) {{"
-            )
-            .unwrap();
-            writeln!(c, "        push_ret(p, {head});").unwrap();
-            emit_body(c, st, upper, body);
-            writeln!(c, "      }} else {{ {miss} }}").unwrap();
+            writeln!(c, "{ind}if (matches_first(p, FIRST_{first})) {{").unwrap();
+            writeln!(c, "{inner}push_ret(p, {head});").unwrap();
+            emit_body(c, st, upper, body, &inner);
+            writeln!(c, "{ind}}} else {{ {miss} }}").unwrap();
         }
         Op::Opt { first, body, cont } => {
+            let inner = format!("{ind}  ");
             let miss = match cont {
                 Some(n) => format!("cur = {n};"),
                 None => "cur = pop_ret(p);".to_string(),
             };
-            writeln!(
-                c,
-                "      if (matches_first(p, FIRST_{first})) {{"
-            )
-            .unwrap();
+            writeln!(c, "{ind}if (matches_first(p, FIRST_{first})) {{").unwrap();
             if let Some(n) = cont {
-                writeln!(c, "        push_ret(p, {n});").unwrap();
+                writeln!(c, "{inner}push_ret(p, {n});").unwrap();
             }
-            emit_body(c, st, upper, body);
-            writeln!(c, "      }} else {{ {miss} }}").unwrap();
+            emit_body(c, st, upper, body, &inner);
+            writeln!(c, "{ind}}} else {{ {miss} }}").unwrap();
         }
         Op::Dispatch { tree, sync, cont } => {
-            emit_dispatch_tree(c, st, upper, tree, *sync, *cont, "      ");
+            emit_dispatch_tree(c, st, upper, tree, *sync, *cont, ind);
         }
     }
 }
 
-/// Emit either a `cur = N;` transition or, when the body has been
-/// moved into the op as [`Body::Inline`] by the
-/// [`fuse`](crate::lowering::fuse) branch-inlining pass, the inlined
-/// ops directly. The terminator inside the inlined sequence handles
-/// the post-body transition itself.
-fn emit_body(c: &mut String, st: &StateTable, upper: &str, body: &Body) {
-    match body {
-        Body::State(s) => writeln!(c, "      cur = {s};").unwrap(),
-        Body::Inline(ops) => {
-            for op in ops {
-                emit_op(c, st, upper, op);
-            }
-        }
+/// Emit each op of `body` at the current indent. The body's tail op
+/// is its own terminator (`Ret`, `Jump`, another branchy op …) so
+/// the linear emission settles the post-body transition with no
+/// extra glue.
+fn emit_body(c: &mut String, st: &StateTable, upper: &str, body: &Body, ind: &str) {
+    for op in body {
+        emit_op(c, st, upper, op, ind);
     }
 }
 
@@ -792,15 +780,9 @@ fn emit_dispatch_tree(
 ) {
     match tree {
         DispatchTree::Leaf(leaf) => {
-            if leaf_target_inlined(leaf) {
-                writeln!(c, "{}{{", ind).unwrap();
-                emit_dispatch_leaf_block(c, st, upper, leaf, sync, cont, &format!("{}  ", ind));
-                writeln!(c, "{}}}", ind).unwrap();
-            } else {
-                write!(c, "{}{{ ", ind).unwrap();
-                emit_leaf_inline(c, leaf, sync, cont);
-                writeln!(c, "}}").unwrap();
-            }
+            writeln!(c, "{}{{", ind).unwrap();
+            emit_dispatch_leaf_block(c, st, upper, leaf, sync, cont, &format!("{}  ", ind));
+            writeln!(c, "{}}}", ind).unwrap();
         }
         DispatchTree::Switch {
             depth,
@@ -811,43 +793,18 @@ fn emit_dispatch_tree(
             let inner = format!("{}  ", ind);
             for (kind, sub) in arms {
                 let name = c_token_name(st, upper, *kind);
-                match sub {
-                    DispatchTree::Leaf(leaf) if !leaf_target_inlined(leaf) => {
-                        write!(c, "{}case {}: {{ ", inner, name).unwrap();
-                        emit_leaf_inline(c, leaf, sync, cont);
-                        writeln!(c, "}} break;").unwrap();
-                    }
-                    _ => {
-                        writeln!(c, "{}case {}: {{", inner, name).unwrap();
-                        emit_dispatch_tree(c, st, upper, sub, sync, cont, &format!("{}  ", inner));
-                        writeln!(c, "{}}} break;", inner).unwrap();
-                    }
-                }
-            }
-            if leaf_target_inlined(default) {
-                writeln!(c, "{}default: {{", inner).unwrap();
-                emit_dispatch_leaf_block(c, st, upper, default, sync, cont, &format!("{}  ", inner));
+                writeln!(c, "{}case {}: {{", inner, name).unwrap();
+                emit_dispatch_tree(c, st, upper, sub, sync, cont, &format!("{}  ", inner));
                 writeln!(c, "{}}} break;", inner).unwrap();
-            } else {
-                write!(c, "{}default: {{ ", inner).unwrap();
-                emit_leaf_inline(c, default, sync, cont);
-                writeln!(c, "}} break;").unwrap();
             }
+            writeln!(c, "{}default: {{", inner).unwrap();
+            emit_dispatch_leaf_block(c, st, upper, default, sync, cont, &format!("{}  ", inner));
+            writeln!(c, "{}}} break;", inner).unwrap();
             writeln!(c, "{}}}", ind).unwrap();
         }
     }
 }
 
-/// True if a Dispatch leaf is an `Arm` whose body has already been
-/// inlined into the op (`Body::Inline`). Such arms can't fit the
-/// single-line `emit_leaf_inline` form; the dispatch tree switches
-/// to the multi-line block form for them.
-fn leaf_target_inlined(leaf: &DispatchLeaf) -> bool {
-    matches!(leaf, DispatchLeaf::Arm(Body::Inline(_)))
-}
-
-/// Multi-line block-form leaf emission for arms whose body is inlined
-/// (the single-line `emit_leaf_inline` can't host a multi-op body).
 fn emit_dispatch_leaf_block(
     c: &mut String,
     st: &StateTable,
@@ -860,47 +817,23 @@ fn emit_dispatch_leaf_block(
     match (leaf, cont) {
         (DispatchLeaf::Arm(b), Some(n)) => {
             writeln!(c, "{ind}push_ret(p, {n});").unwrap();
-            emit_body(c, st, upper, b);
+            emit_body(c, st, upper, b, ind);
         }
         (DispatchLeaf::Arm(b), None) => {
-            emit_body(c, st, upper, b);
+            emit_body(c, st, upper, b, ind);
         }
         (DispatchLeaf::Fallthrough, Some(n)) => writeln!(c, "{ind}cur = {n};").unwrap(),
         (DispatchLeaf::Fallthrough, None) => writeln!(c, "{ind}cur = pop_ret(p);").unwrap(),
         (DispatchLeaf::Error, Some(n)) => {
             writeln!(c, "{ind}cur = {n};").unwrap();
-            writeln!(c, "{ind}error_here(p, \"unexpected token\");").unwrap();
+            writeln!(c, "{ind}*out = ev_error_here(p, \"unexpected token\"); emitted = 1;").unwrap();
             writeln!(c, "{ind}recover_to(p, SYNC_{sync});").unwrap();
         }
         (DispatchLeaf::Error, None) => {
-            writeln!(c, "{ind}error_here(p, \"unexpected token\");").unwrap();
+            writeln!(c, "{ind}*out = ev_error_here(p, \"unexpected token\"); emitted = 1;").unwrap();
             writeln!(c, "{ind}recover_to(p, SYNC_{sync});").unwrap();
             writeln!(c, "{ind}cur = pop_ret(p);").unwrap();
         }
-    }
-}
-
-fn emit_leaf_inline(c: &mut String, leaf: &DispatchLeaf, sync: u32, cont: Option<u32>) {
-    // Caller (emit_dispatch_tree) ensures any Arm here is `Body::State`
-    // (Body::Inline goes through the multi-line emit_dispatch_leaf_block).
-    match (leaf, cont) {
-        (DispatchLeaf::Arm(Body::State(t)), Some(n)) => {
-            write!(c, "push_ret(p, {n}); cur = {t}; ").unwrap()
-        }
-        (DispatchLeaf::Arm(Body::State(t)), None) => write!(c, "cur = {t}; ").unwrap(),
-        (DispatchLeaf::Arm(Body::Inline(_)), _) => unreachable!("inlined arm in inline-emit path"),
-        (DispatchLeaf::Fallthrough, Some(n)) => write!(c, "cur = {n}; ").unwrap(),
-        (DispatchLeaf::Fallthrough, None) => write!(c, "cur = pop_ret(p); ").unwrap(),
-        (DispatchLeaf::Error, Some(n)) => write!(
-            c,
-            "cur = {n}; error_here(p, \"unexpected token\"); recover_to(p, SYNC_{sync}); "
-        )
-        .unwrap(),
-        (DispatchLeaf::Error, None) => write!(
-            c,
-            "error_here(p, \"unexpected token\"); recover_to(p, SYNC_{sync}); cur = pop_ret(p); "
-        )
-        .unwrap(),
     }
 }
 

@@ -321,17 +321,6 @@ fn emit_tables(s: &mut String, st: &StateTable) {
     )
     .unwrap();
     writeln!(s, "pub const K: usize = {};", st.k).unwrap();
-    writeln!(
-        s,
-        "/// Hard cap on events the parser's fixed-size queue can hold."
-    )
-    .unwrap();
-    writeln!(
-        s,
-        "/// Equal to the longest emit burst across every state body in this grammar."
-    )
-    .unwrap();
-    writeln!(s, "pub const QUEUE_CAP: usize = {};", st.queue_cap).unwrap();
 
     for (name, id) in &st.entry_states {
         writeln!(s, "const ENTRY_{}: u32 = {};", name.to_uppercase(), id).unwrap();
@@ -401,7 +390,7 @@ pub struct Grammar;
 /// Parser alias pinning the grammar and lookahead. `L` is any
 /// [`LexerBackend`]; the generated `parse_*_from_str`/`parse_*_from_reader`
 /// helpers build a parser with either [`Scanner`] or [`StreamingLexer`].
-pub type Parser<'a, L> = parsuna_rt::Parser<'a, L, K, QUEUE_CAP, Grammar>;
+pub type Parser<'a, L> = parsuna_rt::Parser<'a, L, K, Grammar>;
 "#,
     );
 }
@@ -425,15 +414,27 @@ fn kind_pattern(st: &StateTable, first: &[Vec<u16>]) -> String {
 
 fn emit_op(s: &mut String, st: &StateTable, op: &Op, ind: &str) {
     match op {
-        Op::Enter(k) => writeln!(s, "{}p.enter({});", ind, rule_variant(st, *k)).unwrap(),
-        Op::Exit(k) => writeln!(s, "{}p.exit({});", ind, rule_variant(st, *k)).unwrap(),
+        Op::Enter(k) => writeln!(
+            s,
+            "{}event = Some(p.enter({}));",
+            ind,
+            rule_variant(st, *k)
+        )
+        .unwrap(),
+        Op::Exit(k) => writeln!(
+            s,
+            "{}event = Some(p.exit({}));",
+            ind,
+            rule_variant(st, *k)
+        )
+        .unwrap(),
         Op::Expect {
             kind,
             token_name,
             sync,
         } => writeln!(
             s,
-            "{}p.expect({}, SYNC_{}, \"expected {}\");",
+            "{}event = Some(p.expect({}, SYNC_{}, \"expected {}\"));",
             ind,
             token_variant(st, *kind),
             sync,
@@ -488,19 +489,13 @@ fn emit_op(s: &mut String, st: &StateTable, op: &Op, ind: &str) {
     }
 }
 
-/// Emit a body's transition: `cur = N;` for [`Body::State`], or the
-/// body's ops emitted recursively for [`Body::Inline`]. The inlined
-/// ops include their own terminator (`Ret`/`Jump`/another branchy
-/// op), so the recursive emission settles the post-body transition
-/// without extra glue.
+/// Emit each op in `body` at the current indent. The body's tail op
+/// is its own terminator (`Ret`, `Jump`, another branchy op …) so
+/// the linear emission already settles the post-body transition with
+/// no extra glue.
 fn emit_body(s: &mut String, st: &StateTable, body: &Body, ind: &str) {
-    match body {
-        Body::State(t) => writeln!(s, "{}cur = {};", ind, t).unwrap(),
-        Body::Inline(ops) => {
-            for op in ops {
-                emit_op(s, st, op, ind);
-            }
-        }
+    for op in body {
+        emit_op(s, st, op, ind);
     }
 }
 
@@ -551,38 +546,16 @@ fn emit_dispatch_tree(
             let inner2 = format!("{}    ", inner);
             for (kind, sub) in arms {
                 let pat = format!("Some({})", token_variant(st, *kind));
-                match sub {
-                    DispatchTree::Leaf(leaf) if !leaf_target_inlined(leaf) => {
-                        write!(s, "{}{} => {{ ", inner, pat).unwrap();
-                        emit_leaf_inline(s, leaf, sync, cont);
-                        writeln!(s, "}}").unwrap();
-                    }
-                    _ => {
-                        writeln!(s, "{}{} => {{", inner, pat).unwrap();
-                        emit_dispatch_tree(s, st, sub, sync, cont, &inner2);
-                        writeln!(s, "{}}}", inner).unwrap();
-                    }
-                }
-            }
-            if leaf_target_inlined(default) {
-                writeln!(s, "{}_ => {{", inner).unwrap();
-                emit_dispatch_leaf(s, st, default, sync, cont, &inner2);
+                writeln!(s, "{}{} => {{", inner, pat).unwrap();
+                emit_dispatch_tree(s, st, sub, sync, cont, &inner2);
                 writeln!(s, "{}}}", inner).unwrap();
-            } else {
-                write!(s, "{}_ => {{ ", inner).unwrap();
-                emit_leaf_inline(s, default, sync, cont);
-                writeln!(s, "}}").unwrap();
             }
+            writeln!(s, "{}_ => {{", inner).unwrap();
+            emit_dispatch_leaf(s, st, default, sync, cont, &inner2);
+            writeln!(s, "{}}}", inner).unwrap();
             writeln!(s, "{}}}", ind).unwrap();
         }
     }
-}
-
-/// True if the leaf carries an inlined body — those can't fit in
-/// the single-line `emit_leaf_inline` form, so the dispatch tree
-/// switches to the multi-line block form for them.
-fn leaf_target_inlined(leaf: &DispatchLeaf) -> bool {
-    matches!(leaf, DispatchLeaf::Arm(Body::Inline(_)))
 }
 
 fn emit_dispatch_leaf(s: &mut String, st: &StateTable, leaf: &DispatchLeaf, sync: u32, cont: Option<u32>, ind: &str) {
@@ -602,38 +575,14 @@ fn emit_dispatch_leaf(s: &mut String, st: &StateTable, leaf: &DispatchLeaf, sync
         }
         (DispatchLeaf::Error, Some(n)) => {
             writeln!(s, "{}cur = {};", ind, n).unwrap();
-            writeln!(s, "{}p.error_here(\"unexpected token\");", ind).unwrap();
+            writeln!(s, "{}event = Some(p.error_here(\"unexpected token\"));", ind).unwrap();
             writeln!(s, "{}p.recover_to(SYNC_{});", ind, sync).unwrap();
         }
         (DispatchLeaf::Error, None) => {
-            writeln!(s, "{}p.error_here(\"unexpected token\");", ind).unwrap();
+            writeln!(s, "{}event = Some(p.error_here(\"unexpected token\"));", ind).unwrap();
             writeln!(s, "{}p.recover_to(SYNC_{});", ind, sync).unwrap();
             writeln!(s, "{}cur = p.ret();", ind).unwrap();
         }
-    }
-}
-
-fn emit_leaf_inline(s: &mut String, leaf: &DispatchLeaf, sync: u32, cont: Option<u32>) {
-    // Caller (emit_dispatch_tree) routes inlined arms to the multi-line
-    // emit_dispatch_leaf instead.
-    match (leaf, cont) {
-        (DispatchLeaf::Arm(Body::State(t)), Some(n)) => write!(s, "p.push_ret({}); cur = {}; ", n, t).unwrap(),
-        (DispatchLeaf::Arm(Body::State(t)), None) => write!(s, "cur = {}; ", t).unwrap(),
-        (DispatchLeaf::Arm(Body::Inline(_)), _) => unreachable!("inlined arm in inline-emit path"),
-        (DispatchLeaf::Fallthrough, Some(n)) => write!(s, "cur = {}; ", n).unwrap(),
-        (DispatchLeaf::Fallthrough, None) => write!(s, "cur = p.ret(); ").unwrap(),
-        (DispatchLeaf::Error, Some(n)) => write!(
-            s,
-            "cur = {}; p.error_here(\"unexpected token\"); p.recover_to(SYNC_{}); ",
-            n, sync
-        )
-        .unwrap(),
-        (DispatchLeaf::Error, None) => write!(
-            s,
-            "p.error_here(\"unexpected token\"); p.recover_to(SYNC_{}); cur = p.ret(); ",
-            sync
-        )
-        .unwrap(),
     }
 }
 
@@ -669,28 +618,32 @@ fn emit_step(s: &mut String, st: &StateTable) {
     writeln!(s, "    #[inline]").unwrap();
     writeln!(
         s,
-        "    fn drive<'a, const CAP: usize, L: LexerBackend<'a, Self::TokenKind>>(p: &mut parsuna_rt::Parser<'a, L, K, CAP, Self>) {{"
+        "    fn step<'a, L: LexerBackend<'a, Self::TokenKind>>(p: &mut parsuna_rt::Parser<'a, L, K, Self>) -> Option<parsuna_rt::Event<'a, TokenKind, RuleKind>> {{"
     )
     .unwrap();
+    // One match arm per call. Each arm runs a state body's ops —
+    // possibly assigning `event` (Enter/Exit/Expect/error_here) and
+    // always updating `cur`. The runtime's next_event loop calls
+    // step again if we return None.
     writeln!(s, "        let mut cur = p.state();").unwrap();
     writeln!(
         s,
-        "        while p.queue_is_empty() && cur != TERMINATED {{"
+        "        let mut event: Option<parsuna_rt::Event<'a, TokenKind, RuleKind>> = None;"
     )
     .unwrap();
-    writeln!(s, "            match cur {{").unwrap();
+    writeln!(s, "        match cur {{").unwrap();
     for state in st.states.values() {
-        writeln!(s, "                {} => {{ // {}", state.id, state.label).unwrap();
-        let ind = "                    ";
+        writeln!(s, "            {} => {{ // {}", state.id, state.label).unwrap();
+        let ind = "                ";
         for op in &state.ops {
             emit_op(s, st, op, ind);
         }
-        writeln!(s, "                }}").unwrap();
+        writeln!(s, "            }}").unwrap();
     }
-    writeln!(s, "                _ => unreachable!(\"unknown state\"),").unwrap();
-    writeln!(s, "            }}").unwrap();
+    writeln!(s, "            _ => unreachable!(\"unknown state\"),").unwrap();
     writeln!(s, "        }}").unwrap();
     writeln!(s, "        p.set_state(cur);").unwrap();
+    writeln!(s, "        event").unwrap();
     writeln!(s, "    }}").unwrap();
     writeln!(s, "}}").unwrap();
     writeln!(s).unwrap();

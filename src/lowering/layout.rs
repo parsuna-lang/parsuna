@@ -16,7 +16,7 @@ use crate::lowering::{build_dispatch_tree, FirstSet, Op as StateOp, State, State
 
 /// Assign state ids to every op in every block, resolve inter-block
 /// targets, and compile the lexer DFA. Produces the [`StateTable`]
-/// that downstream passes (`fuse`, backends) operate on. `dopts`
+/// that downstream passes (`optimize`, backends) operate on. `dopts`
 /// controls the lexer-DFA optimization passes; layout itself has no
 /// per-pass knobs of its own.
 pub fn layout(prog: Program, ag: &AnalyzedGrammar, dopts: DfaOpts) -> StateTable {
@@ -34,49 +34,72 @@ pub fn layout(prog: Program, ag: &AnalyzedGrammar, dopts: DfaOpts) -> StateTable
     // Pre-assign entry state ids for each block so we can resolve
     // cross-block targets in the next pass without forward references.
     // Id 0 is reserved for the TERMINATED sentinel, so numbering starts at
-    // 1. Each block reserves one slot per op plus one for the trailing
-    // `Ret` state.
+    // 1. Each block reserves exactly `ops.len()` slots — its last op is
+    // emitted in *tail form* (Ret instead of Jump-to-trailing-ret-state,
+    // tail-call instead of PushRet+Jump, `cont: None` for branchy ops),
+    // so no separate trailing `[Ret]` state is needed. The runtime
+    // requires every drive call to emit one event, and a standalone
+    // `[Ret]`-only state reached with an empty stack would emit nothing
+    // before hitting TERMINATED — baking the tail form into layout
+    // makes that state shape impossible to construct, regardless of
+    // which optimizer passes run later. Empty blocks still need one
+    // slot to carry their entry id; we emit a single `[Ret]` for them.
     let mut entry: HashMap<BlockId, StateId> = HashMap::new();
     let mut cursor: StateId = 1;
     for bid in &order {
         entry.insert(*bid, cursor);
-        cursor += prog.blocks[bid.0 as usize].ops.len() as StateId + 1;
+        let n = prog.blocks[bid.0 as usize].ops.len().max(1);
+        cursor += n as StateId;
     }
 
     let mut states: std::collections::BTreeMap<StateId, State> = std::collections::BTreeMap::new();
     let mut next_id: StateId = 1;
     for bid in &order {
         let block = &prog.blocks[bid.0 as usize];
+        if block.ops.is_empty() {
+            // An empty block lowers to a single Ret. Reachable only via
+            // a caller's `PushRet(...) ; Jump(here)`, so the Ret pops
+            // back to the caller's continuation — never to TERMINATED
+            // unless the caller deliberately set up that path.
+            states.insert(
+                next_id,
+                State {
+                    id: next_id,
+                    label: format!("{}:empty", block.label_prefix),
+                    ops: vec![StateOp::Ret],
+                },
+            );
+            next_id += 1;
+            continue;
+        }
+        let total = block.ops.len();
         for (i, op) in block.ops.iter().enumerate() {
             // Fall-through defaults to the next id — one op per state
             // means "after this op, go to the op below me" is just id + 1.
             // Ops that branch (Dispatch, Opt, Star) override this via
-            // their own `next`/body targets.
+            // their own `next`/body targets. The last op of the block
+            // takes its tail form, so its `fall` is unused.
             let here = next_id;
             let fall = here + 1;
+            let is_tail = i + 1 == total;
             states.insert(
                 here,
                 State {
                     id: here,
                     label: block.op_labels[i].clone(),
-                    ops: lower_op(op, here, fall, &entry, &prog.rule_entry, &prog.first_sets),
+                    ops: lower_op(
+                        op,
+                        here,
+                        fall,
+                        is_tail,
+                        &entry,
+                        &prog.rule_entry,
+                        &prog.first_sets,
+                    ),
                 },
             );
             next_id += 1;
         }
-
-        // Synthetic trailing state: every block ends with a `Ret` so a
-        // caller's `PushRet(fall)` followed by `Jump(block.entry)` lands
-        // back at `fall` when the callee finishes.
-        states.insert(
-            next_id,
-            State {
-                id: next_id,
-                label: format!("{}:ret", block.label_prefix),
-                ops: vec![StateOp::Ret],
-            },
-        );
-        next_id += 1;
     }
 
     // Expose entry points for public (non-fragment) rules only — fragments
@@ -99,8 +122,6 @@ pub fn layout(prog: Program, ag: &AnalyzedGrammar, dopts: DfaOpts) -> StateTable
         states,
         entry_states,
         k: ag.k,
-        // Filled in by lower() after fuse via max_event_burst.
-        queue_cap: 0,
         lexer_dfa,
     }
 }
@@ -160,13 +181,29 @@ fn lower_op(
     op: &Op,
     here: StateId,
     fall: StateId,
+    is_tail: bool,
     entry: &HashMap<BlockId, StateId>,
     rules: &HashMap<String, BlockId>,
     first_sets: &[FirstSet],
 ) -> Vec<StateOp> {
+    // The "post-op terminator" — what follows the op inside its state
+    // body. For non-tail ops this is `Jump(fall)` (fall-through to the
+    // next state in the block). For the block's last op this is `Ret`,
+    // so the op's drive() call also pops the caller's continuation in
+    // the same step — the runtime never lands on a standalone
+    // `[Ret]`-only state with an empty stack.
+    let after = if is_tail {
+        StateOp::Ret
+    } else {
+        StateOp::Jump(fall)
+    };
+    // Branchy ops encode the post-op transition via their `cont` field
+    // — `Some(fall)` is push-and-jump, `None` is tail call (the
+    // body's `Ret` pops the *caller's* continuation directly).
+    let cont = if is_tail { None } else { Some(fall) };
     match op {
-        Op::Enter { kind } => vec![StateOp::Enter(*kind), StateOp::Jump(fall)],
-        Op::Exit { kind } => vec![StateOp::Exit(*kind), StateOp::Jump(fall)],
+        Op::Enter { kind } => vec![StateOp::Enter(*kind), after],
+        Op::Exit { kind } => vec![StateOp::Exit(*kind), after],
         Op::Expect {
             kind,
             token_name,
@@ -177,29 +214,32 @@ fn lower_op(
                 token_name: token_name.clone(),
                 sync: *sync,
             },
-            StateOp::Jump(fall),
+            after,
         ],
-        Op::Call { target } => vec![
-            // Call = save fall-through as the return state, then jump to
-            // the callee's entry. When the callee hits its trailing Ret,
-            // it pops `fall` and resumes here.
-            StateOp::PushRet(fall),
-            StateOp::Jump(resolve(target, entry, rules)),
-        ],
+        Op::Call { target } => {
+            // Call = save fall-through as the return state, then jump
+            // to the callee's entry. When the callee's trailing Ret
+            // runs, it pops `fall` and resumes here. As a tail call
+            // (last op of block) we skip the push: the callee's Ret
+            // pops *our* caller's continuation directly.
+            let target_state = resolve(target, entry, rules);
+            if is_tail {
+                vec![StateOp::Jump(target_state)]
+            } else {
+                vec![StateOp::PushRet(fall), StateOp::Jump(target_state)]
+            }
+        }
         Op::Opt { first, body } => vec![StateOp::Opt {
             first: *first,
-            body: super::Body::State(resolve(body, entry, rules)),
-            // Layout always emits the push-and-jump shape. The fuse
-            // tail-call pass rewrites this to `None` when `fall`
-            // turns out to be a pure-`Ret` trampoline.
-            cont: Some(fall),
+            body: vec![StateOp::Jump(resolve(body, entry, rules))],
+            cont,
         }],
         Op::Star { first, body } => vec![StateOp::Star {
             first: *first,
-            body: super::Body::State(resolve(body, entry, rules)),
-            cont: Some(fall),
+            body: vec![StateOp::Jump(resolve(body, entry, rules))],
+            cont,
             // Loop-head defaults to the state we're being placed in.
-            // If the fuse pass later splices this Star elsewhere, the
+            // If the optimizer later splices this Star elsewhere, the
             // original `here` state stays alive (it's referenced via
             // `head`) so the body's Ret has somewhere to land.
             head: here,
@@ -220,7 +260,7 @@ fn lower_op(
             vec![StateOp::Dispatch {
                 tree,
                 sync: *sync,
-                cont: Some(fall),
+                cont,
             }]
         }
     }
@@ -275,21 +315,26 @@ mod tests {
     }
 
     #[test]
-    fn every_block_ends_in_a_ret_state() {
-        // For each entry state, walking the block linearly, the last state of
-        // that block must be a Ret.
+    fn block_last_op_uses_tail_form() {
+        // Layout no longer emits a standalone trailing `[Ret]` state per
+        // block — the block's last op carries its own terminator (a
+        // direct `Ret`, a tail-call `Jump`, or `cont: None` for branchy
+        // ops). The state at `entry_id + ops.len() - 1` is the block's
+        // last op, and its body's tail should be a `Ret` (for the rules
+        // in this grammar, every body ends with `Exit`, which lowers to
+        // `[Exit, Ret]`).
         let (ag, st) = lay("T = \"t\"; a = T; main = a T;");
         let prog = build(&ag);
-        // Layout doesn't expose block boundaries directly, but we can check
-        // each entry: from entry id, count `prog.blocks[bid].ops.len() + 1`
-        // states forward; the last must be a single Ret.
         for (rule_name, entry_id) in &st.entry_states {
             let bid = prog.rule_entry[rule_name];
             let block = &prog.blocks[bid.0 as usize];
-            let last_id = *entry_id + block.ops.len() as StateId; // entry + N ops → trailing ret slot
-            let last = st.states.get(&last_id).expect("trailing state");
-            assert_eq!(last.ops.len(), 1);
-            assert!(matches!(last.ops[0], StateOp::Ret), "{:?}", last.ops);
+            let last_id = *entry_id + (block.ops.len() - 1) as StateId;
+            let last = st.states.get(&last_id).expect("last state of block");
+            assert!(
+                matches!(last.ops.last(), Some(StateOp::Ret)),
+                "block last op didn't end in Ret: {:?}",
+                last.ops
+            );
         }
     }
 

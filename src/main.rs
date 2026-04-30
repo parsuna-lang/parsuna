@@ -44,19 +44,23 @@ struct Cli {
 /// flag stays a top-level CLI option but the `Cli` struct doesn't get
 /// cluttered with the bookkeeping. Every flag is `global = true` so
 /// it works on any subcommand (`generate`, `debug`, …).
+///
+/// All passes are pure performance: turn any flag off and the
+/// generated parser still works, just with more state hops.
 #[derive(clap::Args, Clone, Copy, Debug)]
 struct OptArgs {
-    /// Disable straight-line `Jump`-chain splicing in `fuse`.
+    /// Disable absorbing tail `Jump(N)` chains into a state's body.
     /// One block-level op stays in one state.
     #[arg(long = "no-splice-chains", global = true, help_heading = "Optimizer")]
     no_splice_chains: bool,
 
-    /// Disable tail-call elimination of pure-`Ret` trampolines.
+    /// Disable folding pure-`Ret` trampolines (drop redundant
+    /// `PushRet`s and rewrite `cont: Some(s) → None`).
     #[arg(long = "no-tce", global = true, help_heading = "Optimizer")]
     no_tce: bool,
 
-    /// Disable inlining of single-predecessor branchy targets into
-    /// the calling `Op::Opt`/`Op::Star`/dispatch arm.
+    /// Disable inlining of `[Op::Jump(s)]`-shaped branch bodies
+    /// into the calling `Op::Opt`/`Op::Star`/dispatch arm.
     #[arg(long = "no-branch-inline", global = true, help_heading = "Optimizer")]
     no_branch_inline: bool,
 
@@ -585,23 +589,21 @@ fn format_op(op: &parsuna::lowering::Op, st: &StateTable) -> Vec<String> {
             head,
         } => {
             let mut lines = vec![format!(
-                "Star {} body={} {} head={}",
+                "Star {} head={} {}",
                 format_first_pool(st, *first),
-                format_body(st, body),
+                state_ref(st, *head),
                 match cont {
                     Some(n) => format!("cont={}", state_ref(st, *n)),
                     None => "tail".into(),
                 },
-                state_ref(st, *head)
             )];
             append_body_ops(st, body, "  ", &mut lines);
             lines
         }
         Op::Opt { first, body, cont } => {
             let mut lines = vec![format!(
-                "Opt {} body={} {}",
+                "Opt {} {}",
                 format_first_pool(st, *first),
-                format_body(st, body),
                 match cont {
                     Some(n) => format!("cont={}", state_ref(st, *n)),
                     None => "tail".into(),
@@ -625,26 +627,20 @@ fn format_op(op: &parsuna::lowering::Op, st: &StateTable) -> Vec<String> {
     }
 }
 
-fn format_body(st: &StateTable, body: &parsuna::lowering::Body) -> String {
-    use parsuna::lowering::Body;
-    match body {
-        Body::State(s) => state_ref(st, *s),
-        Body::Inline(_) => "<inlined>".into(),
-    }
-}
-
+/// Append every op of `body` to `out`, each prefixed by `indent`.
+/// Bodies are always rendered as a flat list of ops — no
+/// `<inlined>` placeholder, no compact `cur = N` short-form. A body
+/// that's just `[Op::Jump(s)]` shows up as a single `Jump …` line,
+/// which already says exactly what the body does.
 fn append_body_ops(
     st: &StateTable,
     body: &parsuna::lowering::Body,
     indent: &str,
     out: &mut Vec<String>,
 ) {
-    use parsuna::lowering::Body;
-    if let Body::Inline(ops) = body {
-        for op in ops {
-            for line in format_op(op, st) {
-                out.push(format!("{}{}", indent, line));
-            }
+    for op in body {
+        for line in format_op(op, st) {
+            out.push(format!("{}{}", indent, line));
         }
     }
 }
@@ -655,16 +651,9 @@ fn format_dispatch_tree(
     indent: &str,
     out: &mut Vec<String>,
 ) {
-    use parsuna::lowering::{DispatchLeaf, DispatchTree};
-    let leaf_str = |leaf: &DispatchLeaf| -> String {
-        match leaf {
-            DispatchLeaf::Arm(b) => format!("-> {}", format_body(st, b)),
-            DispatchLeaf::Fallthrough => "-> fall".into(),
-            DispatchLeaf::Error => "-> error".into(),
-        }
-    };
+    use parsuna::lowering::DispatchTree;
     match tree {
-        DispatchTree::Leaf(l) => out.push(format!("{}{}", indent, leaf_str(l))),
+        DispatchTree::Leaf(l) => emit_dispatch_leaf(st, l, "", indent, out),
         DispatchTree::Switch {
             depth,
             arms,
@@ -676,7 +665,7 @@ fn format_dispatch_tree(
                 let name = token_name_for_kind(st, *kind);
                 match sub {
                     DispatchTree::Leaf(l) => {
-                        out.push(format!("{}{} {}", child_indent, name, leaf_str(l)));
+                        emit_dispatch_leaf(st, l, &format!("{} ", name), &child_indent, out);
                     }
                     _ => {
                         out.push(format!("{}{}:", child_indent, name));
@@ -684,7 +673,35 @@ fn format_dispatch_tree(
                     }
                 }
             }
-            out.push(format!("{}else {}", child_indent, leaf_str(default)));
+            emit_dispatch_leaf(st, default, "else ", &child_indent, out);
+        }
+    }
+}
+
+/// Render a single dispatch leaf at `indent`, prefixed by `prefix`
+/// (the token name, "else ", or empty for top-level leaves).
+/// `Arm` leaves print their body's ops on indented lines below the
+/// `->` header, the same way `Op::Star` and `Op::Opt` print their
+/// bodies. `Fallthrough` and `Error` are summarised on the header
+/// line because they don't carry body ops.
+fn emit_dispatch_leaf(
+    st: &StateTable,
+    leaf: &parsuna::lowering::DispatchLeaf,
+    prefix: &str,
+    indent: &str,
+    out: &mut Vec<String>,
+) {
+    use parsuna::lowering::DispatchLeaf;
+    match leaf {
+        DispatchLeaf::Arm(body) => {
+            out.push(format!("{}{}->", indent, prefix));
+            append_body_ops(st, body, &format!("{}  ", indent), out);
+        }
+        DispatchLeaf::Fallthrough => {
+            out.push(format!("{}{}-> fall", indent, prefix));
+        }
+        DispatchLeaf::Error => {
+            out.push(format!("{}{}-> error", indent, prefix));
         }
     }
 }

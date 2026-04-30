@@ -325,9 +325,6 @@ fn byte_literal(b: u8) -> String {
 fn emit_tables(s: &mut String, st: &StateTable) {
     writeln!(s, "// K is the lookahead required to disambiguate every alternative (LL(k)).").unwrap();
     writeln!(s, "const K = {}", st.k).unwrap();
-    writeln!(s, "// QueueCap is the hard cap on events the parser's fixed-size queue can hold.").unwrap();
-    writeln!(s, "// Equal to the longest emit burst across every state body in this grammar.").unwrap();
-    writeln!(s, "const QueueCap = {}", st.queue_cap).unwrap();
     for (name, id) in &st.entry_states {
         writeln!(s, "const entry{} = {}", capitalize(name), id).unwrap();
     }
@@ -374,19 +371,20 @@ fn emit_tables(s: &mut String, st: &StateTable) {
 }
 
 fn emit_drive(s: &mut String, st: &StateTable) {
-    writeln!(s, "func drive(p *rt.Parser) {{").unwrap();
+    writeln!(s, "func step(p *rt.Parser) (rt.Event, bool) {{").unwrap();
     writeln!(s, "\tcur := p.State()").unwrap();
-    writeln!(s, "\tfor p.QueueIsEmpty() && cur != rt.Terminated {{").unwrap();
-    writeln!(s, "\t\tswitch cur {{").unwrap();
+    writeln!(s, "\tvar event rt.Event").unwrap();
+    writeln!(s, "\tvar emitted bool").unwrap();
+    writeln!(s, "\tswitch cur {{").unwrap();
     for state in st.states.values() {
-        writeln!(s, "\t\tcase {}: // {}", state.id, state.label).unwrap();
+        writeln!(s, "\tcase {}: // {}", state.id, state.label).unwrap();
         for op in &state.ops {
             emit_op(s, st, op);
         }
     }
-    writeln!(s, "\t\t}}").unwrap();
     writeln!(s, "\t}}").unwrap();
     writeln!(s, "\tp.SetState(cur)").unwrap();
+    writeln!(s, "\treturn event, emitted").unwrap();
     writeln!(s, "}}").unwrap();
     writeln!(s).unwrap();
 }
@@ -396,7 +394,7 @@ fn emit_op(s: &mut String, st: &StateTable, op: &Op) {
         Op::Enter(k) => {
             writeln!(
                 s,
-                "\t\t\tp.Enter(uint16({}))",
+                "\t\tevent = p.Enter(uint16({})); emitted = true",
                 rule_const(st, *k)
             )
             .unwrap();
@@ -404,7 +402,7 @@ fn emit_op(s: &mut String, st: &StateTable, op: &Op) {
         Op::Exit(k) => {
             writeln!(
                 s,
-                "\t\t\tp.Exit(uint16({}))",
+                "\t\tevent = p.Exit(uint16({})); emitted = true",
                 rule_const(st, *k)
             )
             .unwrap();
@@ -416,7 +414,7 @@ fn emit_op(s: &mut String, st: &StateTable, op: &Op) {
         } => {
             writeln!(
                 s,
-                "\t\t\tp.TryConsume(uint16({}), sync_{}, {:?})",
+                "\t\tevent = p.TryConsume(uint16({}), sync_{}, {:?}); emitted = true",
                 token_const(st, *kind),
                 sync,
                 token_name
@@ -424,50 +422,45 @@ fn emit_op(s: &mut String, st: &StateTable, op: &Op) {
             .unwrap();
         }
         Op::PushRet(r) => {
-            writeln!(s, "\t\t\tp.PushRet({})", r).unwrap();
+            writeln!(s, "\t\tp.PushRet({})", r).unwrap();
         }
         Op::Jump(n) => {
-            writeln!(s, "\t\t\tcur = {}", n).unwrap();
+            writeln!(s, "\t\tcur = {}", n).unwrap();
         }
         Op::Ret => {
-            writeln!(s, "\t\t\tcur = p.PopRet()").unwrap();
+            writeln!(s, "\t\tcur = p.PopRet()").unwrap();
         }
         Op::Star { first, body, cont, head } => {
             let miss = match cont {
                 Some(n) => format!("cur = {n}"),
                 None => "cur = p.PopRet()".to_string(),
             };
-            writeln!(s, "\t\t\tif p.MatchesFirst(first_{}) {{", first).unwrap();
-            writeln!(s, "\t\t\t\tp.PushRet({})", head).unwrap();
+            writeln!(s, "\t\tif p.MatchesFirst(first_{}) {{", first).unwrap();
+            writeln!(s, "\t\t\tp.PushRet({})", head).unwrap();
             emit_body(s, st, body);
-            writeln!(s, "\t\t\t}} else {{ {miss} }}").unwrap();
+            writeln!(s, "\t\t}} else {{ {miss} }}").unwrap();
         }
         Op::Opt { first, body, cont } => {
             let miss = match cont {
                 Some(n) => format!("cur = {n}"),
                 None => "cur = p.PopRet()".to_string(),
             };
-            writeln!(s, "\t\t\tif p.MatchesFirst(first_{}) {{", first).unwrap();
+            writeln!(s, "\t\tif p.MatchesFirst(first_{}) {{", first).unwrap();
             if let Some(n) = cont {
-                writeln!(s, "\t\t\t\tp.PushRet({})", n).unwrap();
+                writeln!(s, "\t\t\tp.PushRet({})", n).unwrap();
             }
             emit_body(s, st, body);
-            writeln!(s, "\t\t\t}} else {{ {miss} }}").unwrap();
+            writeln!(s, "\t\t}} else {{ {miss} }}").unwrap();
         }
         Op::Dispatch { tree, sync, cont } => {
-            emit_dispatch_tree(s, st, tree, *sync, *cont, "\t\t\t");
+            emit_dispatch_tree(s, st, tree, *sync, *cont, "\t\t");
         }
     }
 }
 
 fn emit_body(s: &mut String, st: &StateTable, body: &Body) {
-    match body {
-        Body::State(t) => writeln!(s, "\t\t\tcur = {}", t).unwrap(),
-        Body::Inline(ops) => {
-            for op in ops {
-                emit_op(s, st, op);
-            }
-        }
+    for op in body {
+        emit_op(s, st, op);
     }
 }
 
@@ -480,15 +473,7 @@ fn emit_dispatch_tree(
     ind: &str,
 ) {
     match tree {
-        DispatchTree::Leaf(leaf) => {
-            if leaf_target_inlined(leaf) {
-                emit_dispatch_leaf_block(s, st, leaf, sync, cont, ind);
-            } else {
-                write!(s, "{}", ind).unwrap();
-                emit_leaf_inline(s, leaf, sync, cont);
-                writeln!(s).unwrap();
-            }
-        }
+        DispatchTree::Leaf(leaf) => emit_dispatch_leaf_block(s, st, leaf, sync, cont, ind),
         DispatchTree::Switch {
             depth,
             arms,
@@ -505,33 +490,13 @@ fn emit_dispatch_tree(
                     token_const(st, *kind)
                 )
                 .unwrap();
-                match sub {
-                    DispatchTree::Leaf(leaf) if !leaf_target_inlined(leaf) => {
-                        write!(s, "{}", body_ind).unwrap();
-                        emit_leaf_inline(s, leaf, sync, cont);
-                        writeln!(s).unwrap();
-                    }
-                    DispatchTree::Leaf(leaf) => {
-                        emit_dispatch_leaf_block(s, st, leaf, sync, cont, &body_ind);
-                    }
-                    _ => emit_dispatch_tree(s, st, sub, sync, cont, &body_ind),
-                }
+                emit_dispatch_tree(s, st, sub, sync, cont, &body_ind);
             }
             writeln!(s, "{}default:", inner).unwrap();
-            if leaf_target_inlined(default) {
-                emit_dispatch_leaf_block(s, st, default, sync, cont, &body_ind);
-            } else {
-                write!(s, "{}", body_ind).unwrap();
-                emit_leaf_inline(s, default, sync, cont);
-                writeln!(s).unwrap();
-            }
+            emit_dispatch_leaf_block(s, st, default, sync, cont, &body_ind);
             writeln!(s, "{}}}", ind).unwrap();
         }
     }
-}
-
-fn leaf_target_inlined(leaf: &DispatchLeaf) -> bool {
-    matches!(leaf, DispatchLeaf::Arm(Body::Inline(_)))
 }
 
 fn emit_dispatch_leaf_block(
@@ -552,43 +517,21 @@ fn emit_dispatch_leaf_block(
         (DispatchLeaf::Fallthrough, None) => writeln!(s, "{}cur = p.PopRet()", ind).unwrap(),
         (DispatchLeaf::Error, Some(n)) => {
             writeln!(s, "{}cur = {}", ind, n).unwrap();
-            writeln!(s, "{}p.ErrorHere(\"unexpected token\")", ind).unwrap();
+            writeln!(s, "{}event = p.ErrorHere(\"unexpected token\"); emitted = true", ind).unwrap();
             writeln!(s, "{}p.RecoverTo(sync_{})", ind, sync).unwrap();
         }
         (DispatchLeaf::Error, None) => {
-            writeln!(s, "{}p.ErrorHere(\"unexpected token\")", ind).unwrap();
+            writeln!(s, "{}event = p.ErrorHere(\"unexpected token\"); emitted = true", ind).unwrap();
             writeln!(s, "{}p.RecoverTo(sync_{})", ind, sync).unwrap();
             writeln!(s, "{}cur = p.PopRet()", ind).unwrap();
         }
     }
 }
 
-fn emit_leaf_inline(s: &mut String, leaf: &DispatchLeaf, sync: u32, cont: Option<u32>) {
-    match (leaf, cont) {
-        (DispatchLeaf::Arm(Body::State(t)), Some(n)) => write!(s, "p.PushRet({}); cur = {}", n, t).unwrap(),
-        (DispatchLeaf::Arm(Body::State(t)), None) => write!(s, "cur = {}", t).unwrap(),
-        (DispatchLeaf::Arm(Body::Inline(_)), _) => unreachable!("inlined arm in inline-emit path"),
-        (DispatchLeaf::Fallthrough, Some(n)) => write!(s, "cur = {}", n).unwrap(),
-        (DispatchLeaf::Fallthrough, None) => write!(s, "cur = p.PopRet()").unwrap(),
-        (DispatchLeaf::Error, Some(n)) => write!(
-            s,
-            "cur = {}; p.ErrorHere(\"unexpected token\"); p.RecoverTo(sync_{})",
-            n, sync
-        )
-        .unwrap(),
-        (DispatchLeaf::Error, None) => write!(
-            s,
-            "p.ErrorHere(\"unexpected token\"); p.RecoverTo(sync_{}); cur = p.PopRet()",
-            sync
-        )
-        .unwrap(),
-    }
-}
-
 fn emit_public_api(s: &mut String, st: &StateTable) {
     writeln!(
         s,
-        "var parserConfig = rt.Config{{K: K, QueueCap: QueueCap, IsSkip: isSkip, Drive: drive}}"
+        "var parserConfig = rt.Config{{K: K, IsSkip: isSkip, Step: step}}"
     )
     .unwrap();
     writeln!(s).unwrap();

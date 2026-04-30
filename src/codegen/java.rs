@@ -331,23 +331,6 @@ fn byte_cond(ranges: &[(u8, u8)]) -> String {
 
 fn emit_tables(s: &mut String, st: &StateTable) {
     writeln!(s, "    private static final int K = {};", st.k).unwrap();
-    writeln!(
-        s,
-        "    /** Hard cap on events the parser's fixed-size queue can hold. */"
-    )
-    .unwrap();
-    writeln!(
-        s,
-        "    /** Equal to the longest emit burst across every state body in this grammar. */"
-    )
-    .unwrap();
-    writeln!(
-        s,
-        "    private static final int QUEUE_CAP = {};",
-        st.queue_cap
-    )
-    .unwrap();
-
     for (name, id) in &st.entry_states {
         writeln!(
             s,
@@ -395,50 +378,42 @@ fn emit_tables(s: &mut String, st: &StateTable) {
 }
 
 fn emit_drive(s: &mut String, st: &StateTable) {
-    writeln!(s, "    private static void drive(Parser p) {{").unwrap();
-    writeln!(
-        s,
-        "        int cur = p.state();"
-    )
-    .unwrap();
-    writeln!(
-        s,
-        "        while (p.queueIsEmpty() && cur != Parser.TERMINATED) {{"
-    )
-    .unwrap();
-    writeln!(s, "            switch (cur) {{").unwrap();
+    writeln!(s, "    private static Event step(Parser p) {{").unwrap();
+    writeln!(s, "        int cur = p.state();").unwrap();
+    writeln!(s, "        Event event = null;").unwrap();
+    writeln!(s, "        switch (cur) {{").unwrap();
     for state in st.states.values() {
         writeln!(
             s,
-            "                case {}: {{ // {}",
+            "            case {}: {{ // {}",
             state.id, state.label
         )
         .unwrap();
         for op in &state.ops {
-            emit_op(s, st, op);
+            emit_op(s, st, op, "                ");
         }
-        writeln!(s, "                    break;").unwrap();
-        writeln!(s, "                }}").unwrap();
+        writeln!(s, "                break;").unwrap();
+        writeln!(s, "            }}").unwrap();
     }
     writeln!(
         s,
-        "                default: throw new IllegalStateException(\"unknown state \" + cur);"
+        "            default: throw new IllegalStateException(\"unknown state \" + cur);"
     )
     .unwrap();
-    writeln!(s, "            }}").unwrap();
     writeln!(s, "        }}").unwrap();
     writeln!(s, "        p.setState(cur);").unwrap();
+    writeln!(s, "        return event;").unwrap();
     writeln!(s, "    }}").unwrap();
     writeln!(s).unwrap();
 }
 
-fn emit_op(s: &mut String, st: &StateTable, op: &Op) {
+fn emit_op(s: &mut String, st: &StateTable, op: &Op, ind: &str) {
     match op {
         Op::Enter(k) => {
-            writeln!(s, "                    p.enter({});", rule_id(st, *k)).unwrap();
+            writeln!(s, "{}event = p.enter({});", ind, rule_id(st, *k)).unwrap();
         }
         Op::Exit(k) => {
-            writeln!(s, "                    p.exit({});", rule_id(st, *k)).unwrap();
+            writeln!(s, "{}event = p.exit({});", ind, rule_id(st, *k)).unwrap();
         }
         Op::Expect {
             kind,
@@ -447,7 +422,8 @@ fn emit_op(s: &mut String, st: &StateTable, op: &Op) {
         } => {
             writeln!(
                 s,
-                "                    p.tryConsume({}, SYNC_{}, \"{}\");",
+                "{}event = p.tryConsume({}, SYNC_{}, \"{}\");",
+                ind,
                 token_id(st, *kind),
                 sync,
                 token_name
@@ -455,50 +431,47 @@ fn emit_op(s: &mut String, st: &StateTable, op: &Op) {
             .unwrap();
         }
         Op::PushRet(r) => {
-            writeln!(s, "                    p.pushRet({});", r).unwrap();
+            writeln!(s, "{}p.pushRet({});", ind, r).unwrap();
         }
         Op::Jump(n) => {
-            writeln!(s, "                    cur = {};", n).unwrap();
+            writeln!(s, "{}cur = {};", ind, n).unwrap();
         }
         Op::Ret => {
-            writeln!(s, "                    cur = p.popRet();").unwrap();
+            writeln!(s, "{}cur = p.popRet();", ind).unwrap();
         }
         Op::Star { first, body, cont, head } => {
-            writeln!(s, "                    if (p.matchesFirst(FIRST_{})) {{", first).unwrap();
-            writeln!(s, "                        p.pushRet({});", head).unwrap();
-            emit_body(s, st, body, "                        ");
-            writeln!(s, "                    }}").unwrap();
+            let inner = format!("{}    ", ind);
+            writeln!(s, "{}if (p.matchesFirst(FIRST_{})) {{", ind, first).unwrap();
+            writeln!(s, "{}p.pushRet({});", inner, head).unwrap();
+            emit_body(s, st, body, &inner);
+            writeln!(s, "{}}}", ind).unwrap();
             match cont {
-                Some(n) => writeln!(s, "                    else cur = {};", n).unwrap(),
-                None => writeln!(s, "                    else cur = p.popRet();").unwrap(),
+                Some(n) => writeln!(s, "{}else cur = {};", ind, n).unwrap(),
+                None => writeln!(s, "{}else cur = p.popRet();", ind).unwrap(),
             }
         }
         Op::Opt { first, body, cont } => {
-            writeln!(s, "                    if (p.matchesFirst(FIRST_{})) {{", first).unwrap();
+            let inner = format!("{}    ", ind);
+            writeln!(s, "{}if (p.matchesFirst(FIRST_{})) {{", ind, first).unwrap();
             if let Some(n) = cont {
-                writeln!(s, "                        p.pushRet({});", n).unwrap();
+                writeln!(s, "{}p.pushRet({});", inner, n).unwrap();
             }
-            emit_body(s, st, body, "                        ");
-            writeln!(s, "                    }}").unwrap();
+            emit_body(s, st, body, &inner);
+            writeln!(s, "{}}}", ind).unwrap();
             match cont {
-                Some(n) => writeln!(s, "                    else cur = {};", n).unwrap(),
-                None => writeln!(s, "                    else cur = p.popRet();").unwrap(),
+                Some(n) => writeln!(s, "{}else cur = {};", ind, n).unwrap(),
+                None => writeln!(s, "{}else cur = p.popRet();", ind).unwrap(),
             }
         }
         Op::Dispatch { tree, sync, cont } => {
-            emit_dispatch_tree(s, st, tree, *sync, *cont, "                    ");
+            emit_dispatch_tree(s, st, tree, *sync, *cont, ind);
         }
     }
 }
 
 fn emit_body(s: &mut String, st: &StateTable, body: &Body, ind: &str) {
-    match body {
-        Body::State(t) => writeln!(s, "{}cur = {};", ind, t).unwrap(),
-        Body::Inline(ops) => {
-            for op in ops {
-                emit_op(s, st, op);
-            }
-        }
+    for op in body {
+        emit_op(s, st, op, ind);
     }
 }
 
@@ -512,15 +485,9 @@ fn emit_dispatch_tree(
 ) {
     match tree {
         DispatchTree::Leaf(leaf) => {
-            if leaf_target_inlined(leaf) {
-                writeln!(s, "{}{{", ind).unwrap();
-                emit_dispatch_leaf_block(s, st, leaf, sync, cont, &format!("{}  ", ind));
-                writeln!(s, "{}}}", ind).unwrap();
-            } else {
-                write!(s, "{}{{ ", ind).unwrap();
-                emit_leaf_inline(s, leaf, sync, cont);
-                writeln!(s, "}}").unwrap();
-            }
+            writeln!(s, "{}{{", ind).unwrap();
+            emit_dispatch_leaf_block(s, st, leaf, sync, cont, &format!("{}  ", ind));
+            writeln!(s, "{}}}", ind).unwrap();
         }
         DispatchTree::Switch {
             depth,
@@ -531,37 +498,18 @@ fn emit_dispatch_tree(
             let inner = format!("{}  ", ind);
             for (kind, sub) in arms {
                 let literal = format!("{}", *kind);
-                match sub {
-                    DispatchTree::Leaf(leaf) if !leaf_target_inlined(leaf) => {
-                        write!(s, "{}case {}: {{ ", inner, literal).unwrap();
-                        emit_leaf_inline(s, leaf, sync, cont);
-                        writeln!(s, "break; }}").unwrap();
-                    }
-                    _ => {
-                        writeln!(s, "{}case {}: {{", inner, literal).unwrap();
-                        emit_dispatch_tree(s, st, sub, sync, cont, &format!("{}  ", inner));
-                        writeln!(s, "{}  break;", inner).unwrap();
-                        writeln!(s, "{}}}", inner).unwrap();
-                    }
-                }
-            }
-            if leaf_target_inlined(default) {
-                writeln!(s, "{}default: {{", inner).unwrap();
-                emit_dispatch_leaf_block(s, st, default, sync, cont, &format!("{}  ", inner));
+                writeln!(s, "{}case {}: {{", inner, literal).unwrap();
+                emit_dispatch_tree(s, st, sub, sync, cont, &format!("{}  ", inner));
                 writeln!(s, "{}  break;", inner).unwrap();
                 writeln!(s, "{}}}", inner).unwrap();
-            } else {
-                write!(s, "{}default: {{ ", inner).unwrap();
-                emit_leaf_inline(s, default, sync, cont);
-                writeln!(s, "break; }}").unwrap();
             }
+            writeln!(s, "{}default: {{", inner).unwrap();
+            emit_dispatch_leaf_block(s, st, default, sync, cont, &format!("{}  ", inner));
+            writeln!(s, "{}  break;", inner).unwrap();
+            writeln!(s, "{}}}", inner).unwrap();
             writeln!(s, "{}}}", ind).unwrap();
         }
     }
-}
-
-fn leaf_target_inlined(leaf: &DispatchLeaf) -> bool {
-    matches!(leaf, DispatchLeaf::Arm(Body::Inline(_)))
 }
 
 fn emit_dispatch_leaf_block(
@@ -582,43 +530,21 @@ fn emit_dispatch_leaf_block(
         (DispatchLeaf::Fallthrough, None) => writeln!(s, "{}cur = p.popRet();", ind).unwrap(),
         (DispatchLeaf::Error, Some(n)) => {
             writeln!(s, "{}cur = {};", ind, n).unwrap();
-            writeln!(s, "{}p.errorHere(\"unexpected token\");", ind).unwrap();
+            writeln!(s, "{}event = p.errorHere(\"unexpected token\");", ind).unwrap();
             writeln!(s, "{}p.recoverTo(SYNC_{});", ind, sync).unwrap();
         }
         (DispatchLeaf::Error, None) => {
-            writeln!(s, "{}p.errorHere(\"unexpected token\");", ind).unwrap();
+            writeln!(s, "{}event = p.errorHere(\"unexpected token\");", ind).unwrap();
             writeln!(s, "{}p.recoverTo(SYNC_{});", ind, sync).unwrap();
             writeln!(s, "{}cur = p.popRet();", ind).unwrap();
         }
     }
 }
 
-fn emit_leaf_inline(s: &mut String, leaf: &DispatchLeaf, sync: u32, cont: Option<u32>) {
-    match (leaf, cont) {
-        (DispatchLeaf::Arm(Body::State(t)), Some(n)) => write!(s, "p.pushRet({}); cur = {}; ", n, t).unwrap(),
-        (DispatchLeaf::Arm(Body::State(t)), None) => write!(s, "cur = {}; ", t).unwrap(),
-        (DispatchLeaf::Arm(Body::Inline(_)), _) => unreachable!("inlined arm in inline-emit path"),
-        (DispatchLeaf::Fallthrough, Some(n)) => write!(s, "cur = {}; ", n).unwrap(),
-        (DispatchLeaf::Fallthrough, None) => write!(s, "cur = p.popRet(); ").unwrap(),
-        (DispatchLeaf::Error, Some(n)) => write!(
-            s,
-            "cur = {}; p.errorHere(\"unexpected token\"); p.recoverTo(SYNC_{}); ",
-            n, sync
-        )
-        .unwrap(),
-        (DispatchLeaf::Error, None) => write!(
-            s,
-            "p.errorHere(\"unexpected token\"); p.recoverTo(SYNC_{}); cur = p.popRet(); ",
-            sync
-        )
-        .unwrap(),
-    }
-}
-
 fn emit_public_api(s: &mut String, st: &StateTable) {
     writeln!(
         s,
-        "    private static final ParserConfig CONFIG = new ParserConfig(K, QUEUE_CAP, k -> isSkip(k), Grammar::drive);"
+        "    private static final ParserConfig CONFIG = new ParserConfig(K, k -> isSkip(k), Grammar::step);"
     )
     .unwrap();
     writeln!(s).unwrap();

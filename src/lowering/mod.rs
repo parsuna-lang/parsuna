@@ -1,18 +1,26 @@
 //! Lower an [`AnalyzedGrammar`] to a flat [`StateTable`] — the backend-agnostic
 //! shape every target language gets compiled from.
 //!
-//! Lowering runs in three phases:
+//! Pipeline:
 //! 1. [`build`]: translate rule bodies into a `Block`/`Op` IR with
 //!    symbolic block ids and interned FIRST/SYNC sets.
-//! 2. [`layout`]: flatten the blocks into numeric state ids, build the
-//!    dispatch trees, and compile the lexer DFA.
-//! 3. [`fuse`]: splice deterministic jump chains and drop unreachable
-//!    states so the emitted tables stay small.
+//! 2. [`layout`]: flatten the blocks into numeric state ids, build
+//!    the dispatch trees, and compile the lexer DFA. The block's
+//!    last op is emitted in *tail form* (`Ret`, tail-call,
+//!    `cont: None`), so the runtime's one-event-per-step invariant
+//!    holds with zero optimizer passes run.
+//! 3. [`optimize`]: shrink the table — inline `Jump` chains, inline
+//!    branch bodies, fold trampolines, drop dead states. Pure
+//!    performance; correctness doesn't depend on it.
+//! 4. [`validate`]: assert the runtime invariants over the final
+//!    table. Mandatory final step — catches any bug in layout or
+//!    optimize before codegen sees the table.
 
 mod build;
-pub mod fuse;
 mod layout;
 pub mod lexer_dfa;
+pub mod optimize;
+pub mod validate;
 
 use std::collections::BTreeMap;
 
@@ -106,19 +114,6 @@ pub struct StateTable {
     pub entry_states: Vec<(String, StateId)>,
     /// Lookahead required to disambiguate every alternative (LL(k)).
     pub k: usize,
-    /// Hard cap on the runtime event queue: the longest burst of
-    /// events any single `drive` invocation can push between two
-    /// yields, computed by [`max_event_burst`] after fuse runs.
-    /// Backends emit this as a `QUEUE_CAP` constant and the runtime
-    /// pre-allocates a fixed-size ring sized to exactly this many
-    /// slots. No growth, no fallback path.
-    ///
-    /// Skip tokens and recovery garbage do **not** add to the burst:
-    /// each is emitted one event per `next_event` iteration via
-    /// pump-mode / recovery-mode, which yield to the consumer
-    /// between pushes. So the cap holds even on input-dependent
-    /// long comment runs and long error-recovery skips.
-    pub queue_cap: usize,
     /// The compiled lexer DFA.
     pub lexer_dfa: Vec<DfaState>,
 }
@@ -146,8 +141,8 @@ pub struct TokenInfo {
 /// flow within a state is explicit (`Jump`, `PushRet`/`Ret`) and inter-state
 /// flow is fall-through to the next numeric id.
 ///
-/// `PartialEq` is derived so the [`fuse`](crate::lowering::fuse) fixpoint
-/// loop can detect when an iteration produced no change.
+/// `PartialEq` is derived so the [`optimize`](crate::lowering::optimize)
+/// fixpoint loop can detect when an iteration produced no change.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Op {
     /// Emit an `Enter` event for this rule-kind id.
@@ -178,19 +173,20 @@ pub enum Op {
     Star {
         /// FIRST-set id the body opens with.
         first: FirstSetId,
-        /// Body of one iteration. Initially [`Body::State`]; the fuse
-        /// branch-inlining pass may move the target state's ops into a
-        /// [`Body::Inline`] when the target's only external reference
-        /// was this `body`. See [`Body`].
+        /// Body of one iteration: a sequence of ops emitted at the
+        /// call site. Layout starts every body as a single `Jump` to
+        /// a freshly allocated state; the
+        /// [`optimize`](crate::lowering::optimize) inline pass may
+        /// grow it into the full inlined sequence. See [`Body`].
         body: Body,
         /// What to do when the loop exits (lookahead misses `first`).
-        /// `Some(state)` is the original lowering shape — `cur = state`.
-        /// `None` is a tail call — `cur = ret()` directly. The
-        /// [`fuse`](crate::lowering::fuse) tail-call elimination pass
-        /// rewrites `Some(s)` to `None` when `s` is a pure-`Ret`
-        /// trampoline; by the time the loop misses, every iteration has
-        /// already pushed *and* popped its `head` frame, so the stack
-        /// is back to whatever was there when the loop was entered.
+        /// `Some(state)` is push-and-jump — `cur = state`. `None` is
+        /// a tail call — `cur = ret()` directly. Layout emits `None`
+        /// when the Star is the last op of its block (the body's
+        /// trailing `Ret` already pops *our* caller's continuation),
+        /// and `optimize::fold_trampolines` later rewrites
+        /// `Some(s) → None` whenever `s` turns out to be a
+        /// pure-`Ret` trampoline.
         ///
         /// Note that `head` itself is never tail-call-eligible: it's
         /// the state hosting this `Op::Star`, so it always has at
@@ -198,8 +194,8 @@ pub enum Op {
         cont: Option<StateId>,
         /// State to return to after `body` finishes — the loop-head.
         /// Initially the state that contains this Star, but stays
-        /// pointing at the original loop-head if the Star op is later
-        /// inlined into another state by the fuse pass.
+        /// pointing at the original loop-head if the Star op is
+        /// later spliced into another state by the optimizer.
         head: StateId,
     },
     /// `?` branch: if lookahead matches `first`, call `body` once,
@@ -210,13 +206,13 @@ pub enum Op {
         first: FirstSetId,
         /// Body to call when taken. See [`Body`].
         body: Body,
-        /// Continuation. `Some(state)` is the original lowering shape
-        /// — `push_ret(state); cur = body` on match, `cur = state` on
+        /// Continuation. `Some(state)` is push-and-jump —
+        /// `push_ret(state); cur = body` on match, `cur = state` on
         /// miss. `None` is a tail call: `cur = body` on match (the
-        /// body's trailing `Ret` returns to *our* caller), and `cur =
-        /// ret()` on miss. The [`fuse`](crate::lowering::fuse)
-        /// tail-call elimination pass rewrites `Some(s)` to `None`
-        /// when `s` is a pure-`Ret` trampoline.
+        /// body's trailing `Ret` returns to *our* caller) and
+        /// `cur = ret()` on miss. Layout emits `None` for last-op
+        /// Opts; `optimize::fold_trampolines` later flips
+        /// `Some(s) → None` for pure-`Ret` trampoline targets.
         cont: Option<StateId>,
     },
     /// `Alt` dispatch: pick one arm based on up to `k` tokens of
@@ -238,43 +234,13 @@ pub enum Op {
 /// The "where to call into" half of a branchy op (`Op::Opt`,
 /// `Op::Star`, [`DispatchLeaf::Arm`]).
 ///
-/// Layout always emits [`Body::State`] — a normal state-id transition
-/// the dispatch loop bounces through. The fuse branch-inlining pass
-/// may rewrite that to [`Body::Inline`] when the target state had only
-/// one external reference (this op): the target's ops move *into* the
-/// op, and the now-orphan target state is dropped by `eliminate_dead`.
-///
-/// The codegens pattern-match: `State(s)` emits `cur = s;`,
-/// `Inline(ops)` recursively emits the inlined ops at the call site,
-/// saving the dispatch hop into a state that only one place ever
-/// reaches.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Body {
-    /// Transfer control to a separate state (and let the dispatch
-    /// loop pick it up on the next iteration).
-    State(StateId),
-    /// Run these ops directly inside the calling branch arm. The
-    /// final op is the inlined state's terminator (`Ret`/`Jump`/
-    /// another branchy op) and is responsible for the post-body
-    /// transition.
-    Inline(Vec<Op>),
-}
-
-impl Body {
-    /// True iff the body is still a [`Body::State`] — i.e. not yet
-    /// inlined. Convenience for the few sites that just want to know
-    /// whether a state-id is in play.
-    pub fn is_state(&self) -> bool {
-        matches!(self, Body::State(_))
-    }
-    /// The state id this body refers to, if it hasn't been inlined.
-    pub fn state(&self) -> Option<StateId> {
-        match self {
-            Body::State(s) => Some(*s),
-            Body::Inline(_) => None,
-        }
-    }
-}
+/// A body is just a sequence of ops emitted at the call site.
+/// `Op::Star`/`Op::Opt`/`Op::Dispatch` themselves produce no events —
+/// they're pure dispatch — so the body's ops *are* what runs when an
+/// arm is taken. A body that contains a single `Op::Jump(s)` is the
+/// "transition to a separate state" form; anything richer is fully
+/// inlined.
+pub type Body = Vec<Op>;
 
 /// Terminal action at a leaf of a [`DispatchTree`].
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -353,7 +319,7 @@ fn build_trie(
     let mut terminal: Option<DispatchLeaf> = None;
     for entry in entries {
         if entry.0.len() == depth {
-            terminal = Some(DispatchLeaf::Arm(Body::State(entry.1)));
+            terminal = Some(DispatchLeaf::Arm(vec![Op::Jump(entry.1)]));
             break;
         }
         surviving.push(entry.clone());
@@ -402,32 +368,35 @@ pub struct State {
     pub ops: Vec<Op>,
 }
 
-/// Toggle bag for the parser-state-table optimizer passes that run
-/// inside `fuse`. Defaults to "all on"; turning a flag off skips
-/// that pass and is safe in the sense that the generated parser
-/// still works, just less optimized (larger state count, more
-/// dispatch hops). Backed by the CLI's global `--no-*` flags so
-/// every command (`generate`, `debug`, …) sees the same lowering.
+/// Toggle bag for the optimizer passes that run inside
+/// [`optimize`](crate::lowering::optimize). Defaults to "all on";
+/// turning any flag off is safe — the generated parser still works,
+/// just with more state hops. Layout produces invariant-correct
+/// output on its own (every block's last op is in tail form), so
+/// these are pure performance toggles.
 ///
-/// DFA-level toggles live in [`lexer_dfa::DfaOpts`] — they're a
-/// separate concern (the lexer pipeline doesn't care about state
-/// splicing or TCE, and `fuse` doesn't care about DFA minimization).
+/// DFA-level toggles live in [`lexer_dfa::DfaOpts`] — separate
+/// concern.
 #[derive(Clone, Copy, Debug)]
 pub struct LoweringOpts {
-    /// Splice straight-line `Jump` chains into their predecessors.
-    /// Off: every block-level op stays in its own state.
+    /// Absorb a state's trailing `Jump(N)` chain into its body —
+    /// state `[..., Jump(N)]` becomes `[..., N's ops]` when the
+    /// result still satisfies the runtime invariant. Off: every
+    /// block-level op stays in its own state.
     pub splice_chains: bool,
-    /// Eliminate `PushRet`/`Opt`/`Dispatch`/`Star` continuations whose
-    /// target is a pure-`Ret` trampoline. Off: trampolines stay live
-    /// and the dispatch loop bounces through them.
+    /// Drop `Op::PushRet(s)` and rewrite `cont: Some(s) → None`
+    /// when `s` is a pure-`Op::Ret` trampoline. Off: trampolines
+    /// stay live and the dispatch loop bounces through them.
     pub tce: bool,
-    /// Move single-predecessor branchy targets into the calling
-    /// `Op::Opt`/`Op::Star`/dispatch arm as `Body::Inline`. Off: every
-    /// branch target stays a separate state.
+    /// Replace a body that's just `[Op::Jump(s)]` inside an
+    /// `Op::Opt`/`Op::Star`/dispatch arm with `s`'s ops directly.
+    /// Off: the loop-head / branch-head state stays as a separate
+    /// 0-event state and the runtime walks through it on each
+    /// iteration.
     pub branch_inline: bool,
-    /// Drop states no entry can reach after fuse runs. Off: dead
-    /// states linger in the table; the generated parser still works
-    /// (they're just never entered) but the emitted source is bigger.
+    /// Drop states no entry can reach. Off: dead states linger in
+    /// the table; the generated parser still works (they're never
+    /// entered) but the emitted source is bigger.
     pub dce: bool,
 }
 
@@ -450,9 +419,13 @@ pub fn lower(ag: &AnalyzedGrammar) -> StateTable {
     lower_with_opts(ag, LoweringOpts::default(), lexer_dfa::DfaOpts::default())
 }
 
-/// Lower an analyzed grammar into a [`StateTable`]: build → layout → fuse.
-/// `lopts` controls fuse's parser-state passes; `dopts` controls the
-/// lexer DFA passes inside layout.
+/// Lower an analyzed grammar into a [`StateTable`]:
+/// build → layout → optimize → validate.
+///
+/// `lopts` toggles the optimizer passes; `dopts` toggles the
+/// lexer-DFA passes inside layout. The validator at the end runs
+/// unconditionally — it's the contract enforcement, not an
+/// optimization.
 pub fn lower_with_opts(
     ag: &AnalyzedGrammar,
     lopts: LoweringOpts,
@@ -460,75 +433,10 @@ pub fn lower_with_opts(
 ) -> StateTable {
     let program = build::build(ag);
     let mut table = layout::layout(program, ag, dopts);
-    fuse::fuse_with_opts(&mut table, lopts);
-    table.queue_cap = max_event_burst(&table);
+    optimize::optimize(&mut table, lopts);
     mark_first_set_references(&mut table);
+    validate::assert_runtime_invariants(&table);
     table
-}
-
-/// Compute the maximum number of structural events that one state
-/// body can push onto the parser's queue when executed end-to-end.
-///
-/// The dispatch loop only yields between state bodies, so this is
-/// the per-yield queue burst on the success path. With branch
-/// inlining ([`fuse::inline_branch_targets`]) inlined `Body::Inline`
-/// ops execute as part of the calling body and therefore contribute
-/// to that body's burst — the recursion handles them.
-///
-/// `Body::State` transitions count as 0 here: the called state runs
-/// in a *different* dispatch iteration and contributes to its own
-/// burst, not ours. Skip tokens accumulating between structural
-/// events also aren't included — they're input-dependent.
-pub fn max_event_burst(table: &StateTable) -> usize {
-    table
-        .states
-        .values()
-        .map(|s| events_in_ops(&s.ops))
-        .max()
-        .unwrap_or(0)
-}
-
-fn events_in_ops(ops: &[Op]) -> usize {
-    ops.iter().map(events_in_op).sum()
-}
-
-fn events_in_op(op: &Op) -> usize {
-    match op {
-        Op::Enter(_) | Op::Exit(_) | Op::Expect { .. } => 1,
-        Op::PushRet(_) | Op::Jump(_) | Op::Ret => 0,
-        Op::Star { body, .. } | Op::Opt { body, .. } => events_in_body(body),
-        Op::Dispatch { tree, .. } => max_arm_events(tree),
-    }
-}
-
-fn events_in_body(body: &Body) -> usize {
-    match body {
-        Body::State(_) => 0,
-        Body::Inline(ops) => events_in_ops(ops),
-    }
-}
-
-fn max_arm_events(tree: &DispatchTree) -> usize {
-    fn arm(leaf: &DispatchLeaf) -> usize {
-        match leaf {
-            DispatchLeaf::Arm(b) => events_in_body(b),
-            // Fallthrough is a pure state transition — 0 events.
-            DispatchLeaf::Fallthrough => 0,
-            // Error pushes one `Event::Error` before recovery-mode
-            // takes over; that one event is part of this state body's
-            // burst and must fit within `QUEUE_CAP`.
-            DispatchLeaf::Error => 1,
-        }
-    }
-    match tree {
-        DispatchTree::Leaf(l) => arm(l),
-        DispatchTree::Switch { arms, default, .. } => arm(default).max(
-            arms.iter()
-                .map(|(_, sub)| max_arm_events(sub))
-                .max()
-                .unwrap_or(0),
-        ),
-    }
 }
 
 /// Set [`FirstSet::has_references`] on every entry the runtime will
@@ -581,17 +489,14 @@ fn format_op(op: &Op) -> String {
         Op::PushRet(r) => format!("PushRet({})", r),
         Op::Jump(n) => format!("Jump({})", n),
         Op::Ret => "Ret".to_string(),
-        Op::Star { body, .. } => format!("Star -> {}", body_label(body)),
-        Op::Opt { body, .. } => format!("Opt -> {}", body_label(body)),
+        Op::Star { body, .. } => format!("Star[{}]", format_body(body)),
+        Op::Opt { body, .. } => format!("Opt[{}]", format_body(body)),
         Op::Dispatch { tree, .. } => format!("Dispatch[{}]", dispatch_tree_shape(tree)),
     }
 }
 
-fn body_label(body: &Body) -> String {
-    match body {
-        Body::State(s) => s.to_string(),
-        Body::Inline(_) => "<inlined>".into(),
-    }
+fn format_body(body: &Body) -> String {
+    body.iter().map(format_op).collect::<Vec<_>>().join(" ; ")
 }
 
 fn dispatch_tree_shape(tree: &DispatchTree) -> String {

@@ -9,7 +9,7 @@ use super::generated::{self, Event, RuleKind, Token, TokenKind};
 fn event_span(e: &Event<'_>) -> Span {
     match e {
         Event::Enter { pos, .. } | Event::Exit { pos, .. } => Span::point(*pos),
-        Event::Token(t) => t.span,
+        Event::Token(t) | Event::Garbage(t) => t.span,
         Event::Error(err) => err.span,
     }
 }
@@ -101,6 +101,9 @@ impl<'a, I: Iterator<Item = Event<'a>>> Reader<'a, I> {
             match self.advance() {
                 Some(Event::Token(t)) => return t,
                 Some(Event::Error(d)) => self.issues.push(d),
+                Some(Event::Garbage(_)) => {
+                    // Recovery skipped this token — keep walking.
+                }
                 Some(Event::Enter { pos, .. }) | Some(Event::Exit { pos, .. }) => {
                     let span = Span::point(pos);
                     self.issues

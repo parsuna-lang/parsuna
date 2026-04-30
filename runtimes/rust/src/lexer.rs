@@ -4,6 +4,25 @@ use std::io::Read;
 use crate::events::{Token, TokenKindEnum};
 use crate::span::{Pos, Span};
 
+/// Number of bytes in the UTF-8 sequence that starts with `b`.
+///
+/// For continuation bytes (`10xxxxxx`) returns `1` — the caller is expected
+/// to be positioned at the start of a codepoint or a garbage byte, and
+/// advancing one byte is the correct recovery step either way.
+pub fn utf8_char_len(b: u8) -> usize {
+    if b < 0x80 {
+        1
+    } else if b < 0xC0 {
+        1
+    } else if b < 0xE0 {
+        2
+    } else if b < 0xF0 {
+        3
+    } else {
+        4
+    }
+}
+
 /// Result of running the compiled DFA over a byte slice.
 ///
 /// `best_len`/`best_kind` are the longest match found. `best_kind` is
@@ -44,22 +63,6 @@ pub trait LexerBackend<'a, TK: TokenKindEnum> {
     fn next_token(&mut self) -> Token<'a, TK>;
 }
 
-impl<'a, TK: TokenKindEnum, D: DfaMatcher<TK>> LexerBackend<'a, TK> for Scanner<'a, TK, D> {
-    #[inline(always)]
-    fn next_token(&mut self) -> Token<'a, TK> {
-        Scanner::next_token(self)
-    }
-}
-
-impl<R: Read, TK: TokenKindEnum, D: DfaMatcher<TK>> LexerBackend<'static, TK>
-    for StreamingLexer<R, TK, D>
-{
-    #[inline]
-    fn next_token(&mut self) -> Token<'static, TK> {
-        StreamingLexer::next_token(self)
-    }
-}
-
 /// In-memory, zero-copy lexer that runs the generated DFA over a `&str`.
 ///
 /// Tokens borrow their `text` straight from the source string, so no
@@ -88,44 +91,6 @@ impl<'a, TK: TokenKindEnum, D: DfaMatcher<TK>> Scanner<'a, TK, D> {
             col: 1,
             _tk: std::marker::PhantomData,
             _dfa: std::marker::PhantomData,
-        }
-    }
-
-    /// Produce the next token, advancing the scanner.
-    ///
-    /// Behaviour at the boundary: if no token pattern matches at the current
-    /// position, the scanner emits a single-codepoint token with `kind: None`
-    /// so the parser can surface an error and recover. On exhaustion it
-    /// emits repeated `Some(TK::EOF)` tokens.
-    #[inline]
-    pub fn next_token(&mut self) -> Token<'a, TK> {
-        if self.pos >= self.buf.len() {
-            let pos = self.cur_pos();
-            return Token {
-                kind: Some(TK::EOF),
-                span: Span::point(pos),
-                text: Cow::Borrowed(""),
-            };
-        }
-        let m = D::longest_match(self.buf, self.pos);
-        let start = self.cur_pos();
-        if m.best_len > 0 {
-            let text: Cow<'a, str> = Cow::Borrowed(&self.src[self.pos..self.pos + m.best_len]);
-            self.advance(m.best_len);
-            Token {
-                kind: m.best_kind,
-                span: Span::new(start, self.cur_pos()),
-                text,
-            }
-        } else {
-            let ch_len = utf8_char_len(self.buf[self.pos]).min(self.buf.len() - self.pos);
-            let text: Cow<'a, str> = Cow::Borrowed(&self.src[self.pos..self.pos + ch_len]);
-            self.advance(ch_len);
-            Token {
-                kind: None,
-                span: Span::new(start, self.cur_pos()),
-                text,
-            }
         }
     }
 
@@ -164,13 +129,44 @@ impl<'a, TK: TokenKindEnum, D: DfaMatcher<TK>> Scanner<'a, TK, D> {
     }
 }
 
-/// Read a `Read` into a `String` in one shot. Convenience wrapper for
-/// callers that want to hand a file or stream to [`Scanner`] after slurping
-/// it to memory.
-pub fn slurp_reader<R: Read>(mut reader: R) -> std::io::Result<String> {
-    let mut s = String::new();
-    reader.read_to_string(&mut s)?;
-    Ok(s)
+impl<'a, TK: TokenKindEnum, D: DfaMatcher<TK>> LexerBackend<'a, TK> for Scanner<'a, TK, D> {
+    /// Produce the next token, advancing the scanner.
+    ///
+    /// Behaviour at the boundary: if no token pattern matches at the current
+    /// position, the scanner emits a single-codepoint token with `kind: None`
+    /// so the parser can surface an error and recover. On exhaustion it
+    /// emits repeated `Some(TK::EOF)` tokens.
+    #[inline]
+    fn next_token(&mut self) -> Token<'a, TK> {
+        if self.pos >= self.buf.len() {
+            let pos = self.cur_pos();
+            return Token {
+                kind: Some(TK::EOF),
+                span: Span::point(pos),
+                text: Cow::Borrowed(""),
+            };
+        }
+        let m = D::longest_match(self.buf, self.pos);
+        let start = self.cur_pos();
+        if m.best_len > 0 {
+            let text: Cow<'a, str> = Cow::Borrowed(&self.src[self.pos..self.pos + m.best_len]);
+            self.advance(m.best_len);
+            Token {
+                kind: m.best_kind,
+                span: Span::new(start, self.cur_pos()),
+                text,
+            }
+        } else {
+            let ch_len = utf8_char_len(self.buf[self.pos]).min(self.buf.len() - self.pos);
+            let text: Cow<'a, str> = Cow::Borrowed(&self.src[self.pos..self.pos + ch_len]);
+            self.advance(ch_len);
+            Token {
+                kind: None,
+                span: Span::new(start, self.cur_pos()),
+                text,
+            }
+        }
+    }
 }
 
 const STREAM_CHUNK: usize = 16 * 1024;
@@ -211,47 +207,6 @@ impl<R: Read, TK: TokenKindEnum, D: DfaMatcher<TK>> StreamingLexer<R, TK, D> {
         }
     }
 
-    /// Produce the next token from the stream. See [`Scanner::next_token`]
-    /// for the overall contract; the only difference is that `text` is
-    /// owned because the buffer is not stable across calls.
-    ///
-    /// Token-spanning-buffer-boundary handling: we pre-read a chunk before
-    /// matching, then re-drive the compiled matcher with more buffer if the
-    /// match saturated the view without hitting EOF. This can re-scan the
-    /// same token prefix but keeps the compiled DFA a pure slice function
-    /// rather than one entangled with the reader.
-    pub fn next_token(&mut self) -> Token<'static, TK> {
-        self.ensure_bytes(STREAM_CHUNK);
-        if self.view().is_empty() {
-            let p = self.pos();
-            return Token {
-                kind: Some(TK::EOF),
-                span: Span::point(p),
-                text: Cow::Borrowed(""),
-            };
-        }
-        let (len, kind) = self.longest_match();
-        let start = self.pos();
-        if len > 0 {
-            let text = Cow::Owned(String::from_utf8_lossy(&self.view()[..len]).into_owned());
-            self.consume(len);
-            Token {
-                kind,
-                span: Span::new(start, self.pos()),
-                text,
-            }
-        } else {
-            let ch_len = utf8_char_len(self.view()[0]).min(self.view().len());
-            let text = Cow::Owned(String::from_utf8_lossy(&self.view()[..ch_len]).into_owned());
-            self.consume(ch_len);
-            Token {
-                kind: None,
-                span: Span::new(start, self.pos()),
-                text,
-            }
-        }
-    }
-
     fn longest_match(&mut self) -> (usize, Option<TK>) {
         loop {
             let view_slice = &self.buf[self.buf_pos..];
@@ -267,6 +222,7 @@ impl<R: Read, TK: TokenKindEnum, D: DfaMatcher<TK>> StreamingLexer<R, TK, D> {
     fn pos(&self) -> Pos {
         Pos::new(self.offset, self.line, self.col)
     }
+
     fn view(&self) -> &[u8] {
         &self.buf[self.buf_pos..]
     }
@@ -324,21 +280,47 @@ impl<R: Read, TK: TokenKindEnum, D: DfaMatcher<TK>> StreamingLexer<R, TK, D> {
     }
 }
 
-/// Number of bytes in the UTF-8 sequence that starts with `b`.
-///
-/// For continuation bytes (`10xxxxxx`) returns `1` — the caller is expected
-/// to be positioned at the start of a codepoint or a garbage byte, and
-/// advancing one byte is the correct recovery step either way.
-pub fn utf8_char_len(b: u8) -> usize {
-    if b < 0x80 {
-        1
-    } else if b < 0xC0 {
-        1
-    } else if b < 0xE0 {
-        2
-    } else if b < 0xF0 {
-        3
-    } else {
-        4
+impl<R: Read, TK: TokenKindEnum, D: DfaMatcher<TK>> LexerBackend<'static, TK>
+    for StreamingLexer<R, TK, D>
+{
+    /// Produce the next token from the stream. See [`Scanner::next_token`]
+    /// for the overall contract; the only difference is that `text` is
+    /// owned because the buffer is not stable across calls.
+    ///
+    /// Token-spanning-buffer-boundary handling: we pre-read a chunk before
+    /// matching, then re-drive the compiled matcher with more buffer if the
+    /// match saturated the view without hitting EOF. This can re-scan the
+    /// same token prefix but keeps the compiled DFA a pure slice function
+    /// rather than one entangled with the reader.
+    fn next_token(&mut self) -> Token<'static, TK> {
+        self.ensure_bytes(STREAM_CHUNK);
+        if self.view().is_empty() {
+            let p = self.pos();
+            return Token {
+                kind: Some(TK::EOF),
+                span: Span::point(p),
+                text: Cow::Borrowed(""),
+            };
+        }
+        let (len, kind) = self.longest_match();
+        let start = self.pos();
+        if len > 0 {
+            let text = Cow::Owned(String::from_utf8_lossy(&self.view()[..len]).into_owned());
+            self.consume(len);
+            Token {
+                kind,
+                span: Span::new(start, self.pos()),
+                text,
+            }
+        } else {
+            let ch_len = utf8_char_len(self.view()[0]).min(self.view().len());
+            let text = Cow::Owned(String::from_utf8_lossy(&self.view()[..ch_len]).into_owned());
+            self.consume(ch_len);
+            Token {
+                kind: None,
+                span: Span::new(start, self.pos()),
+                text,
+            }
+        }
     }
 }

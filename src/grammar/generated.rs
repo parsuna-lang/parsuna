@@ -402,19 +402,16 @@ impl DfaMatcher<TokenKind> for LexerDfa {
 
 /// Lookahead required to disambiguate every alternative (LL(k)).
 pub const K: usize = 1;
-/// Hard cap on events the parser's fixed-size queue can hold.
-/// Equal to the longest emit burst across every state body in this grammar.
-pub const QUEUE_CAP: usize = 2;
 const ENTRY_FILE: u32 = 1;
-const ENTRY_DECL: u32 = 7;
-const ENTRY_ANNOTS: u32 = 17;
-const ENTRY_ANNOT: u32 = 27;
-const ENTRY_ALT_EXPR: u32 = 31;
-const ENTRY_SEQ_EXPR: u32 = 39;
-const ENTRY_GROUP: u32 = 64;
-const ENTRY_ATOM: u32 = 70;
-const ENTRY_CHAR_PRIMARY: u32 = 82;
-const ENTRY_NEG_CLASS: u32 = 94;
+const ENTRY_DECL: u32 = 5;
+const ENTRY_ANNOTS: u32 = 11;
+const ENTRY_ANNOT: u32 = 16;
+const ENTRY_ALT_EXPR: u32 = 19;
+const ENTRY_SEQ_EXPR: u32 = 22;
+const ENTRY_GROUP: u32 = 27;
+const ENTRY_ATOM: u32 = 31;
+const ENTRY_CHAR_PRIMARY: u32 = 34;
+const ENTRY_NEG_CLASS: u32 = 39;
 
 
 static SYNC_0: &[TokenKind] = &[TokenKind::Eof];
@@ -431,7 +428,7 @@ pub struct Grammar;
 /// Parser alias pinning the grammar and lookahead. `L` is any
 /// [`LexerBackend`]; the generated `parse_*_from_str`/`parse_*_from_reader`
 /// helpers build a parser with either [`Scanner`] or [`StreamingLexer`].
-pub type Parser<'a, L> = parsuna_rt::Parser<'a, L, K, QUEUE_CAP, Grammar>;
+pub type Parser<'a, L> = parsuna_rt::Parser<'a, L, K, Grammar>;
 impl parsuna_rt::Drive<K> for Grammar {
     type TokenKind = TokenKind;
     type RuleKind = RuleKind;
@@ -443,357 +440,392 @@ impl parsuna_rt::Drive<K> for Grammar {
     }
 
     #[inline]
-    fn drive<'a, const CAP: usize, L: LexerBackend<'a, Self::TokenKind>>(p: &mut parsuna_rt::Parser<'a, L, K, CAP, Self>) {
+    fn step<'a, L: LexerBackend<'a, Self::TokenKind>>(p: &mut parsuna_rt::Parser<'a, L, K, Self>) -> Option<parsuna_rt::Event<'a, TokenKind, RuleKind>> {
         let mut cur = p.state();
-        while p.queue_is_empty() && cur != TERMINATED {
-            match cur {
-                1 => { // file:enter
-                    p.enter(RuleKind::File);
-                    match p.look(0).kind {
-                        Some(TokenKind::Ident) => {
-                            p.push_ret(2);
-                            cur = 5;
-                        }
-                        _ => {
-                            cur = 3;
-                        }
+        let mut event: Option<parsuna_rt::Event<'a, TokenKind, RuleKind>> = None;
+        match cur {
+            1 => { // file:enter
+                event = Some(p.enter(RuleKind::File));
+                match p.look(0).kind {
+                    Some(TokenKind::Ident) => {
+                        p.push_ret(2);
+                        cur = 4;
+                    }
+                    _ => {
+                        cur = 3;
                     }
                 }
-                2 => { // file:star
-                    match p.look(0).kind {
-                        Some(TokenKind::Ident) => {
-                            p.push_ret(2);
-                            cur = 5;
-                        }
-                        _ => {
-                            cur = 3;
-                        }
-                    }
-                }
-                3 => { // file:exit
-                    p.exit(RuleKind::File);
-                    cur = p.ret();
-                }
-                5 => { // file:star-body:call:decl
-                    p.enter(RuleKind::Decl);
-                    p.expect(TokenKind::Ident, SYNC_1, "expected IDENT");
-                    cur = 9;
-                }
-                7 => { // decl:enter
-                    p.enter(RuleKind::Decl);
-                    p.expect(TokenKind::Ident, SYNC_1, "expected IDENT");
-                    cur = 9;
-                }
-                9 => { // decl:expect:EQ
-                    p.expect(TokenKind::Eq, SYNC_1, "expected EQ");
-                    p.push_ret(11);
-                    cur = 31;
-                }
-                11 => { // decl:opt
-                    match p.look(0).kind {
-                        Some(TokenKind::Lbrack) => {
-                            p.push_ret(12);
-                            p.enter(RuleKind::Annots);
-                            p.expect(TokenKind::Lbrack, SYNC_1, "expected LBRACK");
-                            p.push_ret(20);
-                            cur = 27;
-                        }
-                        _ => {
-                            cur = 12;
-                        }
-                    }
-                }
-                12 => { // decl:expect:SEMI
-                    p.expect(TokenKind::Semi, SYNC_1, "expected SEMI");
-                    cur = 13;
-                }
-                13 => { // decl:exit
-                    p.exit(RuleKind::Decl);
-                    cur = p.ret();
-                }
-                17 => { // annots:enter
-                    p.enter(RuleKind::Annots);
-                    p.expect(TokenKind::Lbrack, SYNC_1, "expected LBRACK");
-                    p.push_ret(20);
-                    cur = 27;
-                }
-                20 => { // annots:star
-                    match p.look(0).kind {
-                        Some(TokenKind::Comma) => {
-                            p.push_ret(20);
-                            p.expect(TokenKind::Comma, SYNC_1, "expected COMMA");
-                            cur = 27;
-                        }
-                        _ => {
-                            cur = 21;
-                        }
-                    }
-                }
-                21 => { // annots:expect:RBRACK
-                    p.expect(TokenKind::Rbrack, SYNC_1, "expected RBRACK");
-                    cur = 22;
-                }
-                22 => { // annots:exit
-                    p.exit(RuleKind::Annots);
-                    cur = p.ret();
-                }
-                27 => { // annot:enter
-                    p.enter(RuleKind::Annot);
-                    p.expect(TokenKind::Ident, SYNC_2, "expected IDENT");
-                    cur = 29;
-                }
-                29 => { // annot:exit
-                    p.exit(RuleKind::Annot);
-                    cur = p.ret();
-                }
-                31 => { // alt_expr:enter
-                    p.enter(RuleKind::AltExpr);
-                    p.push_ret(33);
-                    p.enter(RuleKind::SeqExpr);
-                    match p.look(0).kind {
-                        Some(TokenKind::Lparen) | Some(TokenKind::Dot) | Some(TokenKind::Bang) | Some(TokenKind::String) | Some(TokenKind::Char) | Some(TokenKind::Ident) => {
-                            p.push_ret(40);
-                            cur = 43;
-                        }
-                        _ => {
-                            cur = 41;
-                        }
-                    }
-                }
-                33 => { // alt_expr:star
-                    match p.look(0).kind {
-                        Some(TokenKind::Pipe) => {
-                            p.push_ret(33);
-                            p.expect(TokenKind::Pipe, SYNC_3, "expected PIPE");
-                            cur = 39;
-                        }
-                        _ => {
-                            cur = 34;
-                        }
-                    }
-                }
-                34 => { // alt_expr:exit
-                    p.exit(RuleKind::AltExpr);
-                    cur = p.ret();
-                }
-                39 => { // seq_expr:enter
-                    p.enter(RuleKind::SeqExpr);
-                    match p.look(0).kind {
-                        Some(TokenKind::Lparen) | Some(TokenKind::Dot) | Some(TokenKind::Bang) | Some(TokenKind::String) | Some(TokenKind::Char) | Some(TokenKind::Ident) => {
-                            p.push_ret(40);
-                            cur = 43;
-                        }
-                        _ => {
-                            cur = 41;
-                        }
-                    }
-                }
-                40 => { // seq_expr:star
-                    match p.look(0).kind {
-                        Some(TokenKind::Lparen) | Some(TokenKind::Dot) | Some(TokenKind::Bang) | Some(TokenKind::String) | Some(TokenKind::Char) | Some(TokenKind::Ident) => {
-                            p.push_ret(40);
-                            cur = 43;
-                        }
-                        _ => {
-                            cur = 41;
-                        }
-                    }
-                }
-                41 => { // seq_expr:exit
-                    p.exit(RuleKind::SeqExpr);
-                    cur = p.ret();
-                }
-                43 => { // seq_expr:star-body:call:_postfix_expr
-                    p.push_ret(46);
-                    match p.look(0).kind {
-                        Some(TokenKind::Lparen) => {
-                            p.enter(RuleKind::Group);
-                            p.expect(TokenKind::Lparen, SYNC_3, "expected LPAREN");
-                            p.push_ret(67);
-                            cur = 31;
-                        }
-                        Some(TokenKind::Dot) => { cur = 62; }
-                        Some(TokenKind::Bang) => { cur = 62; }
-                        Some(TokenKind::String) => { cur = 62; }
-                        Some(TokenKind::Char) => { cur = 62; }
-                        Some(TokenKind::Ident) => { cur = 62; }
-                        _ => { p.error_here("unexpected token"); p.recover_to(SYNC_3); cur = p.ret(); }
-                    }
-                }
-                46 => { // _postfix_expr:star
-                    match p.look(0).kind {
-                        Some(TokenKind::Question) | Some(TokenKind::Star) | Some(TokenKind::Plus) => {
-                            p.push_ret(46);
-                            match p.look(0).kind {
-                                Some(TokenKind::Question) => { cur = 52; }
-                                Some(TokenKind::Star) => { cur = 54; }
-                                Some(TokenKind::Plus) => { cur = 56; }
-                                _ => { p.error_here("unexpected token"); p.recover_to(SYNC_3); cur = p.ret(); }
-                            }
-                        }
-                        _ => {
-                            cur = p.ret();
-                        }
-                    }
-                }
-                52 => { // _quant_op:alt0:expect:QUESTION
-                    p.expect(TokenKind::Question, SYNC_3, "expected QUESTION");
-                    cur = p.ret();
-                }
-                54 => { // _quant_op:alt1:expect:STAR
-                    p.expect(TokenKind::Star, SYNC_3, "expected STAR");
-                    cur = p.ret();
-                }
-                56 => { // _quant_op:alt2:expect:PLUS
-                    p.expect(TokenKind::Plus, SYNC_3, "expected PLUS");
-                    cur = p.ret();
-                }
-                62 => { // _primary_expr:alt1:call:atom
-                    p.enter(RuleKind::Atom);
-                    match p.look(0).kind {
-                        Some(TokenKind::Dot) => { p.push_ret(72); cur = 78; }
-                        Some(TokenKind::Bang) => { p.push_ret(72); cur = 80; }
-                        Some(TokenKind::String) => { p.push_ret(72); cur = 76; }
-                        Some(TokenKind::Char) => { p.push_ret(72); cur = 78; }
-                        Some(TokenKind::Ident) => { p.push_ret(72); cur = 74; }
-                        _ => { cur = 72; p.error_here("unexpected token"); p.recover_to(SYNC_3); }
-                    }
-                }
-                64 => { // group:enter
-                    p.enter(RuleKind::Group);
-                    p.expect(TokenKind::Lparen, SYNC_3, "expected LPAREN");
-                    p.push_ret(67);
-                    cur = 31;
-                }
-                67 => { // group:expect:RPAREN
-                    p.expect(TokenKind::Rparen, SYNC_3, "expected RPAREN");
-                    cur = 68;
-                }
-                68 => { // group:exit
-                    p.exit(RuleKind::Group);
-                    cur = p.ret();
-                }
-                70 => { // atom:enter
-                    p.enter(RuleKind::Atom);
-                    match p.look(0).kind {
-                        Some(TokenKind::Dot) => { p.push_ret(72); cur = 78; }
-                        Some(TokenKind::Bang) => { p.push_ret(72); cur = 80; }
-                        Some(TokenKind::String) => { p.push_ret(72); cur = 76; }
-                        Some(TokenKind::Char) => { p.push_ret(72); cur = 78; }
-                        Some(TokenKind::Ident) => { p.push_ret(72); cur = 74; }
-                        _ => { cur = 72; p.error_here("unexpected token"); p.recover_to(SYNC_3); }
-                    }
-                }
-                72 => { // atom:exit
-                    p.exit(RuleKind::Atom);
-                    cur = p.ret();
-                }
-                74 => { // atom:alt0:expect:IDENT
-                    p.expect(TokenKind::Ident, SYNC_3, "expected IDENT");
-                    cur = p.ret();
-                }
-                76 => { // atom:alt1:expect:STRING
-                    p.expect(TokenKind::String, SYNC_3, "expected STRING");
-                    cur = p.ret();
-                }
-                78 => { // atom:alt2:call:char_primary
-                    p.enter(RuleKind::CharPrimary);
-                    match p.look(0).kind {
-                        Some(TokenKind::Dot) => { p.push_ret(84); cur = 89; }
-                        Some(TokenKind::Char) => { p.push_ret(84); cur = 86; }
-                        _ => { cur = 84; p.error_here("unexpected token"); p.recover_to(SYNC_3); }
-                    }
-                }
-                80 => { // atom:alt3:call:neg_class
-                    p.enter(RuleKind::NegClass);
-                    p.expect(TokenKind::Bang, SYNC_3, "expected BANG");
-                    cur = 96;
-                }
-                82 => { // char_primary:enter
-                    p.enter(RuleKind::CharPrimary);
-                    match p.look(0).kind {
-                        Some(TokenKind::Dot) => { p.push_ret(84); cur = 89; }
-                        Some(TokenKind::Char) => { p.push_ret(84); cur = 86; }
-                        _ => { cur = 84; p.error_here("unexpected token"); p.recover_to(SYNC_3); }
-                    }
-                }
-                84 => { // char_primary:exit
-                    p.exit(RuleKind::CharPrimary);
-                    cur = p.ret();
-                }
-                86 => { // char_primary:alt0:expect:CHAR
-                    p.expect(TokenKind::Char, SYNC_3, "expected CHAR");
-                    cur = 87;
-                }
-                87 => { // char_primary:alt0:opt
-                    match p.look(0).kind {
-                        Some(TokenKind::Dotdot) => {
-                            p.expect(TokenKind::Dotdot, SYNC_3, "expected DOTDOT");
-                            cur = 92;
-                        }
-                        _ => {
-                            cur = p.ret();
-                        }
-                    }
-                }
-                89 => { // char_primary:alt1:expect:DOT
-                    p.expect(TokenKind::Dot, SYNC_3, "expected DOT");
-                    cur = p.ret();
-                }
-                92 => { // char_primary:alt0:opt-body:expect:CHAR
-                    p.expect(TokenKind::Char, SYNC_3, "expected CHAR");
-                    cur = p.ret();
-                }
-                94 => { // neg_class:enter
-                    p.enter(RuleKind::NegClass);
-                    p.expect(TokenKind::Bang, SYNC_3, "expected BANG");
-                    cur = 96;
-                }
-                96 => { // neg_class:dispatch
-                    match p.look(0).kind {
-                        Some(TokenKind::Lparen) => {
-                            p.push_ret(97);
-                            p.expect(TokenKind::Lparen, SYNC_3, "expected LPAREN");
-                            p.push_ret(103);
-                            cur = 82;
-                        }
-                        Some(TokenKind::Dot) => { p.push_ret(97); cur = 99; }
-                        Some(TokenKind::Char) => { p.push_ret(97); cur = 99; }
-                        _ => { cur = 97; p.error_here("unexpected token"); p.recover_to(SYNC_3); }
-                    }
-                }
-                97 => { // neg_class:exit
-                    p.exit(RuleKind::NegClass);
-                    cur = p.ret();
-                }
-                99 => { // neg_class:alt0:call:char_primary
-                    p.enter(RuleKind::CharPrimary);
-                    match p.look(0).kind {
-                        Some(TokenKind::Dot) => { p.push_ret(84); cur = 89; }
-                        Some(TokenKind::Char) => { p.push_ret(84); cur = 86; }
-                        _ => { cur = 84; p.error_here("unexpected token"); p.recover_to(SYNC_3); }
-                    }
-                }
-                103 => { // neg_class:alt1:star
-                    match p.look(0).kind {
-                        Some(TokenKind::Pipe) => {
-                            p.push_ret(103);
-                            p.expect(TokenKind::Pipe, SYNC_3, "expected PIPE");
-                            cur = 82;
-                        }
-                        _ => {
-                            cur = 104;
-                        }
-                    }
-                }
-                104 => { // neg_class:alt1:expect:RPAREN
-                    p.expect(TokenKind::Rparen, SYNC_3, "expected RPAREN");
-                    cur = p.ret();
-                }
-                _ => unreachable!("unknown state"),
             }
+            2 => { // file:star
+                match p.look(0).kind {
+                    Some(TokenKind::Ident) => {
+                        p.push_ret(2);
+                        event = Some(p.enter(RuleKind::Decl));
+                        cur = 6;
+                    }
+                    _ => {
+                        cur = 3;
+                    }
+                }
+            }
+            3 => { // file:exit
+                event = Some(p.exit(RuleKind::File));
+                cur = p.ret();
+            }
+            4 => { // file:star-body:call:decl
+                event = Some(p.enter(RuleKind::Decl));
+                cur = 6;
+            }
+            5 => { // decl:enter
+                event = Some(p.enter(RuleKind::Decl));
+                cur = 6;
+            }
+            6 => { // decl:expect:IDENT
+                event = Some(p.expect(TokenKind::Ident, SYNC_1, "expected IDENT"));
+                cur = 7;
+            }
+            7 => { // decl:expect:EQ
+                event = Some(p.expect(TokenKind::Eq, SYNC_1, "expected EQ"));
+                p.push_ret(8);
+                cur = 19;
+            }
+            8 => { // decl:opt
+                match p.look(0).kind {
+                    Some(TokenKind::Lbrack) => {
+                        p.push_ret(9);
+                        event = Some(p.enter(RuleKind::Annots));
+                        cur = 12;
+                    }
+                    _ => {
+                        cur = 9;
+                    }
+                }
+            }
+            9 => { // decl:expect:SEMI
+                event = Some(p.expect(TokenKind::Semi, SYNC_1, "expected SEMI"));
+                cur = 10;
+            }
+            10 => { // decl:exit
+                event = Some(p.exit(RuleKind::Decl));
+                cur = p.ret();
+            }
+            11 => { // annots:enter
+                event = Some(p.enter(RuleKind::Annots));
+                cur = 12;
+            }
+            12 => { // annots:expect:LBRACK
+                event = Some(p.expect(TokenKind::Lbrack, SYNC_1, "expected LBRACK"));
+                p.push_ret(13);
+                cur = 16;
+            }
+            13 => { // annots:star
+                match p.look(0).kind {
+                    Some(TokenKind::Comma) => {
+                        p.push_ret(13);
+                        event = Some(p.expect(TokenKind::Comma, SYNC_1, "expected COMMA"));
+                        cur = 16;
+                    }
+                    _ => {
+                        cur = 14;
+                    }
+                }
+            }
+            14 => { // annots:expect:RBRACK
+                event = Some(p.expect(TokenKind::Rbrack, SYNC_1, "expected RBRACK"));
+                cur = 15;
+            }
+            15 => { // annots:exit
+                event = Some(p.exit(RuleKind::Annots));
+                cur = p.ret();
+            }
+            16 => { // annot:enter
+                event = Some(p.enter(RuleKind::Annot));
+                cur = 17;
+            }
+            17 => { // annot:expect:IDENT
+                event = Some(p.expect(TokenKind::Ident, SYNC_2, "expected IDENT"));
+                cur = 18;
+            }
+            18 => { // annot:exit
+                event = Some(p.exit(RuleKind::Annot));
+                cur = p.ret();
+            }
+            19 => { // alt_expr:enter
+                event = Some(p.enter(RuleKind::AltExpr));
+                p.push_ret(20);
+                cur = 22;
+            }
+            20 => { // alt_expr:star
+                match p.look(0).kind {
+                    Some(TokenKind::Pipe) => {
+                        p.push_ret(20);
+                        event = Some(p.expect(TokenKind::Pipe, SYNC_3, "expected PIPE"));
+                        cur = 22;
+                    }
+                    _ => {
+                        cur = 21;
+                    }
+                }
+            }
+            21 => { // alt_expr:exit
+                event = Some(p.exit(RuleKind::AltExpr));
+                cur = p.ret();
+            }
+            22 => { // seq_expr:enter
+                event = Some(p.enter(RuleKind::SeqExpr));
+                match p.look(0).kind {
+                    Some(TokenKind::Lparen) | Some(TokenKind::Dot) | Some(TokenKind::Bang) | Some(TokenKind::String) | Some(TokenKind::Char) | Some(TokenKind::Ident) => {
+                        p.push_ret(23);
+                        cur = 25;
+                    }
+                    _ => {
+                        cur = 24;
+                    }
+                }
+            }
+            23 => { // seq_expr:star
+                match p.look(0).kind {
+                    Some(TokenKind::Lparen) | Some(TokenKind::Dot) | Some(TokenKind::Bang) | Some(TokenKind::String) | Some(TokenKind::Char) | Some(TokenKind::Ident) => {
+                        p.push_ret(23);
+                        p.push_ret(26);
+                        match p.look(0).kind {
+                            Some(TokenKind::Lparen) => {
+                                event = Some(p.enter(RuleKind::Group));
+                                cur = 28;
+                            }
+                            Some(TokenKind::Dot) => {
+                                event = Some(p.enter(RuleKind::Atom));
+                                cur = 32;
+                            }
+                            Some(TokenKind::Bang) => {
+                                event = Some(p.enter(RuleKind::Atom));
+                                cur = 32;
+                            }
+                            Some(TokenKind::String) => {
+                                event = Some(p.enter(RuleKind::Atom));
+                                cur = 32;
+                            }
+                            Some(TokenKind::Char) => {
+                                event = Some(p.enter(RuleKind::Atom));
+                                cur = 32;
+                            }
+                            Some(TokenKind::Ident) => {
+                                event = Some(p.enter(RuleKind::Atom));
+                                cur = 32;
+                            }
+                            _ => { event = Some(p.error_here("unexpected token")); p.recover_to(SYNC_3); cur = p.ret(); }
+                        }
+                    }
+                    _ => {
+                        cur = 24;
+                    }
+                }
+            }
+            24 => { // seq_expr:exit
+                event = Some(p.exit(RuleKind::SeqExpr));
+                cur = p.ret();
+            }
+            25 => { // seq_expr:star-body:call:_postfix_expr
+                p.push_ret(26);
+                match p.look(0).kind {
+                    Some(TokenKind::Lparen) => {
+                        event = Some(p.enter(RuleKind::Group));
+                        cur = 28;
+                    }
+                    Some(TokenKind::Dot) => {
+                        event = Some(p.enter(RuleKind::Atom));
+                        cur = 32;
+                    }
+                    Some(TokenKind::Bang) => {
+                        event = Some(p.enter(RuleKind::Atom));
+                        cur = 32;
+                    }
+                    Some(TokenKind::String) => {
+                        event = Some(p.enter(RuleKind::Atom));
+                        cur = 32;
+                    }
+                    Some(TokenKind::Char) => {
+                        event = Some(p.enter(RuleKind::Atom));
+                        cur = 32;
+                    }
+                    Some(TokenKind::Ident) => {
+                        event = Some(p.enter(RuleKind::Atom));
+                        cur = 32;
+                    }
+                    _ => { event = Some(p.error_here("unexpected token")); p.recover_to(SYNC_3); cur = p.ret(); }
+                }
+            }
+            26 => { // _postfix_expr:star
+                match p.look(0).kind {
+                    Some(TokenKind::Question) | Some(TokenKind::Star) | Some(TokenKind::Plus) => {
+                        p.push_ret(26);
+                        match p.look(0).kind {
+                            Some(TokenKind::Question) => {
+                                event = Some(p.expect(TokenKind::Question, SYNC_3, "expected QUESTION"));
+                                cur = p.ret();
+                            }
+                            Some(TokenKind::Star) => {
+                                event = Some(p.expect(TokenKind::Star, SYNC_3, "expected STAR"));
+                                cur = p.ret();
+                            }
+                            Some(TokenKind::Plus) => {
+                                event = Some(p.expect(TokenKind::Plus, SYNC_3, "expected PLUS"));
+                                cur = p.ret();
+                            }
+                            _ => { event = Some(p.error_here("unexpected token")); p.recover_to(SYNC_3); cur = p.ret(); }
+                        }
+                    }
+                    _ => {
+                        cur = p.ret();
+                    }
+                }
+            }
+            27 => { // group:enter
+                event = Some(p.enter(RuleKind::Group));
+                cur = 28;
+            }
+            28 => { // group:expect:LPAREN
+                event = Some(p.expect(TokenKind::Lparen, SYNC_3, "expected LPAREN"));
+                p.push_ret(29);
+                cur = 19;
+            }
+            29 => { // group:expect:RPAREN
+                event = Some(p.expect(TokenKind::Rparen, SYNC_3, "expected RPAREN"));
+                cur = 30;
+            }
+            30 => { // group:exit
+                event = Some(p.exit(RuleKind::Group));
+                cur = p.ret();
+            }
+            31 => { // atom:enter
+                event = Some(p.enter(RuleKind::Atom));
+                cur = 32;
+            }
+            32 => { // atom:dispatch
+                match p.look(0).kind {
+                    Some(TokenKind::Dot) => {
+                        p.push_ret(33);
+                        event = Some(p.enter(RuleKind::CharPrimary));
+                        cur = 35;
+                    }
+                    Some(TokenKind::Bang) => {
+                        p.push_ret(33);
+                        event = Some(p.enter(RuleKind::NegClass));
+                        cur = 40;
+                    }
+                    Some(TokenKind::String) => {
+                        p.push_ret(33);
+                        event = Some(p.expect(TokenKind::String, SYNC_3, "expected STRING"));
+                        cur = p.ret();
+                    }
+                    Some(TokenKind::Char) => {
+                        p.push_ret(33);
+                        event = Some(p.enter(RuleKind::CharPrimary));
+                        cur = 35;
+                    }
+                    Some(TokenKind::Ident) => {
+                        p.push_ret(33);
+                        event = Some(p.expect(TokenKind::Ident, SYNC_3, "expected IDENT"));
+                        cur = p.ret();
+                    }
+                    _ => { cur = 33; event = Some(p.error_here("unexpected token")); p.recover_to(SYNC_3); }
+                }
+            }
+            33 => { // atom:exit
+                event = Some(p.exit(RuleKind::Atom));
+                cur = p.ret();
+            }
+            34 => { // char_primary:enter
+                event = Some(p.enter(RuleKind::CharPrimary));
+                cur = 35;
+            }
+            35 => { // char_primary:dispatch
+                match p.look(0).kind {
+                    Some(TokenKind::Dot) => {
+                        p.push_ret(36);
+                        event = Some(p.expect(TokenKind::Dot, SYNC_3, "expected DOT"));
+                        cur = p.ret();
+                    }
+                    Some(TokenKind::Char) => {
+                        p.push_ret(36);
+                        event = Some(p.expect(TokenKind::Char, SYNC_3, "expected CHAR"));
+                        cur = 37;
+                    }
+                    _ => { cur = 36; event = Some(p.error_here("unexpected token")); p.recover_to(SYNC_3); }
+                }
+            }
+            36 => { // char_primary:exit
+                event = Some(p.exit(RuleKind::CharPrimary));
+                cur = p.ret();
+            }
+            37 => { // char_primary:alt0:opt
+                match p.look(0).kind {
+                    Some(TokenKind::Dotdot) => {
+                        event = Some(p.expect(TokenKind::Dotdot, SYNC_3, "expected DOTDOT"));
+                        cur = 38;
+                    }
+                    _ => {
+                        cur = p.ret();
+                    }
+                }
+            }
+            38 => { // char_primary:alt0:opt-body:expect:CHAR
+                event = Some(p.expect(TokenKind::Char, SYNC_3, "expected CHAR"));
+                cur = p.ret();
+            }
+            39 => { // neg_class:enter
+                event = Some(p.enter(RuleKind::NegClass));
+                cur = 40;
+            }
+            40 => { // neg_class:expect:BANG
+                event = Some(p.expect(TokenKind::Bang, SYNC_3, "expected BANG"));
+                cur = 41;
+            }
+            41 => { // neg_class:dispatch
+                match p.look(0).kind {
+                    Some(TokenKind::Lparen) => {
+                        p.push_ret(42);
+                        event = Some(p.expect(TokenKind::Lparen, SYNC_3, "expected LPAREN"));
+                        p.push_ret(43);
+                        cur = 34;
+                    }
+                    Some(TokenKind::Dot) => {
+                        p.push_ret(42);
+                        event = Some(p.enter(RuleKind::CharPrimary));
+                        cur = 35;
+                    }
+                    Some(TokenKind::Char) => {
+                        p.push_ret(42);
+                        event = Some(p.enter(RuleKind::CharPrimary));
+                        cur = 35;
+                    }
+                    _ => { cur = 42; event = Some(p.error_here("unexpected token")); p.recover_to(SYNC_3); }
+                }
+            }
+            42 => { // neg_class:exit
+                event = Some(p.exit(RuleKind::NegClass));
+                cur = p.ret();
+            }
+            43 => { // neg_class:alt1:star
+                match p.look(0).kind {
+                    Some(TokenKind::Pipe) => {
+                        p.push_ret(43);
+                        event = Some(p.expect(TokenKind::Pipe, SYNC_3, "expected PIPE"));
+                        cur = 34;
+                    }
+                    _ => {
+                        cur = 44;
+                    }
+                }
+            }
+            44 => { // neg_class:alt1:expect:RPAREN
+                event = Some(p.expect(TokenKind::Rparen, SYNC_3, "expected RPAREN"));
+                cur = p.ret();
+            }
+            _ => unreachable!("unknown state"),
         }
         p.set_state(cur);
+        event
     }
 }
 
