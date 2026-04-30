@@ -2,11 +2,24 @@ package dev.parsuna.runtime;
 
 import java.io.IOException;
 import java.io.InputStream;
-import java.nio.charset.StandardCharsets;
 
 /**
- * DFA-driven byte-level lexer over an InputStream. Reads in 16 KiB chunks
- * so memory use stays bounded regardless of input size.
+ * DFA-driven byte-level lexer. Two construction shapes:
+ *
+ * <ul>
+ *   <li>{@link #Lexer(InputStream, DfaMatcher)} reads in 16 KiB chunks
+ *   so memory use stays bounded for arbitrary-sized input.</li>
+ *   <li>{@link #Lexer(byte[], DfaMatcher)} parses an in-memory buffer
+ *   directly — no chunking, no read calls, no compaction. Use this when
+ *   the input is already a byte array (e.g. {@code Files.readAllBytes})
+ *   to skip the {@link InputStream} hop.</li>
+ * </ul>
+ *
+ * <p>{@link #nextToken()} writes the matched token's metadata into the
+ * lexer's {@code last*} scalar fields and returns no Token object — the
+ * runtime copies the fields into its lookahead state without allocating
+ * one Token per lex step. Callers that want a {@link Token} value can
+ * call {@link #materializeLastToken()} after {@code nextToken}.
  */
 public final class Lexer {
     static final int CHUNK = 16384;
@@ -27,6 +40,20 @@ public final class Lexer {
     private int line = 1, col = 1;
     private final DfaMatcher matcher;
     private final int[] matchOut = new int[3];
+    /** Mode stack — top-of-stack is the active mode. Initialised with
+     *  the default mode (id 0) and never empty; pop is a no-op when
+     *  only the default remains so a stray `pop` action can't underflow. */
+    private int[] modeStack = new int[]{0};
+    private int modeTop = 0;
+
+    /** Last-matched token's metadata. Written by {@link #nextToken()};
+     *  read by the parser's pump-mode and copied into lookahead arrays
+     *  without ever materializing a {@link Token} object. */
+    public int lastKind;
+    public byte[] lastData;
+    public int lastDataOff, lastDataLen;
+    public int lastSOff, lastSLine, lastSCol;
+    public int lastEOff, lastELine, lastECol;
 
     public Lexer(InputStream in, DfaMatcher matcher) {
         this.in = in;
@@ -34,7 +61,32 @@ public final class Lexer {
         this.matcher = matcher;
     }
 
-    private Pos pos() { return new Pos(offset, line, col); }
+    /** Lex directly out of an existing byte buffer. The buffer is held
+     *  by reference (no copy); callers must not mutate it for the
+     *  lifetime of the parse. */
+    public Lexer(byte[] data, DfaMatcher matcher) {
+        this.in = null;
+        this.buf = data;
+        this.bufLen = data.length;
+        this.eof = true;
+        this.matcher = matcher;
+    }
+
+    /** Push {@code mode} onto the mode stack — typically called from a
+     *  generated apply-actions callback after the matched token. */
+    public void pushMode(int mode) {
+        if (modeTop + 1 >= modeStack.length) {
+            int[] next = new int[modeStack.length * 2];
+            System.arraycopy(modeStack, 0, next, 0, modeTop + 1);
+            modeStack = next;
+        }
+        modeStack[++modeTop] = mode;
+    }
+
+    /** Pop the topmost mode, leaving at least the default mode in place. */
+    public void popMode() {
+        if (modeTop > 0) modeTop--;
+    }
 
     private boolean readMore() {
         if (eof) return false;
@@ -57,6 +109,9 @@ public final class Lexer {
         while (!eof && bufLen - bufPos < want) { if (!readMore()) break; }
     }
 
+    /** Advance past {@code n} bytes, updating offset/line/col. ASCII-only
+     *  spans take an unrolled fast path (no per-byte branch); a non-ASCII
+     *  byte or newline triggers the precise walker. */
     private void advance(int n) {
         int end = bufPos + n;
         boolean needsWalk = false;
@@ -75,46 +130,86 @@ public final class Lexer {
                 else if ((b & 0xC0) != 0x80) col++;
             }
         }
-        if (bufPos > 65536) {
-            System.arraycopy(buf, bufPos, buf, 0, bufLen - bufPos);
-            bufLen -= bufPos; bufPos = 0;
-        }
     }
 
-    private int[] longestMatch() {
+    private void runMatch() {
         while (true) {
-            matcher.longestMatch(buf, bufPos, bufLen, matchOut);
+            matcher.longestMatch(buf, bufPos, bufLen, modeStack[modeTop], matchOut);
             int scanned = matchOut[2];
             int viewLen = bufLen - bufPos;
             if (!eof && scanned == viewLen) {
                 if (readMore()) continue;
             }
-            return matchOut;
+            return;
         }
     }
 
     /**
-     * Produce the next token. Emits repeated EOF once input ends; lex
-     * failures (no DFA pattern matched) come through with kind == {@link #ERROR_KIND}.
+     * Match the next token. Writes its kind, byte slice, and start/end
+     * position into the {@code last*} fields. Emits repeated EOF (kind 0,
+     * empty slice) once input ends; lex failures (no DFA pattern matched)
+     * come through with {@link #lastKind} == {@link #ERROR_KIND}.
      */
-    public Token nextToken() {
-        ensure(CHUNK);
+    public void nextToken() {
+        if (in != null) ensure(CHUNK);
         if (bufLen - bufPos == 0) {
-            Pos p = pos();
-            return new Token(0, Span.point(p), "");
+            lastKind = 0;
+            lastData = buf;
+            lastDataOff = bufPos;
+            lastDataLen = 0;
+            lastSOff = offset; lastSLine = line; lastSCol = col;
+            lastEOff = offset; lastELine = line; lastECol = col;
+            return;
         }
-        int[] best = longestMatch();
-        Pos start = pos();
-        if (best[0] == 0) {
+        runMatch();
+        int sOff = offset, sLine = line, sCol = col;
+        int startBufPos = bufPos;
+        int matchLen;
+        int kind;
+        if (matchOut[0] == 0) {
             int b = buf[bufPos] & 0xFF;
             int cpLen = b < 0x80 ? 1 : b < 0xE0 ? 2 : b < 0xF0 ? 3 : 4;
-            int n = Math.min(cpLen, bufLen - bufPos);
-            String text = new String(buf, bufPos, n, StandardCharsets.UTF_8);
-            advance(n);
-            return new Token(ERROR_KIND, new Span(start, pos()), text);
+            matchLen = Math.min(cpLen, bufLen - bufPos);
+            kind = ERROR_KIND;
+        } else {
+            matchLen = matchOut[0];
+            kind = matchOut[1];
         }
-        String text = new String(buf, bufPos, best[0], StandardCharsets.UTF_8);
-        advance(best[0]);
-        return new Token(best[1], new Span(start, pos()), text);
+        byte[] data;
+        int byteOff;
+        if (in == null) {
+            // byte[] mode: the buffer IS the input and is never compacted
+            // or grown, so tokens can share it by reference.
+            data = buf;
+            byteOff = startBufPos;
+        } else {
+            // InputStream mode: the buffer is volatile (compaction +
+            // growth), so the token owns a private copy of its bytes.
+            data = new byte[matchLen];
+            System.arraycopy(buf, bufPos, data, 0, matchLen);
+            byteOff = 0;
+        }
+        advance(matchLen);
+        lastKind = kind;
+        lastData = data;
+        lastDataOff = byteOff;
+        lastDataLen = matchLen;
+        lastSOff = sOff; lastSLine = sLine; lastSCol = sCol;
+        lastEOff = offset; lastELine = line; lastECol = col;
+        // InputStream mode: now that we've copied the bytes out, it's safe
+        // to compact the read buffer.
+        if (in != null && bufPos > 65536) {
+            System.arraycopy(buf, bufPos, buf, 0, bufLen - bufPos);
+            bufLen -= bufPos; bufPos = 0;
+        }
+    }
+
+    /** Build a {@link Token} from the {@code last*} fields. Convenient for
+     *  callers that prefer the object-oriented Token shape; the runtime's
+     *  hot path doesn't use it. */
+    public Token materializeLastToken() {
+        return new Token(lastKind, lastData, lastDataOff, lastDataLen,
+            lastSOff, lastSLine, lastSCol,
+            lastEOff, lastELine, lastECol);
     }
 }

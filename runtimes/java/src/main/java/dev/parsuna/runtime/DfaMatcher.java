@@ -21,6 +21,10 @@ package dev.parsuna.runtime;
  */
 @FunctionalInterface
 public interface DfaMatcher {
-    /** Run the DFA; write [bestLen, bestKind, scanned] into {@code out}. */
-    void longestMatch(byte[] buf, int start, int bufLen, int[] out);
+    /** Run the DFA in {@code mode}; write [bestLen, bestKind, scanned]
+     *  into {@code out}. {@code mode} is 0 for the default mode; further
+     *  ids correspond to {@code @mode(name)} pre-annotations in
+     *  declaration order. Generated code branches on it and dispatches
+     *  to the per-mode state machine. */
+    void longestMatch(byte[] buf, int start, int bufLen, int mode, int[] out);
 }

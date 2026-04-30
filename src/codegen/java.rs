@@ -52,19 +52,14 @@ pub fn emit(st: &StateTable, args: &Args) -> Vec<EmittedFile> {
     writeln!(&mut s, "// Requires dev.parsuna:parsuna-rt.").unwrap();
     writeln!(&mut s, "package {};", pkg).unwrap();
     writeln!(&mut s).unwrap();
-    writeln!(&mut s, "import java.io.ByteArrayInputStream;").unwrap();
     writeln!(&mut s, "import java.io.InputStream;").unwrap();
     writeln!(&mut s, "import java.nio.charset.StandardCharsets;").unwrap();
     writeln!(&mut s, "import dev.parsuna.runtime.DfaMatcher;").unwrap();
-    writeln!(&mut s, "import dev.parsuna.runtime.Event;").unwrap();
     writeln!(&mut s, "import dev.parsuna.runtime.Lexer;").unwrap();
-    writeln!(&mut s, "import dev.parsuna.runtime.ParseError;").unwrap();
     writeln!(&mut s, "import dev.parsuna.runtime.Parser;").unwrap();
     writeln!(&mut s, "import dev.parsuna.runtime.ParserConfig;").unwrap();
+    writeln!(&mut s, "import dev.parsuna.runtime.ParserOptions;").unwrap();
     writeln!(&mut s, "import dev.parsuna.runtime.Cursor;").unwrap();
-    writeln!(&mut s, "import dev.parsuna.runtime.Pos;").unwrap();
-    writeln!(&mut s, "import dev.parsuna.runtime.Span;").unwrap();
-    writeln!(&mut s, "import dev.parsuna.runtime.Token;").unwrap();
     writeln!(&mut s).unwrap();
 
     writeln!(
@@ -205,33 +200,70 @@ fn rule_id(st: &StateTable, kind: u16) -> String {
 }
 
 fn emit_dfa(s: &mut String, st: &StateTable) {
-    let dfa = &st.lexer_dfa;
-
     writeln!(
         s,
-        "    /** Compiled lexer DFA: one switch arm per DFA state. */"
+        "    /** Compiled lexer DFA: one switch arm per DFA state, dispatched by mode id. */"
     )
     .unwrap();
     writeln!(
         s,
-        "    private static void longestMatch(byte[] buf, int start, int bufLen, int[] out) {{"
+        "    private static void longestMatch(byte[] buf, int start, int bufLen, int mode, int[] out) {{"
     )
     .unwrap();
-    writeln!(s, "        int pos = start;").unwrap();
-    writeln!(s, "        int bestLen = 0;").unwrap();
-    writeln!(s, "        int bestKind = Lexer.ERROR_KIND;").unwrap();
-    writeln!(s, "        int state = {};", START).unwrap();
-    writeln!(s, "        outer: while (true) {{").unwrap();
-    writeln!(s, "            switch (state) {{").unwrap();
-    for ds in dfa { emit_dfa_state_arm(s, st, ds); }
-    writeln!(s, "                default: break outer;").unwrap();
-    writeln!(s, "            }}").unwrap();
-    writeln!(s, "        }}").unwrap();
-    writeln!(s, "        out[0] = bestLen;").unwrap();
-    writeln!(s, "        out[1] = bestKind;").unwrap();
-    writeln!(s, "        out[2] = pos - start;").unwrap();
+    if st.modes.len() == 1 {
+        writeln!(s, "        longestMatchMode0(buf, start, bufLen, out);").unwrap();
+    } else {
+        writeln!(s, "        switch (mode) {{").unwrap();
+        for m in &st.modes {
+            writeln!(
+                s,
+                "            case {}: longestMatchMode{}(buf, start, bufLen, out); return;",
+                m.id, m.id
+            )
+            .unwrap();
+        }
+        writeln!(
+            s,
+            "            default: out[0] = 0; out[1] = Lexer.ERROR_KIND; out[2] = 0; return;"
+        )
+        .unwrap();
+        writeln!(s, "        }}").unwrap();
+    }
     writeln!(s, "    }}").unwrap();
     writeln!(s).unwrap();
+
+    for m in &st.modes {
+        writeln!(
+            s,
+            "    /** Longest-match helper for lexer mode `{}` (id {}). */",
+            m.name, m.id
+        )
+        .unwrap();
+        writeln!(
+            s,
+            "    private static void longestMatchMode{}(byte[] buf, int start, int bufLen, int[] out) {{",
+            m.id
+        )
+        .unwrap();
+        writeln!(s, "        int pos = start;").unwrap();
+        writeln!(s, "        int bestLen = 0;").unwrap();
+        writeln!(s, "        int bestKind = Lexer.ERROR_KIND;").unwrap();
+        writeln!(s, "        int state = {};", START).unwrap();
+        writeln!(s, "        outer: while (true) {{").unwrap();
+        writeln!(s, "            switch (state) {{").unwrap();
+        for ds in &m.dfa {
+            emit_dfa_state_arm(s, st, ds);
+        }
+        writeln!(s, "                default: break outer;").unwrap();
+        writeln!(s, "            }}").unwrap();
+        writeln!(s, "        }}").unwrap();
+        writeln!(s, "        out[0] = bestLen;").unwrap();
+        writeln!(s, "        out[1] = bestKind;").unwrap();
+        writeln!(s, "        out[2] = pos - start;").unwrap();
+        writeln!(s, "    }}").unwrap();
+        writeln!(s).unwrap();
+    }
+
     writeln!(
         s,
         "    private static final DfaMatcher MATCHER = Grammar::longestMatch;"
@@ -263,7 +295,8 @@ fn emit_dfa_state_arm(
         return;
     }
     writeln!(s, "                case {}: {{", ds.id).unwrap();
-    if !ds.self_loop.is_empty() {
+    let self_loop = ds.self_loop_ranges();
+    if !self_loop.is_empty() {
         // Self-loop scan-skip prologue. HotSpot's loop optimiser will
         // unroll and (on supported CPUs) vectorise tight byte-test
         // loops; keeping the body simple lets the JIT do its work.
@@ -272,7 +305,7 @@ fn emit_dfa_state_arm(
         writeln!(
             s,
             "                        if (!({})) break;",
-            byte_cond(&ds.self_loop)
+            byte_cond(self_loop)
         )
         .unwrap();
         writeln!(s, "                        pos++;").unwrap();
@@ -379,9 +412,8 @@ fn emit_tables(s: &mut String, st: &StateTable) {
 }
 
 fn emit_drive(s: &mut String, st: &StateTable) {
-    writeln!(s, "    private static Event step(Cursor p) {{").unwrap();
+    writeln!(s, "    private static void step(Cursor p) {{").unwrap();
     writeln!(s, "        int cur = p.state();").unwrap();
-    writeln!(s, "        Event event = null;").unwrap();
     writeln!(s, "        switch (cur) {{").unwrap();
     for state in st.states.values() {
         writeln!(
@@ -401,7 +433,6 @@ fn emit_drive(s: &mut String, st: &StateTable) {
     .unwrap();
     writeln!(s, "        }}").unwrap();
     writeln!(s, "        p.setState(cur);").unwrap();
-    writeln!(s, "        return event;").unwrap();
     writeln!(s, "    }}").unwrap();
     writeln!(s).unwrap();
 }
@@ -409,10 +440,10 @@ fn emit_drive(s: &mut String, st: &StateTable) {
 fn emit_instr(s: &mut String, st: &StateTable, op: &Instr, ind: &str) {
     match op {
         Instr::Enter(k) => {
-            writeln!(s, "{}event = p.enter({});", ind, rule_id(st, *k)).unwrap();
+            writeln!(s, "{}p.enter({});", ind, rule_id(st, *k)).unwrap();
         }
         Instr::Exit(k) => {
-            writeln!(s, "{}event = p.exit({});", ind, rule_id(st, *k)).unwrap();
+            writeln!(s, "{}p.exit({});", ind, rule_id(st, *k)).unwrap();
         }
         Instr::Expect {
             kind,
@@ -421,7 +452,7 @@ fn emit_instr(s: &mut String, st: &StateTable, op: &Instr, ind: &str) {
         } => {
             writeln!(
                 s,
-                "{}event = p.tryConsume({}, SYNC_{}, \"{}\");",
+                "{}p.tryConsume({}, SYNC_{}, \"{}\");",
                 ind,
                 token_id(st, *kind),
                 sync,
@@ -445,7 +476,7 @@ fn emit_tail(s: &mut String, st: &StateTable, tail: &Tail, ind: &str) {
         }
         Tail::Star { first, body, cont, head } => {
             let inner = format!("{}    ", ind);
-            writeln!(s, "{}if (p.matchesFirst(FIRST_{})) {{", ind, first).unwrap();
+            emit_first_check(s, st, *first, ind);
             writeln!(s, "{}p.pushRet({});", inner, head).unwrap();
             emit_body(s, st, body, &inner);
             writeln!(s, "{}}}", ind).unwrap();
@@ -456,7 +487,7 @@ fn emit_tail(s: &mut String, st: &StateTable, tail: &Tail, ind: &str) {
         }
         Tail::Opt { first, body, cont } => {
             let inner = format!("{}    ", ind);
-            writeln!(s, "{}if (p.matchesFirst(FIRST_{})) {{", ind, first).unwrap();
+            emit_first_check(s, st, *first, ind);
             if let Some(n) = cont {
                 writeln!(s, "{}p.pushRet({});", inner, n).unwrap();
             }
@@ -471,6 +502,43 @@ fn emit_tail(s: &mut String, st: &StateTable, tail: &Tail, ind: &str) {
             emit_dispatch_tree(s, st, tree, *sync, *cont, ind);
         }
     }
+}
+
+/// Emit the opening `if (...) {` of a Star/Opt match check. At K=1 this
+/// is an inline `p.look(0).kind == X || ...` test; at K>1 it falls back
+/// to the runtime's matchesFirst over the materialized FIRST array.
+fn emit_first_check(s: &mut String, st: &StateTable, first: u32, ind: &str) {
+    if st.k == 1 {
+        let kinds = first_set_singleton_kinds(st, first);
+        let expr = kinds
+            .iter()
+            .map(|k| format!("p.look(0) == {}", k))
+            .collect::<Vec<_>>()
+            .join(" || ");
+        writeln!(s, "{}if ({}) {{", ind, expr).unwrap();
+    } else {
+        writeln!(s, "{}if (p.matchesFirst(FIRST_{})) {{", ind, first).unwrap();
+    }
+}
+
+/// Flatten a K=1 first set's sequences into a sorted, deduped list of
+/// token-kind ids. Asserts the sequences are LL(1) singletons.
+fn first_set_singleton_kinds(st: &StateTable, first: u32) -> Vec<u16> {
+    let mut kinds: Vec<u16> = st.first_sets[first as usize]
+        .seqs
+        .iter()
+        .map(|seq| {
+            assert_eq!(
+                seq.len(),
+                1,
+                "first_set_singleton_kinds expects LL(1) singletons"
+            );
+            seq[0]
+        })
+        .collect();
+    kinds.sort_unstable();
+    kinds.dedup();
+    kinds
 }
 
 fn emit_body(s: &mut String, st: &StateTable, body: &Body, ind: &str) {
@@ -499,7 +567,7 @@ fn emit_dispatch_tree(
             arms,
             default,
         } => {
-            writeln!(s, "{}switch (p.look({}).kind) {{", ind, depth).unwrap();
+            writeln!(s, "{}switch (p.look({})) {{", ind, depth).unwrap();
             let inner = format!("{}  ", ind);
             for (kind, sub) in arms {
                 let literal = format!("{}", *kind);
@@ -535,47 +603,132 @@ fn emit_dispatch_leaf_block(
         (DispatchLeaf::Fallthrough, None) => writeln!(s, "{}cur = p.popRet();", ind).unwrap(),
         (DispatchLeaf::Error, Some(n)) => {
             writeln!(s, "{}cur = {};", ind, n).unwrap();
-            writeln!(s, "{}event = p.errorHere(\"unexpected token\");", ind).unwrap();
+            writeln!(s, "{}p.errorHere(\"unexpected token\");", ind).unwrap();
             writeln!(s, "{}p.recoverTo(SYNC_{});", ind, sync).unwrap();
         }
         (DispatchLeaf::Error, None) => {
-            writeln!(s, "{}event = p.errorHere(\"unexpected token\");", ind).unwrap();
+            writeln!(s, "{}p.errorHere(\"unexpected token\");", ind).unwrap();
             writeln!(s, "{}p.recoverTo(SYNC_{});", ind, sync).unwrap();
             writeln!(s, "{}cur = p.popRet();", ind).unwrap();
         }
     }
 }
 
-fn emit_public_api(s: &mut String, st: &StateTable) {
+fn emit_apply_actions(s: &mut String, st: &StateTable) {
+    use crate::lowering::ModeActionInfo;
+
+    let action_tokens: Vec<&crate::lowering::TokenInfo> = st
+        .tokens
+        .iter()
+        .filter(|t| !t.mode_actions.is_empty())
+        .collect();
+
     writeln!(
         s,
-        "    private static final ParserConfig CONFIG = new ParserConfig(K, k -> isSkip(k), Grammar::step);"
+        "    /** Apply per-token mode-stack actions to {{@code lex}}. Generated as"
+    )
+    .unwrap();
+    writeln!(
+        s,
+        "     *  a switch over token kinds; tokens without {{@code -> push/pop}}"
+    )
+    .unwrap();
+    writeln!(s, "     *  fall through with no effect. */").unwrap();
+    writeln!(
+        s,
+        "    private static void applyActions(int kind, Lexer lex) {{"
+    )
+    .unwrap();
+    if action_tokens.is_empty() {
+        writeln!(s, "        // grammar declares no mode actions").unwrap();
+    } else {
+        writeln!(s, "        switch (kind) {{").unwrap();
+        for t in &action_tokens {
+            // Java `case` labels must be constant expressions, so emit
+            // the numeric token-kind id directly rather than the named
+            // TokenKind.X.id accessor.
+            writeln!(s, "            case {}: {{", t.kind).unwrap();
+            for action in &t.mode_actions {
+                match action {
+                    ModeActionInfo::Push(id) => {
+                        writeln!(s, "                lex.pushMode({});", id).unwrap();
+                    }
+                    ModeActionInfo::Pop => {
+                        writeln!(s, "                lex.popMode();").unwrap();
+                    }
+                }
+            }
+            writeln!(s, "                break;").unwrap();
+            writeln!(s, "            }}").unwrap();
+        }
+        writeln!(s, "            default: break;").unwrap();
+        writeln!(s, "        }}").unwrap();
+    }
+    writeln!(s, "    }}").unwrap();
+    writeln!(s).unwrap();
+}
+
+fn emit_public_api(s: &mut String, st: &StateTable) {
+    emit_apply_actions(s, st);
+    writeln!(
+        s,
+        "    private static final ParserConfig CONFIG = new ParserConfig(K, Grammar::isSkip, Grammar::step, Grammar::applyActions);"
     )
     .unwrap();
     writeln!(s).unwrap();
     writeln!(
         s,
-        "    private static Parser fromInputStream(InputStream in, int entry) {{"
+        "    private static Parser fromInputStream(InputStream in, int entry, ParserOptions opts) {{"
     )
     .unwrap();
     writeln!(
         s,
-        "        return new Parser(new Lexer(in, MATCHER), entry, CONFIG);"
+        "        return new Parser(new Lexer(in, MATCHER), entry, CONFIG, opts);"
+    )
+    .unwrap();
+    writeln!(s, "    }}").unwrap();
+    writeln!(s).unwrap();
+    writeln!(
+        s,
+        "    private static Parser fromBytes(byte[] data, int entry, ParserOptions opts) {{"
+    )
+    .unwrap();
+    writeln!(
+        s,
+        "        return new Parser(new Lexer(data, MATCHER), entry, CONFIG, opts);"
     )
     .unwrap();
     writeln!(s, "    }}").unwrap();
     writeln!(s).unwrap();
     for (name, _) in &st.entry_states {
+        let pname = pascal(name);
+        let upper = name.to_uppercase();
         writeln!(s).unwrap();
         writeln!(
             s,
-            "    /** Parse the `{name}` rule from an InputStream (read lazily in 16 KiB chunks). */",
+            "    /** Parse the `{name}` rule from an InputStream (read lazily in 16 KiB chunks). Skip tokens are surfaced as Event.Token; call parse{pname}NoSkips or pass a ParserOptions with dropSkips=true to silently consume them. */",
         )
         .unwrap();
         writeln!(
             s,
-            "    public static Parser parse{pascal}(InputStream in) {{ return fromInputStream(in, ENTRY_{upper}); }}",
-            pascal = pascal(name), upper = name.to_uppercase()
+            "    public static Parser parse{pname}(InputStream in) {{ return fromInputStream(in, ENTRY_{upper}, new ParserOptions()); }}"
+        ).unwrap();
+        writeln!(
+            s,
+            "    public static Parser parse{pname}(InputStream in, ParserOptions opts) {{ return fromInputStream(in, ENTRY_{upper}, opts); }}"
+        ).unwrap();
+        writeln!(
+            s,
+            "    /** Parse the `{name}` rule from an in-memory byte buffer (zero-copy — the Lexer holds the array by reference). */",
+        )
+        .unwrap();
+        writeln!(
+            s,
+            "    public static Parser parse{pname}(byte[] data) {{ return fromBytes(data, ENTRY_{upper}, new ParserOptions()); }}"
+        ).unwrap();
+        writeln!(
+            s,
+            "    public static Parser parse{pname}(byte[] data, ParserOptions opts) {{ return fromBytes(data, ENTRY_{upper}, opts); }}"
         ).unwrap();
         writeln!(
             s,
@@ -584,8 +737,28 @@ fn emit_public_api(s: &mut String, st: &StateTable) {
         .unwrap();
         writeln!(
             s,
-            "    public static Parser parse{pascal}(String src) {{ return parse{pascal}(new ByteArrayInputStream(src.getBytes(StandardCharsets.UTF_8))); }}",
-            pascal = pascal(name)
+            "    public static Parser parse{pname}(String src) {{ return parse{pname}(src.getBytes(StandardCharsets.UTF_8)); }}"
+        ).unwrap();
+        writeln!(
+            s,
+            "    public static Parser parse{pname}(String src, ParserOptions opts) {{ return parse{pname}(src.getBytes(StandardCharsets.UTF_8), opts); }}"
+        ).unwrap();
+        writeln!(
+            s,
+            "    /** Parse the `{name}` rule and silently consume skip tokens. */",
+        )
+        .unwrap();
+        writeln!(
+            s,
+            "    public static Parser parse{pname}NoSkips(InputStream in) {{ return fromInputStream(in, ENTRY_{upper}, new ParserOptions(true)); }}"
+        ).unwrap();
+        writeln!(
+            s,
+            "    public static Parser parse{pname}NoSkips(byte[] data) {{ return fromBytes(data, ENTRY_{upper}, new ParserOptions(true)); }}"
+        ).unwrap();
+        writeln!(
+            s,
+            "    public static Parser parse{pname}NoSkips(String src) {{ return parse{pname}NoSkips(src.getBytes(StandardCharsets.UTF_8)); }}"
         ).unwrap();
     }
 }
