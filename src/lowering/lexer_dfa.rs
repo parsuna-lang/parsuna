@@ -87,14 +87,14 @@ pub struct DfaOpts {
     /// Compute per-state self-loop byte ranges so backends can emit
     /// a vectorizable scan-past prologue. Off: each byte goes through
     /// the per-byte switch one at a time.
-    pub self_loop: bool,
+    pub detect_self_loops: bool,
 }
 
 impl Default for DfaOpts {
     fn default() -> Self {
         Self {
             minimize: true,
-            self_loop: true,
+            detect_self_loops: true,
         }
     }
 }
@@ -111,7 +111,7 @@ pub fn compile_with_opts(tokens: &[TokenInfo], opts: DfaOpts) -> Vec<DfaState> {
     if opts.minimize {
         dfa = minimize(dfa);
     }
-    if opts.self_loop {
+    if opts.detect_self_loops {
         detect_self_loops(&mut dfa);
     }
     dfa

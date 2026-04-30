@@ -43,16 +43,16 @@ use crate::lowering::{Body, DispatchLeaf, DispatchTree, LoweringOpts, Op, StateI
 pub fn optimize(table: &mut StateTable, opts: LoweringOpts) {
     loop {
         let snapshot = ops_snapshot(table);
-        if opts.splice_chains {
+        if opts.inline_jumps {
             inline_jumps(table);
         }
-        if opts.tce {
+        if opts.fold_trampolines {
             fold_trampolines(table);
         }
-        if opts.branch_inline {
+        if opts.inline_branch_bodies {
             inline_branch_bodies(table);
         }
-        if opts.dce {
+        if opts.eliminate_dead {
             eliminate_dead(table);
         }
         if ops_snapshot(table) == snapshot {

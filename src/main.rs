@@ -51,23 +51,23 @@ struct Cli {
 struct OptArgs {
     /// Disable absorbing tail `Jump(N)` chains into a state's body.
     /// One block-level op stays in one state.
-    #[arg(long = "no-splice-chains", global = true, help_heading = "Optimizer")]
-    no_splice_chains: bool,
+    #[arg(long = "no-inline-jumps", global = true, help_heading = "Optimizer")]
+    no_inline_jumps: bool,
 
     /// Disable folding pure-`Ret` trampolines (drop redundant
     /// `PushRet`s and rewrite `cont: Some(s) → None`).
-    #[arg(long = "no-tce", global = true, help_heading = "Optimizer")]
-    no_tce: bool,
+    #[arg(long = "no-fold-trampolines", global = true, help_heading = "Optimizer")]
+    no_fold_trampolines: bool,
 
     /// Disable inlining of `[Op::Jump(s)]`-shaped branch bodies
     /// into the calling `Op::Opt`/`Op::Star`/dispatch arm.
-    #[arg(long = "no-branch-inline", global = true, help_heading = "Optimizer")]
-    no_branch_inline: bool,
+    #[arg(long = "no-inline-branch-bodies", global = true, help_heading = "Optimizer")]
+    no_inline_branch_bodies: bool,
 
     /// Disable dead-state elimination. Unreachable states linger in
     /// the table.
-    #[arg(long = "no-dce", global = true, help_heading = "Optimizer")]
-    no_dce: bool,
+    #[arg(long = "no-eliminate-dead", global = true, help_heading = "Optimizer")]
+    no_eliminate_dead: bool,
 
     /// Disable lexer-DFA partition-refinement minimization. Keeps
     /// the raw subset-construction output.
@@ -77,24 +77,24 @@ struct OptArgs {
     /// Disable per-DFA-state self-loop range computation. Backends
     /// that can vectorize a scan-past prologue won't have the data
     /// to do so.
-    #[arg(long = "no-dfa-self-loop", global = true, help_heading = "Optimizer")]
-    no_dfa_self_loop: bool,
+    #[arg(long = "no-dfa-detect-self-loops", global = true, help_heading = "Optimizer")]
+    no_dfa_detect_self_loops: bool,
 }
 
 impl OptArgs {
     fn lowering_opts(&self) -> LoweringOpts {
         LoweringOpts {
-            splice_chains: !self.no_splice_chains,
-            tce: !self.no_tce,
-            branch_inline: !self.no_branch_inline,
-            dce: !self.no_dce,
+            inline_jumps: !self.no_inline_jumps,
+            fold_trampolines: !self.no_fold_trampolines,
+            inline_branch_bodies: !self.no_inline_branch_bodies,
+            eliminate_dead: !self.no_eliminate_dead,
         }
     }
 
     fn dfa_opts(&self) -> DfaOpts {
         DfaOpts {
             minimize: !self.no_dfa_minimize,
-            self_loop: !self.no_dfa_self_loop,
+            detect_self_loops: !self.no_dfa_detect_self_loops,
         }
     }
 }

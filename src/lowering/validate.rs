@@ -15,7 +15,7 @@
 //! 0-event paths *are* allowed — `step` returns `None` and
 //! `next_event` loops the call. They show up in `Op::Star`/`Op::Opt`
 //! miss paths (loop exit, optional skip) and in pure-control state
-//! bodies that branch_inline didn't fold. Each optimizer pass is
+//! bodies that inline_branch_bodies didn't fold. Each optimizer pass is
 //! also gated by [`is_valid_body`] so a rewrite never produces a
 //! body that violates rule (1) or (2).
 

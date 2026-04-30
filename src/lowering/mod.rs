@@ -383,30 +383,30 @@ pub struct LoweringOpts {
     /// state `[..., Jump(N)]` becomes `[..., N's ops]` when the
     /// result still satisfies the runtime invariant. Off: every
     /// block-level op stays in its own state.
-    pub splice_chains: bool,
+    pub inline_jumps: bool,
     /// Drop `Op::PushRet(s)` and rewrite `cont: Some(s) → None`
     /// when `s` is a pure-`Op::Ret` trampoline. Off: trampolines
     /// stay live and the dispatch loop bounces through them.
-    pub tce: bool,
+    pub fold_trampolines: bool,
     /// Replace a body that's just `[Op::Jump(s)]` inside an
     /// `Op::Opt`/`Op::Star`/dispatch arm with `s`'s ops directly.
     /// Off: the loop-head / branch-head state stays as a separate
     /// 0-event state and the runtime walks through it on each
     /// iteration.
-    pub branch_inline: bool,
+    pub inline_branch_bodies: bool,
     /// Drop states no entry can reach. Off: dead states linger in
     /// the table; the generated parser still works (they're never
     /// entered) but the emitted source is bigger.
-    pub dce: bool,
+    pub eliminate_dead: bool,
 }
 
 impl Default for LoweringOpts {
     fn default() -> Self {
         Self {
-            splice_chains: true,
-            tce: true,
-            branch_inline: true,
-            dce: true,
+            inline_jumps: true,
+            fold_trampolines: true,
+            inline_branch_bodies: true,
+            eliminate_dead: true,
         }
     }
 }
