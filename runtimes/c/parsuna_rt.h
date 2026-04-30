@@ -166,7 +166,6 @@ typedef struct Parser {
     int   *ret; size_t ret_len, ret_cap;
 
     Recovery recovery;
-    int eof_checked;
 
     /* Strings owned by the last yielded event. Freed at the top of the
      * next parser_next call so the caller can keep reading them until
@@ -564,20 +563,20 @@ static inline int parser_next(Parser *p, Event *out) {
             return yield_event(p, e, out);
         }
         if (p->state == TERMINATED) {
-            if (!p->eof_checked) {
-                p->eof_checked = 1;
-                if (p->look_buf[0].kind != PARSUNA_TK_EOF) {
-                    static const uint16_t empty_sync[] = { SENTINEL };
-                    Event e = ev_error_here(p, "expected end of input");
-                    p->recovery.active = 1;
-                    p->recovery.expected_set = 0;
-                    p->recovery.expected_kind = 0;
-                    p->recovery.sync = empty_sync;
-                    return yield_event(p, e, out);
-                }
-                continue;
-            }
-            return 0;
+            /* EOF gate. On the first visit with trailing input, raise
+             * an error and arm a sync-empty recovery so the rest of
+             * the input drains as Garbage events one per call. Once
+             * recovery has eaten its way to EOF the lookahead pins
+             * at EOF (the lexer keeps yielding it), so this is
+             * naturally idempotent — subsequent visits just return 0. */
+            if (p->look_buf[0].kind == PARSUNA_TK_EOF) return 0;
+            static const uint16_t empty_sync[] = { SENTINEL };
+            Event e = ev_error_here(p, "expected end of input");
+            p->recovery.active = 1;
+            p->recovery.expected_set = 0;
+            p->recovery.expected_kind = 0;
+            p->recovery.sync = empty_sync;
+            return yield_event(p, e, out);
         }
         Event e;
         if (step(p, &e)) return yield_event(p, e, out);

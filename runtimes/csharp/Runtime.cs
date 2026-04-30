@@ -298,7 +298,6 @@ public sealed class Parser : IEnumerable<Event>, IEnumerator<Event>
     private int _state;
     private readonly Stack<int> _ret = new();
 
-    private bool _eofChecked;
     private Event? _current;
 
     private Recovery _recovery;
@@ -462,19 +461,18 @@ public sealed class Parser : IEnumerable<Event>, IEnumerator<Event>
             }
             if (_state == Terminated)
             {
-                if (!_eofChecked)
-                {
-                    _eofChecked = true;
-                    if (_look[0]!.Kind != ParserConfig.EofKind)
-                    {
-                        var ev = ErrorHere("expected end of input");
-                        _recovery = new Recovery { Sync = Array.Empty<ushort>(), ExpectedPlusOne = 0 };
-                        _recoveryActive = true;
-                        return ev;
-                    }
-                    continue;
-                }
-                return null;
+                // EOF gate. On the first visit with trailing input,
+                // raise an error and arm a sync-empty recovery so the
+                // rest of the input drains as Garbage events one per
+                // call. Once recovery has eaten its way to EOF the
+                // lookahead pins at EOF (the lexer keeps yielding it),
+                // so this is naturally idempotent — subsequent visits
+                // just return null.
+                if (_look[0]!.Kind == ParserConfig.EofKind) return null;
+                var ev = ErrorHere("expected end of input");
+                _recovery = new Recovery { Sync = Array.Empty<ushort>(), ExpectedPlusOne = 0 };
+                _recoveryActive = true;
+                return ev;
             }
             var stepEv = _cfg.Step(this);
             if (stepEv is not null) return stepEv;

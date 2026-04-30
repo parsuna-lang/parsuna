@@ -270,7 +270,6 @@ export class Parser<
   private state: number;
   private retStack: number[] = [];
   private recovery: Recovery<TK> | null = null;
-  private eofChecked = false;
 
   constructor(
     private readonly lex: Lexer<TK>,
@@ -442,20 +441,19 @@ export class Parser<
         continue;
       }
 
-      // EOF gate at TERMINATED. If trailing input remains, raise an
+      // EOF gate. On the first visit with trailing input, raise an
       // error and arm a sync-empty recovery so the rest of the input
-      // drains as garbage events one per call.
+      // drains as garbage events one per call. Once recovery has
+      // eaten its way to EOF the lookahead pins at EOF (the lexer
+      // keeps yielding it), so this is naturally idempotent —
+      // subsequent visits just return undefined.
       if (this.state === TERMINATED) {
-        if (!this.eofChecked) {
-          this.eofChecked = true;
-          if (this.lookBuf[0]?.kind !== this.cfg.eofKind) {
-            const event = this.errorHere("expected end of input");
-            this.recovery = { sync: [], expected: null };
-            return event;
-          }
-          continue;
+        if (this.lookBuf[0]?.kind === this.cfg.eofKind) {
+          return undefined;
         }
-        return undefined;
+        const event = this.errorHere("expected end of input");
+        this.recovery = { sync: [], expected: null };
+        return event;
       }
 
       // Drive mode: run one state body. If `step` emitted, yield it.

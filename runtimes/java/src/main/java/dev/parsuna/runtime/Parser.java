@@ -66,7 +66,6 @@ public final class Parser implements Iterator<Event> {
     private final ArrayDeque<Integer> ret = new ArrayDeque<>();
 
     private Recovery recovery;
-    private boolean eofChecked;
     private Event ahead;
     private final ParserConfig cfg;
 
@@ -210,17 +209,17 @@ public final class Parser implements Iterator<Event> {
                 }
                 return new Event.Garbage(takeToken());
             }
+            // EOF gate. On the first visit with trailing input, raise
+            // an error and arm a sync-empty recovery so the rest of
+            // the input drains as Garbage events one per call. Once
+            // recovery has eaten its way to EOF the lookahead pins at
+            // EOF (the lexer keeps yielding it), so this is naturally
+            // idempotent — subsequent visits just return null.
             if (state == TERMINATED) {
-                if (!eofChecked) {
-                    eofChecked = true;
-                    if (look(0).kind != ParserConfig.EOF_KIND) {
-                        Event ev = errorHere("expected end of input");
-                        recovery = new Recovery(new int[0], -1);
-                        return ev;
-                    }
-                    continue;
-                }
-                return null;
+                if (look(0).kind == ParserConfig.EOF_KIND) return null;
+                Event ev = errorHere("expected end of input");
+                recovery = new Recovery(new int[0], -1);
+                return ev;
             }
             Event ev = cfg.step.apply(this);
             if (ev != null) return ev;

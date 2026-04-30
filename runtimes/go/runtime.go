@@ -281,7 +281,6 @@ type Parser struct {
 	ret        []int
 	rec        recovery
 	recActive  bool
-	eofChecked bool
 	cfg        Config
 }
 
@@ -460,21 +459,20 @@ func (p *Parser) NextEvent() (Event, bool) {
 			return Event{Tag: EvGarbage, Token: p.takeToken()}, true
 		}
 
-		// EOF gate at Terminated. If trailing input remains, raise
-		// an error and arm an empty-sync recovery so the rest of
-		// the input drains as Garbage events one per call.
+		// EOF gate. On the first visit with trailing input, raise an
+		// error and arm an empty-sync recovery so the rest of the
+		// input drains as Garbage events one per call. Once recovery
+		// has eaten its way to EOF the lookahead pins at EOF (the
+		// lexer keeps yielding it), so this is naturally idempotent —
+		// subsequent visits just return ok=false.
 		if p.state == Terminated {
-			if !p.eofChecked {
-				p.eofChecked = true
-				if p.look[0].Kind != EofKind {
-					ev := p.ErrorHere("expected end of input")
-					p.rec = recovery{sync: nil, expectedSet: false}
-					p.recActive = true
-					return ev, true
-				}
-				continue
+			if p.look[0].Kind == EofKind {
+				return Event{}, false
 			}
-			return Event{}, false
+			ev := p.ErrorHere("expected end of input")
+			p.rec = recovery{sync: nil, expectedSet: false}
+			p.recActive = true
+			return ev, true
 		}
 
 		// Drive mode: run one state body. If Step emitted, yield
