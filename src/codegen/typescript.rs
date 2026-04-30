@@ -58,7 +58,7 @@ fn emit_header(s: &mut String, _st: &StateTable) {
 fn emit_imports(s: &mut String) {
     writeln!(
         s,
-        "import {{ DfaMatch, Event, Lexer, Parser, TERMINATED }} from \"parsuna-rt\";"
+        "import {{ Cursor, DfaMatch, Event, Lexer, Parser, TERMINATED }} from \"parsuna-rt\";"
     )
     .unwrap();
     writeln!(
@@ -436,7 +436,7 @@ fn emit_tables(s: &mut String, st: &StateTable) {
 fn emit_drive(s: &mut String, st: &StateTable) {
     writeln!(
         s,
-        "function step(p: Parser<TokenKind, RuleKind>): Event<TokenKind, RuleKind> | undefined {{"
+        "function step(p: Cursor<TokenKind, RuleKind>): Event<TokenKind, RuleKind> | undefined {{"
     )
     .unwrap();
     writeln!(s, "  let cur = p.getState();").unwrap();

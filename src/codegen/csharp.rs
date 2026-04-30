@@ -442,7 +442,7 @@ fn emit_grammar(s: &mut String, st: &StateTable) {
 }
 
 fn emit_drive(s: &mut String, st: &StateTable) {
-    writeln!(s, "    private static Event? Step(Parser p) {{").unwrap();
+    writeln!(s, "    private static Event? Step(Cursor p) {{").unwrap();
     writeln!(s, "        int cur = p.State();").unwrap();
     writeln!(s, "        Event? @event = null;").unwrap();
     writeln!(s, "        switch (cur) {{").unwrap();

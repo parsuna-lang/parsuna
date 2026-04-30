@@ -227,12 +227,18 @@ public sealed class Lexer
 /// event that body produced, or <c>null</c> if the body was a pure
 /// transition step — the runtime's <c>NextEvent</c> loop calls
 /// <c>Step</c> again in that case.
+///
+/// <para><c>Step</c> receives a <see cref="Cursor"/> — a thin wrapper
+/// that exposes just the runtime hooks generated dispatch needs
+/// (Look/State/PushRet/Enter/Exit/etc.). Outside callers only see
+/// <see cref="Parser"/>, which has no such methods, so the parser's
+/// internal state stays sealed.</para>
 /// </remarks>
 public sealed record ParserConfig(
     int K,
     Predicate<ushort> IsSkip,
     bool HasSkips,
-    Func<Parser, Event?> Step)
+    Func<Cursor, Event?> Step)
 {
     /// <summary>End-of-input token kind. Always 0; a constant rather than a
     /// per-grammar value so generated code and consumers don't sprinkle
@@ -264,22 +270,22 @@ public sealed class Parser : IEnumerable<Event>, IEnumerator<Event>
     /// <summary>Sentinel state meaning "the parser has terminated".</summary>
     public const int Terminated = -1;
 
-    /// <summary>In-flight error recovery state. Set by <see cref="RecoverTo"/>
-    /// and the slow path of <see cref="TryConsume"/>; cleared once the
+    /// <summary>In-flight error recovery state. Set by <see cref="Cursor.RecoverTo"/>
+    /// and the slow path of <see cref="Cursor.TryConsume"/>; cleared once the
     /// lookahead lands on a sync token (or EOF). Each call to
     /// <see cref="NextEvent"/> drains exactly one garbage token before
     /// yielding, so a long run of unexpected input doesn't pile up in
     /// the queue.</summary>
-    private struct Recovery
+    internal struct Recovery
     {
         /// <summary>Token kinds to recover *to*. Recovery consumes garbage
         /// until the lookahead matches one of these (or EOF).</summary>
         public ushort[] Sync;
         /// <summary>Non-zero when the recovery was triggered by an
-        /// <see cref="TryConsume"/> for that kind: if the sync set lands
-        /// on the expected kind, the recovery finalisation also consumes
-        /// the token (so the surrounding rule proceeds as if it had
-        /// matched). Zero (no expected kind) for the dispatch-error
+        /// <see cref="Cursor.TryConsume"/> for that kind: if the sync set
+        /// lands on the expected kind, the recovery finalisation also
+        /// consumes the token (so the surrounding rule proceeds as if it
+        /// had matched). Zero (no expected kind) for the dispatch-error
         /// path. Stored as a one-past-EOF encoding: 0 means "no
         /// expected", any other value is the literal expected kind + 1.</summary>
         public int ExpectedPlusOne;
@@ -289,21 +295,27 @@ public sealed class Parser : IEnumerable<Event>, IEnumerator<Event>
     // Lookahead ring. Null slots are awaiting refill — pump-mode in
     // NextEvent pulls lex tokens one-at-a-time until every slot holds a
     // structural token. Generated Step code only ever runs when all
-    // slots are filled, so Look(i) can return the value unconditionally.
+    // slots are filled, so Cursor.Look(i) can return the value
+    // unconditionally.
     //
-    // Empty slots are always a contiguous suffix — Consume parks the
+    // Empty slots are always a contiguous suffix — TakeToken parks the
     // new null at index K-1 and pump fills the leftmost empty slot.
-    private readonly Token?[] _look;
-    private Pos _prevEnd;
-    private int _state;
-    private readonly Stack<int> _ret = new();
+    //
+    // Fields are `internal` rather than `private` so the sibling
+    // <see cref="Cursor"/> wrapper can access them directly without
+    // an extra method-call hop. External code can't see them either
+    // way — the assembly seam keeps them out of consumers' hands.
+    internal readonly Token?[] _look;
+    internal Pos _prevEnd;
+    internal int _state;
+    internal readonly Stack<int> _ret = new();
 
     private Event? _current;
 
-    private Recovery _recovery;
-    private bool _recoveryActive;
+    internal Recovery _recovery;
+    internal bool _recoveryActive;
 
-    private readonly ParserConfig _cfg;
+    internal readonly ParserConfig _cfg;
 
     public Parser(Lexer lex, int entry, ParserConfig cfg)
     {
@@ -314,52 +326,11 @@ public sealed class Parser : IEnumerable<Event>, IEnumerator<Event>
         _prevEnd = default;
     }
 
-    /// <summary>Peek at the i-th lookahead token. Generated <c>Step</c>
-    /// only runs after pump-mode has filled every slot.</summary>
-    public Token Look(int i) => _look[i]!;
-
-    /// <summary>Current state id. Read at the top of every step iteration.</summary>
-    public int State() => _state;
-    public void SetState(int s) => _state = s;
-    public void PushRet(int s) => _ret.Push(s);
-    public int PopRet() => _ret.Count > 0 ? _ret.Pop() : Terminated;
-
-    /// <summary>True iff the current lookahead matches any of the given prefixes.</summary>
-    public bool MatchesFirst(ushort[][] set)
-    {
-        foreach (var seq in set)
-        {
-            bool match = true;
-            for (int i = 0; i < seq.Length; i++)
-            {
-                if (_look[i]!.Kind != seq[i]) { match = false; break; }
-            }
-            if (match) return true;
-        }
-        return false;
-    }
-
-    /// <summary>Build an Enter event for <paramref name="rule"/>.
-    /// Records the rule's start position so a later Exit without any
-    /// intervening tokens still produces a zero-width span at the
-    /// expected place.</summary>
-    public Event Enter(int rule)
-    {
-        var pos = _look[0]!.Span.Start;
-        _prevEnd = pos;
-        return new EnterEvent(rule, pos);
-    }
-
-    /// <summary>Build an Exit event for <paramref name="rule"/>,
-    /// positioned at the end of the last consumed token (or the rule's
-    /// start for empty rules).</summary>
-    public Event Exit(int rule) => new ExitEvent(rule, _prevEnd);
-
     // Pop the current lookahead token and shift the buffer up by one.
     // Slot K-1 is left null so pump-mode can refill it (yielding one
     // skip per call) before the next Step reads lookahead. Internal —
     // callers wrap the result in the appropriate event subtype.
-    private Token TakeToken()
+    internal Token TakeToken()
     {
         var t = _look[0]!;
         _prevEnd = t.Span.End;
@@ -368,27 +339,10 @@ public sealed class Parser : IEnumerable<Event>, IEnumerator<Event>
         return t;
     }
 
-    /// <summary>Consume the current lookahead token and return it as a
-    /// <see cref="TokenEvent"/>. Used on TryConsume's success path and
-    /// on recovery's "synced-to-expected" path — both yield legitimate
-    /// parse data.</summary>
-    public Event Consume() => new TokenEvent(TakeToken());
+    internal Event Consume() => new TokenEvent(TakeToken());
 
-    /// <summary>Try to consume a token of <paramref name="kind"/>. On a
-    /// hit returns a <see cref="TokenEvent"/>. On a miss returns an
-    /// <see cref="ErrorEvent"/> and arms recovery — subsequent
-    /// <see cref="NextEvent"/> calls skip <see cref="GarbageEvent"/>s
-    /// one at a time until the lookahead lands on <paramref name="sync"/>
-    /// (when it does, the matching token comes through as a normal
-    /// <see cref="TokenEvent"/>).</summary>
-    public Event TryConsume(ushort kind, ushort[] sync, string name)
-    {
-        if (_look[0]!.Kind == kind) return Consume();
-        var ev = ErrorHere($"expected {name}");
-        _recovery = new Recovery { Sync = sync, ExpectedPlusOne = kind + 1 };
-        _recoveryActive = true;
-        return ev;
-    }
+    internal Event ErrorHere(string msg) =>
+        new ErrorEvent(new ParseError(msg, _look[0]!.Span));
 
     private static bool ContainsKind(ushort[] set, ushort k)
     {
@@ -396,30 +350,16 @@ public sealed class Parser : IEnumerable<Event>, IEnumerator<Event>
         return false;
     }
 
-    /// <summary>Arm recovery without an expected kind. Called from a
-    /// dispatch error leaf: the surrounding <c>cur</c> is already
-    /// pointing at the post-recovery state, and the returned
-    /// <see cref="ErrorEvent"/> makes Step yield so recovery-mode can
-    /// take over.</summary>
-    public void RecoverTo(ushort[] sync)
-    {
-        _recovery = new Recovery { Sync = sync, ExpectedPlusOne = 0 };
-        _recoveryActive = true;
-    }
-
-    /// <summary>Build a recoverable error event at the current
-    /// lookahead.</summary>
-    public Event ErrorHere(string msg) =>
-        new ErrorEvent(new ParseError(msg, _look[0]!.Span));
-
     // True iff some lookahead slot still needs to be filled. Empty
     // slots are always a contiguous suffix, so checking slot K-1 is
     // the O(1) form of "any slot is null".
     private bool PumpPending() => _look[_cfg.K - 1] is null;
 
     /// <summary>
-    /// Produce the next event from the parse, or <c>null</c> once the
-    /// entire input has been consumed.
+    /// Advance to the next event, returning <c>true</c> if one was
+    /// produced (read it via <see cref="Current"/>) or <c>false</c>
+    /// once the input is fully consumed. The whole pull loop lives
+    /// here — there's no separate <c>NextEvent</c> indirection.
     /// </summary>
     /// <remarks>
     /// The loop runs three modes — pump (refill lookahead, possibly
@@ -427,7 +367,7 @@ public sealed class Parser : IEnumerable<Event>, IEnumerator<Event>
     /// per call), and drive (one Step call). Each mode yields at most
     /// one event before the loop runs again.
     /// </remarks>
-    public Event? NextEvent()
+    public bool MoveNext()
     {
         while (true)
         {
@@ -436,7 +376,8 @@ public sealed class Parser : IEnumerable<Event>, IEnumerator<Event>
                 var t = _lex.NextToken();
                 if (_cfg.HasSkips && _cfg.IsSkip(t.Kind))
                 {
-                    return new TokenEvent(t);
+                    _current = new TokenEvent(t);
+                    return true;
                 }
                 for (int i = 0; i < _look.Length; i++)
                 {
@@ -454,10 +395,11 @@ public sealed class Parser : IEnumerable<Event>, IEnumerator<Event>
                     bool wasExpected = _recovery.ExpectedPlusOne != 0
                         && (ushort)(_recovery.ExpectedPlusOne - 1) == look0;
                     _recoveryActive = false;
-                    if (wasExpected) return Consume();
+                    if (wasExpected) { _current = Consume(); return true; }
                     continue;
                 }
-                return new GarbageEvent(TakeToken());
+                _current = new GarbageEvent(TakeToken());
+                return true;
             }
             if (_state == Terminated)
             {
@@ -467,24 +409,127 @@ public sealed class Parser : IEnumerable<Event>, IEnumerator<Event>
                 // call. Once recovery has eaten its way to EOF the
                 // lookahead pins at EOF (the lexer keeps yielding it),
                 // so this is naturally idempotent — subsequent visits
-                // just return null.
-                if (_look[0]!.Kind == ParserConfig.EofKind) return null;
-                var ev = ErrorHere("expected end of input");
+                // just return false.
+                if (_look[0]!.Kind == ParserConfig.EofKind) { _current = null; return false; }
+                _current = ErrorHere("expected end of input");
                 _recovery = new Recovery { Sync = Array.Empty<ushort>(), ExpectedPlusOne = 0 };
                 _recoveryActive = true;
-                return ev;
+                return true;
             }
-            var stepEv = _cfg.Step(this);
-            if (stepEv is not null) return stepEv;
+            var stepEv = _cfg.Step(new Cursor(this));
+            if (stepEv is not null) { _current = stepEv; return true; }
         }
     }
 
     public Event Current => _current!;
     object IEnumerator.Current => Current;
-    public bool MoveNext() { var ev = NextEvent(); _current = ev; return ev is not null; }
     public void Reset() => throw new NotSupportedException("Parser is single-pass.");
     public void Dispose() { }
 
     public IEnumerator<Event> GetEnumerator() => this;
     IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
+}
+
+/// <summary>The handle that generated Step bodies talk to the runtime
+/// through. Wraps a <see cref="Parser"/> and re-exports just the
+/// operations dispatch needs — lookahead access, return stack pushes,
+/// event builders, recovery arming.</summary>
+/// <remarks>
+/// External code can't construct a <c>Cursor</c> (the constructor is
+/// internal, and only <see cref="Parser.NextEvent"/> calls it), so the
+/// only way one ever exists is inside a call to <see cref="ParserConfig.Step"/>
+/// from the runtime's pull loop. That keeps the parser's internal state
+/// from being poked at out of band.
+/// </remarks>
+public sealed class Cursor
+{
+    private readonly Parser _p;
+
+    internal Cursor(Parser p) { _p = p; }
+
+    /// <summary>Peek at the i-th lookahead token. Generated <c>Step</c>
+    /// only runs after pump-mode has filled every slot.</summary>
+    public Token Look(int i) => _p._look[i]!;
+
+    /// <summary>Current state id. Read at the top of every step iteration.</summary>
+    public int State() => _p._state;
+
+    /// <summary>Overwrite the current state id.</summary>
+    public void SetState(int s) => _p._state = s;
+
+    /// <summary>Push a return address onto the call stack.</summary>
+    public void PushRet(int s) => _p._ret.Push(s);
+
+    /// <summary>Pop the top return address, or <see cref="Parser.Terminated"/>
+    /// when the stack is empty.</summary>
+    public int PopRet() => _p._ret.Count > 0 ? _p._ret.Pop() : Parser.Terminated;
+
+    /// <summary>True iff the current lookahead matches any of the given
+    /// prefixes.</summary>
+    public bool MatchesFirst(ushort[][] set)
+    {
+        foreach (var seq in set)
+        {
+            bool match = true;
+            for (int i = 0; i < seq.Length; i++)
+            {
+                if (_p._look[i]!.Kind != seq[i]) { match = false; break; }
+            }
+            if (match) return true;
+        }
+        return false;
+    }
+
+    /// <summary>Build an Enter event for <paramref name="rule"/>.
+    /// Records the rule's start position so a later Exit without any
+    /// intervening tokens still produces a zero-width span at the
+    /// expected place.</summary>
+    public Event Enter(int rule)
+    {
+        var pos = _p._look[0]!.Span.Start;
+        _p._prevEnd = pos;
+        return new EnterEvent(rule, pos);
+    }
+
+    /// <summary>Build an Exit event for <paramref name="rule"/>,
+    /// positioned at the end of the last consumed token (or the rule's
+    /// start for empty rules).</summary>
+    public Event Exit(int rule) => new ExitEvent(rule, _p._prevEnd);
+
+    /// <summary>Consume the current lookahead token and return it as a
+    /// <see cref="TokenEvent"/>. Used on TryConsume's success path and
+    /// on recovery's "synced-to-expected" path — both yield legitimate
+    /// parse data.</summary>
+    public Event Consume() => _p.Consume();
+
+    /// <summary>Try to consume a token of <paramref name="kind"/>. On a
+    /// hit returns a <see cref="TokenEvent"/>. On a miss returns an
+    /// <see cref="ErrorEvent"/> and arms recovery — subsequent
+    /// <see cref="Parser.NextEvent"/> calls skip <see cref="GarbageEvent"/>s
+    /// one at a time until the lookahead lands on <paramref name="sync"/>
+    /// (when it does, the matching token comes through as a normal
+    /// <see cref="TokenEvent"/>).</summary>
+    public Event TryConsume(ushort kind, ushort[] sync, string name)
+    {
+        if (_p._look[0]!.Kind == kind) return _p.Consume();
+        var ev = _p.ErrorHere($"expected {name}");
+        _p._recovery = new Parser.Recovery { Sync = sync, ExpectedPlusOne = kind + 1 };
+        _p._recoveryActive = true;
+        return ev;
+    }
+
+    /// <summary>Arm recovery without an expected kind. Called from a
+    /// dispatch error leaf: the surrounding <c>cur</c> is already
+    /// pointing at the post-recovery state, and the returned
+    /// <see cref="ErrorEvent"/> makes Step yield so recovery-mode can
+    /// take over.</summary>
+    public void RecoverTo(ushort[] sync)
+    {
+        _p._recovery = new Parser.Recovery { Sync = sync, ExpectedPlusOne = 0 };
+        _p._recoveryActive = true;
+    }
+
+    /// <summary>Build a recoverable error event at the current
+    /// lookahead.</summary>
+    public Event ErrorHere(string msg) => _p.ErrorHere(msg);
 }

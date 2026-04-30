@@ -200,9 +200,49 @@ export class Lexer<TK extends number> {
 export const TERMINATED = -1;
 
 /**
+ * The handle generated `step` bodies talk to the runtime through. A
+ * structural interface that re-exports just the operations dispatch
+ * needs — lookahead access, return stack pushes, event builders,
+ * recovery arming.
+ *
+ * The runtime's [`Parser`] satisfies this interface, but the public
+ * `Parser` type only exposes `nextEvent` and the iterator surface, so
+ * external consumers can't call these methods. Generated code asks for
+ * `Cursor<TK, RK>` and pays no allocation or indirection — the cursor
+ * is the parser instance, just narrowed to the dispatch surface at the
+ * type level.
+ */
+export interface Cursor<TK extends number, RK extends number> {
+  /** Peek at the i-th lookahead token. */
+  look(i: number): Token<TK>;
+  /** Current state id. */
+  getState(): number;
+  /** Overwrite the current state. */
+  setState(s: number): void;
+  /** Push a return address onto the call stack. */
+  pushRet(s: number): void;
+  /** Pop the top return address, or [`TERMINATED`] if empty. */
+  popRet(): number;
+  /** True iff the lookahead matches any of the given prefixes. */
+  matchesFirst(set: readonly (readonly TK[])[]): boolean;
+  /** Build an Enter event for `rule`. */
+  enter(rule: RK): Event<TK, RK>;
+  /** Build an Exit event for `rule`. */
+  exit(rule: RK): Event<TK, RK>;
+  /** Consume the lookahead as a `token` event. */
+  consume(): Event<TK, RK>;
+  /** Try to consume `kind`; on miss arm recovery and return an error. */
+  tryConsume(kind: TK, sync: readonly TK[], expectedMsg: string): Event<TK, RK>;
+  /** Arm recovery without an expected kind. */
+  recoverTo(sync: readonly TK[]): void;
+  /** Build a recoverable error event at the lookahead. */
+  errorHere(msg: string): Event<TK, RK>;
+}
+
+/**
  * Configuration a generated parser injects into the runtime [`Parser`].
  *
- * The runtime calls `step(parser)` once per drive-mode iteration.
+ * The runtime calls `step(cursor)` once per drive-mode iteration.
  * `step` runs exactly one match arm of the generated dispatch and
  * returns whatever event that body's path produced (or `undefined`
  * if the body was a pure transition step).
@@ -219,14 +259,14 @@ export interface ParserConfig<TK extends number, RK extends number> {
    * that body produced, or `undefined` if it was a pure transition
    * (the runtime's `nextEvent` loop calls `step` again).
    */
-  step: (p: Parser<TK, RK>) => Event<TK, RK> | undefined;
+  step: (c: Cursor<TK, RK>) => Event<TK, RK> | undefined;
 }
 
 /**
- * In-flight error recovery. Set by [`Parser.tryConsume`]'s slow path
- * and [`Parser.recoverTo`]; cleared once the lookahead lands on a
- * sync token (or EOF). Each call to [`Parser.nextEvent`] in recovery
- * mode yields one `garbage` event before re-checking the sync set.
+ * In-flight error recovery. Set by [`Cursor.tryConsume`]'s slow path
+ * and [`Cursor.recoverTo`]; cleared once the lookahead lands on a sync
+ * token (or EOF). Each call to [`Parser.nextEvent`] in recovery mode
+ * yields one `garbage` event before re-checking the sync set.
  */
 interface Recovery<TK> {
   /** Token kinds to recover *to*. */
@@ -250,11 +290,19 @@ interface Recovery<TK> {
  * per call), or drive (one `step` call) — and yields one event per
  * mode. Drive's `step` may return `undefined` for pure-transition
  * state bodies; the runtime simply loops drive again.
+ *
+ * The class implements [`Cursor`] internally — generated dispatch
+ * receives a `Cursor` view of the parser, so external consumers (who
+ * see only the public `Parser` API: constructor, `nextEvent`, and the
+ * iterator surface) never get to the dispatch hooks. The methods are
+ * marked `private` for type-level enforcement; at runtime the same
+ * instance plays both roles, so there's no wrapper allocation and no
+ * indirection.
  */
 export class Parser<
   TK extends number,
   RK extends number,
-> implements IterableIterator<Event<TK, RK>> {
+> implements IterableIterator<Event<TK, RK>>, Cursor<TK, RK> {
   /**
    * Lookahead ring. `null` slots are awaiting refill — pump-mode in
    * [`nextEvent`] pulls lex tokens one-at-a-time until every slot
@@ -283,11 +331,13 @@ export class Parser<
     this.prevEnd = { offset: 0, line: 1, column: 1 };
   }
 
-  /**
-   * Peek at the `i`-th lookahead token (`0 <= i < k`). Generated
-   * `step()` only runs after pump-mode has filled every slot, so this
-   * never sees a `null`.
-   */
+  // -------------------------------------------------------------------
+  // Cursor implementation. These are public at the runtime/JS level
+  // (TypeScript's `private` keyword is type-only) so generated code in
+  // user packages can call them via the `Cursor<TK, RK>` view.
+  // -------------------------------------------------------------------
+
+  /** @internal */
   look(i: number): Token<TK> {
     const t = this.lookBuf[i];
     if (t === null) {
@@ -296,30 +346,27 @@ export class Parser<
     return t;
   }
 
-  /** Current state id. Read at the top of every step iteration. */
+  /** @internal */
   getState(): number {
     return this.state;
   }
 
-  /** Overwrite the current state. */
+  /** @internal */
   setState(s: number): void {
     this.state = s;
   }
 
-  /** Push a return address onto the call stack. */
+  /** @internal */
   pushRet(s: number): void {
     this.retStack.push(s);
   }
 
-  /** Pop the top return address, or [`TERMINATED`] if the stack is empty. */
+  /** @internal */
   popRet(): number {
     return this.retStack.length ? this.retStack.pop()! : TERMINATED;
   }
 
-  /**
-   * True iff the current lookahead matches any of the given prefixes.
-   * Used by generated `?`/`*`/`+` sites and by dispatch trees with k > 1.
-   */
+  /** @internal */
   matchesFirst(set: readonly (readonly TK[])[]): boolean {
     outer: for (const seq of set) {
       for (let i = 0; i < seq.length; i++) {
@@ -330,14 +377,14 @@ export class Parser<
     return false;
   }
 
-  /** Build an `Enter` event for `rule`, anchored at the start of lookahead. */
+  /** @internal */
   enter(rule: RK): Event<TK, RK> {
     const pos = this.look(0).span.start;
     this.prevEnd = pos;
     return { tag: "enter", rule, pos };
   }
 
-  /** Build an `Exit` event for `rule`, anchored at the previous token's end. */
+  /** @internal */
   exit(rule: RK): Event<TK, RK> {
     return { tag: "exit", rule, pos: this.prevEnd };
   }
@@ -345,9 +392,7 @@ export class Parser<
   /**
    * Pop the current lookahead token, shifting the buffer up by one.
    * Slot `k-1` is left null so pump-mode can refill it before the
-   * next `step()` reads lookahead. Internal — callers wrap the
-   * result in the appropriate event variant ([`consume`] for normal
-   * data, [`recoverStep`] for recovery garbage).
+   * next `step()` reads lookahead.
    */
   private takeToken(): Token<TK> {
     const t = this.lookBuf[0];
@@ -365,23 +410,12 @@ export class Parser<
     return t;
   }
 
-  /**
-   * Consume the current lookahead token and return it as a `token`
-   * event. Used on `tryConsume`'s success path and on recovery's
-   * "synced to expected" path — both yield legitimate parse data.
-   */
+  /** @internal */
   consume(): Event<TK, RK> {
     return { tag: "token", token: this.takeToken() };
   }
 
-  /**
-   * Try to consume a token of `kind`. On a hit this is a `consume`.
-   * On a miss it returns an error event and arms recovery — `step`
-   * will hand the error to the runtime, and subsequent `nextEvent`
-   * calls skip garbage one token at a time until the lookahead lands
-   * on `sync` (when it does, the matching token is consumed as
-   * normal `Token` data).
-   */
+  /** @internal */
   tryConsume(kind: TK, sync: readonly TK[], expectedMsg: string): Event<TK, RK> {
     if (this.lookBuf[0] !== null && this.lookBuf[0].kind === kind) {
       return this.consume();
@@ -391,26 +425,32 @@ export class Parser<
     return event;
   }
 
-  /**
-   * Arm recovery without an expected kind. Called from a dispatch
-   * tree's error leaf: the surrounding `cur` is already pointing at
-   * the post-recovery state, and the returned `error` event makes
-   * `step` yield so recovery-mode can take over.
-   */
+  /** @internal */
   recoverTo(sync: readonly TK[]): void {
     this.recovery = { sync, expected: null };
   }
 
-  /** Raise a recoverable error at the current lookahead. */
+  /** @internal */
   errorHere(msg: string): Event<TK, RK> {
     return { tag: "error", error: { message: msg, span: this.look(0).span } };
   }
 
+  // -------------------------------------------------------------------
+  // Public iteration API.
+  // -------------------------------------------------------------------
+
   /**
-   * Produce the next event, or `undefined` once the input is fully
-   * consumed.
+   * Produce the next event from the parse, or signal completion via
+   * `IteratorResult`. The whole pull loop lives here — there's no
+   * separate `nextEvent` indirection.
+   *
+   * Each call fires one of three modes — pump (refill lookahead,
+   * possibly yielding a skip), recovery (one garbage token per call),
+   * or drive (one `step` call) — and yields one event before looping
+   * again. Drive's `step` may return `undefined` for pure-transition
+   * state bodies; the runtime simply loops drive again.
    */
-  nextEvent(): Event<TK, RK> | undefined {
+  next(): IteratorResult<Event<TK, RK>> {
     for (;;) {
       // Skip mode: refill any empty lookahead slot. A skip token
       // becomes the yielded event; a structural token fills the slot
@@ -420,7 +460,7 @@ export class Parser<
       if (this.lookBuf[this.cfg.k - 1] === null) {
         const t = this.lex.nextToken();
         if (t.kind !== null && this.cfg.isSkip(t.kind)) {
-          return { tag: "token", token: t };
+          return { done: false, value: { tag: "token", token: t } };
         }
         for (let i = 0; i < this.lookBuf.length; i++) {
           if (this.lookBuf[i] === null) {
@@ -431,14 +471,26 @@ export class Parser<
         continue;
       }
 
-      // Recovery mode: advance one step. May yield one garbage token
-      // (or, if the sync hit on the kind we were expecting, a normal
-      // `token` event) — or finalise without consuming, in which case
-      // the loop retries.
+      // Recovery mode: advance one step. Three outcomes — yield a
+      // `garbage` event for an unexpected token, yield a normal
+      // `token` event when the sync hit on the kind we were
+      // expecting, or finalise without consuming and loop.
       if (this.recovery !== null) {
-        const ev = this.recoverStep();
-        if (ev !== undefined) return ev;
-        continue;
+        const rec = this.recovery;
+        const look0Kind = this.lookBuf[0]!.kind;
+        if (look0Kind === this.cfg.eofKind) {
+          this.recovery = null;
+          continue;
+        }
+        if (look0Kind !== null && rec.sync.indexOf(look0Kind) >= 0) {
+          const wasExpected = rec.expected !== null && rec.expected === look0Kind;
+          this.recovery = null;
+          if (wasExpected) {
+            return { done: false, value: this.consume() };
+          }
+          continue;
+        }
+        return { done: false, value: { tag: "garbage", token: this.takeToken() } };
       }
 
       // EOF gate. On the first visit with trailing input, raise an
@@ -446,59 +498,26 @@ export class Parser<
       // drains as garbage events one per call. Once recovery has
       // eaten its way to EOF the lookahead pins at EOF (the lexer
       // keeps yielding it), so this is naturally idempotent —
-      // subsequent visits just return undefined.
+      // subsequent visits just signal done.
       if (this.state === TERMINATED) {
         if (this.lookBuf[0]?.kind === this.cfg.eofKind) {
-          return undefined;
+          return { done: true, value: undefined as unknown as Event<TK, RK> };
         }
         const event = this.errorHere("expected end of input");
         this.recovery = { sync: [], expected: null };
-        return event;
+        return { done: false, value: event };
       }
 
       // Drive mode: run one state body. If `step` emitted, yield it.
       // Otherwise it just transitioned `cur` (and possibly the return
-      // stack); loop and run the next body.
+      // stack); loop and run the next body. The cursor is just `this`
+      // narrowed to the dispatch interface — no allocation, no hop.
       const ev = this.cfg.step(this);
-      if (ev !== undefined) return ev;
+      if (ev !== undefined) return { done: false, value: ev };
     }
   }
 
-  next(): IteratorResult<Event<TK, RK>> {
-    const v = this.nextEvent();
-    return v === undefined
-      ? { done: true, value: undefined as unknown as Event<TK, RK> }
-      : { done: false, value: v };
-  }
   [Symbol.iterator](): IterableIterator<Event<TK, RK>> {
     return this;
-  }
-
-  /**
-   * One step of recovery mode. Returns:
-   *
-   * - a `token` event when the lookahead matches the kind that
-   *   triggered recovery (legitimate data, recovery finalises);
-   * - a `garbage` event when the lookahead is unexpected (consume
-   *   it as garbage, stay in recovery mode);
-   * - `undefined` when recovery finalises without consuming (sync
-   *   hit on a non-`expected` kind, or EOF) — the caller's loop
-   *   retries.
-   */
-  private recoverStep(): Event<TK, RK> | undefined {
-    const rec = this.recovery!;
-    const look0 = this.lookBuf[0];
-    const k = look0 === null ? null : look0.kind;
-    if (k === this.cfg.eofKind) {
-      this.recovery = null;
-      return undefined;
-    }
-    if (k !== null && rec.sync.indexOf(k) >= 0) {
-      const wasExpected = rec.expected !== null && rec.expected === k;
-      this.recovery = null;
-      if (wasExpected) return this.consume();
-      return undefined;
-    }
-    return { tag: "garbage", token: this.takeToken() };
   }
 }

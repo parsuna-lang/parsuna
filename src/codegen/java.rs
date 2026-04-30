@@ -61,6 +61,7 @@ pub fn emit(st: &StateTable, args: &Args) -> Vec<EmittedFile> {
     writeln!(&mut s, "import dev.parsuna.runtime.ParseError;").unwrap();
     writeln!(&mut s, "import dev.parsuna.runtime.Parser;").unwrap();
     writeln!(&mut s, "import dev.parsuna.runtime.ParserConfig;").unwrap();
+    writeln!(&mut s, "import dev.parsuna.runtime.Cursor;").unwrap();
     writeln!(&mut s, "import dev.parsuna.runtime.Pos;").unwrap();
     writeln!(&mut s, "import dev.parsuna.runtime.Span;").unwrap();
     writeln!(&mut s, "import dev.parsuna.runtime.Token;").unwrap();
@@ -378,7 +379,7 @@ fn emit_tables(s: &mut String, st: &StateTable) {
 }
 
 fn emit_drive(s: &mut String, st: &StateTable) {
-    writeln!(s, "    private static Event step(Parser p) {{").unwrap();
+    writeln!(s, "    private static Event step(Cursor p) {{").unwrap();
     writeln!(s, "        int cur = p.state();").unwrap();
     writeln!(s, "        Event event = null;").unwrap();
     writeln!(s, "        switch (cur) {{").unwrap();

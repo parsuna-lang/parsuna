@@ -240,13 +240,18 @@ type Config struct {
 	// Step runs one state body of the generated dispatch. Returns
 	// the event that body produced (with `ok = true`) or a zero
 	// Event and `ok = false` if the body was a pure transition step
-	// — the runtime's NextEvent loop calls Step again in that case.
-	Step func(p *Parser) (Event, bool)
+	// — the runtime's Next loop calls Step again in that case.
+	//
+	// Step receives a *Cursor — a thin wrapper that exposes just the
+	// runtime hooks generated dispatch needs (Look/State/PushRet/
+	// Enter/Exit/etc.). Outside callers only see *Parser, which has
+	// no such methods, so the parser's internal state stays sealed.
+	Step func(c *Cursor) (Event, bool)
 }
 
 // recovery is in-flight error recovery. Set by TryConsume's mismatch
 // path and RecoverTo; cleared once the lookahead lands on a sync token
-// (or EOF). Each call to NextEvent in recovery mode yields one Garbage
+// (or EOF). Each call to Next in recovery mode yields one Garbage
 // event before re-checking the sync set.
 type recovery struct {
 	// sync is the set of token kinds to recover *to*. Recovery
@@ -261,17 +266,22 @@ type recovery struct {
 }
 
 // Parser is the pull-based parser. Obtain one via NewParser, then call
-// NextEvent in a loop.
+// Next in a loop.
 //
-// Each NextEvent call fires one of three modes — pump (refill lookahead,
+// Each Next call fires one of three modes — pump (refill lookahead,
 // possibly yielding a skip), recovery (one Garbage / synced-Token event
 // per call), or drive (one Step call) — and yields one event per mode.
 // Step may return ok=false for pure-transition state bodies; the runtime
 // simply loops drive again.
+//
+// Parser's only exported method is Next. The runtime hooks that
+// generated dispatch calls into (Look/State/PushRet/Enter/Exit/etc.)
+// live on *Cursor, which can only be constructed from inside the pull
+// loop, so external callers can't poke at parser internals out of band.
 type Parser struct {
 	lex *Lexer
 	// look is the lookahead ring, length K. Empty slots are awaiting
-	// refill via pump-mode in NextEvent. Empty slots are always a
+	// refill via pump-mode in Next. Empty slots are always a
 	// contiguous suffix — Consume parks the new empty slot at index
 	// K-1 and pump fills the leftmost empty.
 	look       []Token
@@ -286,7 +296,7 @@ type Parser struct {
 
 // NewParser builds a parser starting at state `entry`.
 //
-// All K lookahead slots start empty; the first call to NextEvent enters
+// All K lookahead slots start empty; the first call to Next enters
 // pump-mode and primes them, so any leading skip tokens (e.g. whitespace
 // before the first structural token) are emitted before the entry rule's
 // Enter event.
@@ -298,70 +308,6 @@ func NewParser(lex *Lexer, entry int, cfg Config) *Parser {
 		look:       make([]Token, cfg.K),
 		lookFilled: make([]bool, cfg.K),
 	}
-}
-
-// Look peeks at the i-th lookahead token. Generated Step only runs
-// after pump-mode has filled every slot, so callers can read any slot
-// unconditionally.
-func (p *Parser) Look(i int) Token { return p.look[i] }
-
-// State returns the current state id.
-func (p *Parser) State() int { return p.state }
-
-// SetState overwrites the current state id.
-func (p *Parser) SetState(s int) { p.state = s }
-
-// PushRet pushes a return address onto the call stack.
-func (p *Parser) PushRet(s int) { p.ret = append(p.ret, s) }
-
-// PopRet pops the top return address, or Terminated when the stack is empty.
-func (p *Parser) PopRet() int {
-	if len(p.ret) == 0 {
-		return Terminated
-	}
-	s := p.ret[len(p.ret)-1]
-	p.ret = p.ret[:len(p.ret)-1]
-	return s
-}
-
-// MatchesFirst reports whether the current lookahead matches any prefix
-// in set. Used by generated dispatch logic with k > 1 lookahead.
-func (p *Parser) MatchesFirst(set [][]uint16) bool {
-outer:
-	for _, seq := range set {
-		for i, want := range seq {
-			if p.look[i].Kind != want {
-				continue outer
-			}
-		}
-		return true
-	}
-	return false
-}
-
-func containsKind(set []uint16, k uint16) bool {
-	for _, x := range set {
-		if x == k {
-			return true
-		}
-	}
-	return false
-}
-
-// Enter builds an Enter event for `rule` and returns it. Records the
-// rule's start position as prevEnd so a later Exit without any
-// intervening tokens still produces a zero-width span at the expected
-// place.
-func (p *Parser) Enter(rule uint16) Event {
-	pos := p.look[0].Span.Start
-	p.prevEnd = pos
-	return Event{Tag: EvEnter, Rule: rule, Pos: pos}
-}
-
-// Exit builds an Exit event for `rule`, anchored at the end of the
-// previously consumed token (or the rule's start for empty rules).
-func (p *Parser) Exit(rule uint16) Event {
-	return Event{Tag: EvExit, Rule: rule, Pos: p.prevEnd}
 }
 
 // takeToken pops the current lookahead token and shifts the buffer up
@@ -380,25 +326,111 @@ func (p *Parser) takeToken() Token {
 	return t
 }
 
-// Consume consumes the current lookahead and returns it as a Token
-// event. Used on TryConsume's success path and on recovery's
-// "synced-to-expected" path — both yield legitimate parse data.
-func (p *Parser) Consume() Event {
+func (p *Parser) consume() Event {
 	return Event{Tag: EvToken, Token: p.takeToken()}
 }
 
+func (p *Parser) errorHere(msg string) Event {
+	return Event{Tag: EvError, Err: ParseError{Message: msg, Span: p.look[0].Span}}
+}
+
+func (p *Parser) armRecovery(sync []uint16, expected uint16, expectedSet bool) {
+	p.rec = recovery{sync: sync, expected: expected, expectedSet: expectedSet}
+	p.recActive = true
+}
+
+func containsKind(set []uint16, k uint16) bool {
+	for _, x := range set {
+		if x == k {
+			return true
+		}
+	}
+	return false
+}
+
+// Cursor is the handle that generated Step bodies talk to the runtime
+// through. It's defined as `type Cursor Parser` — same memory layout,
+// same fields, no extra pointer hop. Methods on *Cursor access the
+// parser's state directly through `c.field`. The wrapper exists only
+// as a *type-level* fence: it exposes the operations dispatch needs
+// (lookahead access, return stack pushes, event builders, recovery
+// arming), and external code can't get a *Cursor out of NewParser
+// (the cast is internal to Next), so the parser's internal state
+// stays sealed.
+type Cursor Parser
+
+// Look peeks at the i-th lookahead token. Generated Step only runs
+// after pump-mode has filled every slot, so callers can read any slot
+// unconditionally.
+func (c *Cursor) Look(i int) Token { return c.look[i] }
+
+// State returns the current state id.
+func (c *Cursor) State() int { return c.state }
+
+// SetState overwrites the current state id.
+func (c *Cursor) SetState(s int) { c.state = s }
+
+// PushRet pushes a return address onto the call stack.
+func (c *Cursor) PushRet(s int) { c.ret = append(c.ret, s) }
+
+// PopRet pops the top return address, or Terminated when the stack is empty.
+func (c *Cursor) PopRet() int {
+	if len(c.ret) == 0 {
+		return Terminated
+	}
+	s := c.ret[len(c.ret)-1]
+	c.ret = c.ret[:len(c.ret)-1]
+	return s
+}
+
+// MatchesFirst reports whether the current lookahead matches any prefix
+// in set. Used by generated dispatch logic with k > 1 lookahead.
+func (c *Cursor) MatchesFirst(set [][]uint16) bool {
+outer:
+	for _, seq := range set {
+		for i, want := range seq {
+			if c.look[i].Kind != want {
+				continue outer
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// Enter builds an Enter event for `rule` and returns it. Records the
+// rule's start position as prevEnd so a later Exit without any
+// intervening tokens still produces a zero-width span at the expected
+// place.
+func (c *Cursor) Enter(rule uint16) Event {
+	pos := c.look[0].Span.Start
+	c.prevEnd = pos
+	return Event{Tag: EvEnter, Rule: rule, Pos: pos}
+}
+
+// Exit builds an Exit event for `rule`, anchored at the end of the
+// previously consumed token (or the rule's start for empty rules).
+func (c *Cursor) Exit(rule uint16) Event {
+	return Event{Tag: EvExit, Rule: rule, Pos: c.prevEnd}
+}
+
+// Consume consumes the current lookahead and returns it as a Token
+// event. Used on TryConsume's success path and on recovery's
+// "synced-to-expected" path — both yield legitimate parse data.
+func (c *Cursor) Consume() Event { return (*Parser)(c).consume() }
+
 // TryConsume tries to consume a token of `kind`. On a hit returns a
 // Token event. On a miss returns an Error event and arms recovery —
-// subsequent NextEvent calls skip Garbage one token at a time until
+// subsequent Next calls skip Garbage one token at a time until
 // the lookahead lands on `sync` (when it does, the matching token
 // comes through as a normal Token event).
-func (p *Parser) TryConsume(kind uint16, sync []uint16, name string) Event {
-	if p.look[0].Kind == kind {
-		return p.Consume()
+func (c *Cursor) TryConsume(kind uint16, sync []uint16, name string) Event {
+	p := (*Parser)(c)
+	if c.look[0].Kind == kind {
+		return p.consume()
 	}
-	ev := p.ErrorHere("expected " + name)
-	p.rec = recovery{sync: sync, expected: kind, expectedSet: true}
-	p.recActive = true
+	ev := p.errorHere("expected " + name)
+	p.armRecovery(sync, kind, true)
 	return ev
 }
 
@@ -406,22 +438,19 @@ func (p *Parser) TryConsume(kind uint16, sync []uint16, name string) Event {
 // dispatch error leaf: the caller has already arranged the
 // post-recovery state and the returned Error event makes Step yield
 // so recovery-mode can take over.
-func (p *Parser) RecoverTo(sync []uint16) {
-	p.rec = recovery{sync: sync, expectedSet: false}
-	p.recActive = true
-}
+func (c *Cursor) RecoverTo(sync []uint16) { (*Parser)(c).armRecovery(sync, 0, false) }
 
 // ErrorHere returns a recoverable error event at the current lookahead.
-func (p *Parser) ErrorHere(msg string) Event {
-	return Event{Tag: EvError, Err: ParseError{Message: msg, Span: p.look[0].Span}}
-}
+func (c *Cursor) ErrorHere(msg string) Event { return (*Parser)(c).errorHere(msg) }
 
-// NextEvent returns the next parse event and true, or a zero Event and
-// false once input is fully consumed.
+// Next returns the next parse event and true, or a zero Event and
+// false once input is fully consumed. This is the iterator-style
+// `Next() (T, bool)` Go convention; there's no separate Next
+// method.
 //
 // The loop runs three modes — pump, recovery, drive — each yielding at
 // most one event per iteration before the loop runs again.
-func (p *Parser) NextEvent() (Event, bool) {
+func (p *Parser) Next() (Event, bool) {
 	for {
 		// Skip mode: refill any empty lookahead slot. Slots fill
 		// leftmost-first and Consume parks new empties at K-1, so
@@ -452,7 +481,7 @@ func (p *Parser) NextEvent() (Event, bool) {
 				wasExpected := p.rec.expectedSet && p.rec.expected == k
 				p.recActive = false
 				if wasExpected {
-					return p.Consume(), true
+					return p.consume(), true
 				}
 				continue
 			}
@@ -469,16 +498,17 @@ func (p *Parser) NextEvent() (Event, bool) {
 			if p.look[0].Kind == EofKind {
 				return Event{}, false
 			}
-			ev := p.ErrorHere("expected end of input")
-			p.rec = recovery{sync: nil, expectedSet: false}
-			p.recActive = true
+			ev := p.errorHere("expected end of input")
+			p.armRecovery(nil, 0, false)
 			return ev, true
 		}
 
 		// Drive mode: run one state body. If Step emitted, yield
 		// it. Otherwise it just transitioned `cur` (and possibly
 		// the return stack); loop and run the next body.
-		if ev, ok := p.cfg.Step(p); ok {
+		// `(*Cursor)(p)` is a free cast — Cursor is `type Cursor
+		// Parser` so the layouts are identical.
+		if ev, ok := p.cfg.Step((*Cursor)(p)); ok {
 			return ev, true
 		}
 	}

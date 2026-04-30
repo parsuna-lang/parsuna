@@ -49,7 +49,7 @@ fn emit_header(s: &mut String, st: &StateTable) {
     .unwrap();
     writeln!(
         s,
-        "// and repeatedly call NextEvent on the returned *parsunart.Parser to walk"
+        "// and repeatedly call Next on the returned *parsunart.Parser to walk"
     )
     .unwrap();
     writeln!(s, "// the parse as a flat Event stream.").unwrap();
@@ -371,7 +371,7 @@ fn emit_tables(s: &mut String, st: &StateTable) {
 }
 
 fn emit_drive(s: &mut String, st: &StateTable) {
-    writeln!(s, "func step(p *rt.Parser) (rt.Event, bool) {{").unwrap();
+    writeln!(s, "func step(p *rt.Cursor) (rt.Event, bool) {{").unwrap();
     writeln!(s, "\tcur := p.State()").unwrap();
     writeln!(s, "\tvar event rt.Event").unwrap();
     writeln!(s, "\tvar emitted bool").unwrap();
