@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use crate::lowering::lexer_dfa::{DfaState, START};
 
 use crate::codegen::EmittedFile;
-use crate::lowering::{Body, DispatchLeaf, DispatchTree, Op, StateTable};
+use crate::lowering::{Body, DispatchLeaf, DispatchTree, Instr, StateTable, Tail};
 
 /// Per-backend arguments for the C# target.
 #[derive(clap::Args, Clone, Debug, Default)]
@@ -453,9 +453,7 @@ fn emit_drive(s: &mut String, st: &StateTable) {
             state.id, state.label
         )
         .unwrap();
-        for op in &state.ops {
-            emit_op(s, st, op, "                ");
-        }
+        emit_body(s, st, &state.body, "                ");
         writeln!(s, "                break;").unwrap();
         writeln!(s, "            }}").unwrap();
     }
@@ -471,15 +469,15 @@ fn emit_drive(s: &mut String, st: &StateTable) {
     writeln!(s).unwrap();
 }
 
-fn emit_op(s: &mut String, st: &StateTable, op: &Op, ind: &str) {
+fn emit_instr(s: &mut String, st: &StateTable, op: &Instr, ind: &str) {
     match op {
-        Op::Enter(k) => {
+        Instr::Enter(k) => {
             writeln!(s, "{}@event = p.Enter({});", ind, rule_id(st, *k)).unwrap();
         }
-        Op::Exit(k) => {
+        Instr::Exit(k) => {
             writeln!(s, "{}@event = p.Exit({});", ind, rule_id(st, *k)).unwrap();
         }
-        Op::Expect {
+        Instr::Expect {
             kind,
             token_name,
             sync,
@@ -494,16 +492,21 @@ fn emit_op(s: &mut String, st: &StateTable, op: &Op, ind: &str) {
             )
             .unwrap();
         }
-        Op::PushRet(r) => {
+        Instr::PushRet(r) => {
             writeln!(s, "{}p.PushRet({});", ind, r).unwrap();
         }
-        Op::Jump(n) => {
+    }
+}
+
+fn emit_tail(s: &mut String, st: &StateTable, tail: &Tail, ind: &str) {
+    match tail {
+        Tail::Jump(n) => {
             writeln!(s, "{}cur = {};", ind, n).unwrap();
         }
-        Op::Ret => {
+        Tail::Ret => {
             writeln!(s, "{}cur = p.PopRet();", ind).unwrap();
         }
-        Op::Star { first, body, cont, head } => {
+        Tail::Star { first, body, cont, head } => {
             let inner = format!("{}    ", ind);
             writeln!(s, "{}if (p.MatchesFirst(Tables.First{})) {{", ind, first).unwrap();
             writeln!(s, "{}p.PushRet({});", inner, head).unwrap();
@@ -514,7 +517,7 @@ fn emit_op(s: &mut String, st: &StateTable, op: &Op, ind: &str) {
                 None => writeln!(s, "{}else cur = p.PopRet();", ind).unwrap(),
             }
         }
-        Op::Opt { first, body, cont } => {
+        Tail::Opt { first, body, cont } => {
             let inner = format!("{}    ", ind);
             writeln!(s, "{}if (p.MatchesFirst(Tables.First{})) {{", ind, first).unwrap();
             if let Some(n) = cont {
@@ -527,16 +530,17 @@ fn emit_op(s: &mut String, st: &StateTable, op: &Op, ind: &str) {
                 None => writeln!(s, "{}else cur = p.PopRet();", ind).unwrap(),
             }
         }
-        Op::Dispatch { tree, sync, cont } => {
+        Tail::Dispatch { tree, sync, cont } => {
             emit_dispatch_tree(s, st, tree, *sync, *cont, ind);
         }
     }
 }
 
 fn emit_body(s: &mut String, st: &StateTable, body: &Body, ind: &str) {
-    for op in body {
-        emit_op(s, st, op, ind);
+    for op in &body.instrs {
+        emit_instr(s, st, op, ind);
     }
+    emit_tail(s, st, &body.tail, ind);
 }
 
 fn emit_dispatch_tree(

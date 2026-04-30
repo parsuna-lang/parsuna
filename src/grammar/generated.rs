@@ -613,7 +613,11 @@ impl parsuna_rt::Grammar<K> for Grammar {
                                 event = Some(p.enter(RuleKind::Atom));
                                 cur = 32;
                             }
-                            _ => { event = Some(p.error_here("unexpected token")); p.recover_to(SYNC_3); cur = p.ret(); }
+                            _ => {
+                                event = Some(p.error_here("unexpected token"));
+                                p.recover_to(SYNC_3);
+                                cur = p.ret();
+                            }
                         }
                     }
                     _ => {
@@ -652,7 +656,11 @@ impl parsuna_rt::Grammar<K> for Grammar {
                         event = Some(p.enter(RuleKind::Atom));
                         cur = 32;
                     }
-                    _ => { event = Some(p.error_here("unexpected token")); p.recover_to(SYNC_3); cur = p.ret(); }
+                    _ => {
+                        event = Some(p.error_here("unexpected token"));
+                        p.recover_to(SYNC_3);
+                        cur = p.ret();
+                    }
                 }
             }
             26 => { // _postfix_expr:star
@@ -672,7 +680,11 @@ impl parsuna_rt::Grammar<K> for Grammar {
                                 event = Some(p.expect(TokenKind::Plus, SYNC_3, "expected PLUS"));
                                 cur = p.ret();
                             }
-                            _ => { event = Some(p.error_here("unexpected token")); p.recover_to(SYNC_3); cur = p.ret(); }
+                            _ => {
+                                event = Some(p.error_here("unexpected token"));
+                                p.recover_to(SYNC_3);
+                                cur = p.ret();
+                            }
                         }
                     }
                     _ => {
@@ -728,7 +740,11 @@ impl parsuna_rt::Grammar<K> for Grammar {
                         event = Some(p.expect(TokenKind::Ident, SYNC_3, "expected IDENT"));
                         cur = p.ret();
                     }
-                    _ => { cur = 33; event = Some(p.error_here("unexpected token")); p.recover_to(SYNC_3); }
+                    _ => {
+                        cur = 33;
+                        event = Some(p.error_here("unexpected token"));
+                        p.recover_to(SYNC_3);
+                    }
                 }
             }
             33 => { // atom:exit
@@ -751,7 +767,11 @@ impl parsuna_rt::Grammar<K> for Grammar {
                         event = Some(p.expect(TokenKind::Char, SYNC_3, "expected CHAR"));
                         cur = 37;
                     }
-                    _ => { cur = 36; event = Some(p.error_here("unexpected token")); p.recover_to(SYNC_3); }
+                    _ => {
+                        cur = 36;
+                        event = Some(p.error_here("unexpected token"));
+                        p.recover_to(SYNC_3);
+                    }
                 }
             }
             36 => { // char_primary:exit
@@ -799,7 +819,11 @@ impl parsuna_rt::Grammar<K> for Grammar {
                         event = Some(p.enter(RuleKind::CharPrimary));
                         cur = 35;
                     }
-                    _ => { cur = 42; event = Some(p.error_here("unexpected token")); p.recover_to(SYNC_3); }
+                    _ => {
+                        cur = 42;
+                        event = Some(p.error_here("unexpected token"));
+                        p.recover_to(SYNC_3);
+                    }
                 }
             }
             42 => { // neg_class:exit

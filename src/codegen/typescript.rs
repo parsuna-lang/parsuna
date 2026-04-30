@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use crate::codegen::common::pascal;
 use crate::codegen::EmittedFile;
 use crate::lowering::lexer_dfa::{DfaState, START};
-use crate::lowering::{Body, DispatchLeaf, DispatchTree, Op, StateTable};
+use crate::lowering::{Body, DispatchLeaf, DispatchTree, Instr, StateTable, Tail};
 
 /// Per-backend arguments. Currently empty — kept as a struct (deriving
 /// [`clap::Args`]) so the CLI can flatten any future flags in directly
@@ -444,9 +444,7 @@ fn emit_drive(s: &mut String, st: &StateTable) {
     writeln!(s, "  switch (cur) {{").unwrap();
     for state in st.states.values() {
         writeln!(s, "    case {}: {{ // {}", state.id, state.label).unwrap();
-        for op in &state.ops {
-            emit_op(s, st, op);
-        }
+        emit_body(s, st, &state.body, "      ");
         writeln!(s, "      break;").unwrap();
         writeln!(s, "    }}").unwrap();
     }
@@ -462,15 +460,15 @@ fn emit_drive(s: &mut String, st: &StateTable) {
     writeln!(s).unwrap();
 }
 
-fn emit_op(s: &mut String, st: &StateTable, op: &Op) {
+fn emit_instr(s: &mut String, st: &StateTable, op: &Instr) {
     match op {
-        Op::Enter(k) => {
+        Instr::Enter(k) => {
             writeln!(s, "      event = p.enter({});", rule_variant(st, *k)).unwrap();
         }
-        Op::Exit(k) => {
+        Instr::Exit(k) => {
             writeln!(s, "      event = p.exit({});", rule_variant(st, *k)).unwrap();
         }
-        Op::Expect {
+        Instr::Expect {
             kind,
             token_name,
             sync,
@@ -484,16 +482,21 @@ fn emit_op(s: &mut String, st: &StateTable, op: &Op) {
             )
             .unwrap();
         }
-        Op::PushRet(r) => {
+        Instr::PushRet(r) => {
             writeln!(s, "      p.pushRet({});", r).unwrap();
         }
-        Op::Jump(n) => {
+    }
+}
+
+fn emit_tail(s: &mut String, st: &StateTable, tail: &Tail) {
+    match tail {
+        Tail::Jump(n) => {
             writeln!(s, "      cur = {};", n).unwrap();
         }
-        Op::Ret => {
+        Tail::Ret => {
             writeln!(s, "      cur = p.popRet();").unwrap();
         }
-        Op::Star { first, body, cont, head } => {
+        Tail::Star { first, body, cont, head } => {
             writeln!(s, "      if ({}) {{", first_set_test(st, *first)).unwrap();
             writeln!(s, "        p.pushRet({});", head).unwrap();
             emit_body(s, st, body, "        ");
@@ -503,7 +506,7 @@ fn emit_op(s: &mut String, st: &StateTable, op: &Op) {
                 None => writeln!(s, "      else cur = p.popRet();").unwrap(),
             }
         }
-        Op::Opt { first, body, cont } => {
+        Tail::Opt { first, body, cont } => {
             writeln!(s, "      if ({}) {{", first_set_test(st, *first)).unwrap();
             if let Some(n) = cont {
                 writeln!(s, "        p.pushRet({});", n).unwrap();
@@ -515,16 +518,17 @@ fn emit_op(s: &mut String, st: &StateTable, op: &Op) {
                 None => writeln!(s, "      else cur = p.popRet();").unwrap(),
             }
         }
-        Op::Dispatch { tree, sync, cont } => {
+        Tail::Dispatch { tree, sync, cont } => {
             emit_dispatch_tree(s, st, tree, *sync, *cont, "      ");
         }
     }
 }
 
 fn emit_body(s: &mut String, st: &StateTable, body: &Body, _ind: &str) {
-    for op in body {
-        emit_op(s, st, op);
+    for op in &body.instrs {
+        emit_instr(s, st, op);
     }
+    emit_tail(s, st, &body.tail);
 }
 
 fn emit_dispatch_tree(

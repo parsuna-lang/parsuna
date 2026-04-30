@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use crate::codegen::common::screaming_snake;
 use crate::codegen::EmittedFile;
 use crate::lowering::lexer_dfa::{DfaState, START};
-use crate::lowering::{Body, DispatchLeaf, DispatchTree, Op, StateTable};
+use crate::lowering::{Body, DispatchLeaf, DispatchTree, Instr, StateTable, Tail};
 
 /// Per-backend arguments. Currently empty — kept as a struct (deriving
 /// [`clap::Args`]) so the CLI can flatten any future flags in directly
@@ -665,9 +665,7 @@ fn emit_step(c: &mut String, st: &StateTable, _stem: &str, upper: &str) {
     writeln!(c, "  switch (cur) {{").unwrap();
     for state in st.states.values() {
         writeln!(c, "    case {}: {{ /* {} */", state.id, state.label).unwrap();
-        for op in &state.ops {
-            emit_op(c, st, upper, op, "      ");
-        }
+        emit_body(c, st, upper, &state.body, "      ");
         writeln!(c, "      break;").unwrap();
         writeln!(c, "    }}").unwrap();
     }
@@ -688,9 +686,9 @@ fn c_token_name(st: &StateTable, upper: &str, kind: u16) -> String {
     }
 }
 
-fn emit_op(c: &mut String, st: &StateTable, upper: &str, op: &Op, ind: &str) {
+fn emit_instr(c: &mut String, st: &StateTable, upper: &str, op: &Instr, ind: &str) {
     match op {
-        Op::Enter(k) => {
+        Instr::Enter(k) => {
             let name = st.rule_kinds.get(*k as usize).unwrap_or_else(|| {
                 panic!("unknown rule kind id {} while emitting C backend", k)
             });
@@ -701,7 +699,7 @@ fn emit_op(c: &mut String, st: &StateTable, upper: &str, op: &Op, ind: &str) {
             )
             .unwrap()
         }
-        Op::Exit(k) => {
+        Instr::Exit(k) => {
             let name = st.rule_kinds.get(*k as usize).unwrap_or_else(|| {
                 panic!("unknown rule kind id {} while emitting C backend", k)
             });
@@ -712,7 +710,7 @@ fn emit_op(c: &mut String, st: &StateTable, upper: &str, op: &Op, ind: &str) {
             )
             .unwrap()
         }
-        Op::Expect {
+        Instr::Expect {
             kind,
             token_name,
             sync,
@@ -724,12 +722,17 @@ fn emit_op(c: &mut String, st: &StateTable, upper: &str, op: &Op, ind: &str) {
             )
             .unwrap()
         }
-        Op::PushRet(r) => writeln!(c, "{ind}push_ret(p, {r});").unwrap(),
-        Op::Jump(n) => writeln!(c, "{ind}cur = {n};").unwrap(),
-        Op::Ret => {
+        Instr::PushRet(r) => writeln!(c, "{ind}push_ret(p, {r});").unwrap(),
+    }
+}
+
+fn emit_tail(c: &mut String, st: &StateTable, upper: &str, tail: &Tail, ind: &str) {
+    match tail {
+        Tail::Jump(n) => writeln!(c, "{ind}cur = {n};").unwrap(),
+        Tail::Ret => {
             writeln!(c, "{ind}cur = pop_ret(p);").unwrap();
         }
-        Op::Star { first, body, cont, head } => {
+        Tail::Star { first, body, cont, head } => {
             let inner = format!("{ind}  ");
             let miss = match cont {
                 Some(n) => format!("cur = {n};"),
@@ -740,7 +743,7 @@ fn emit_op(c: &mut String, st: &StateTable, upper: &str, op: &Op, ind: &str) {
             emit_body(c, st, upper, body, &inner);
             writeln!(c, "{ind}}} else {{ {miss} }}").unwrap();
         }
-        Op::Opt { first, body, cont } => {
+        Tail::Opt { first, body, cont } => {
             let inner = format!("{ind}  ");
             let miss = match cont {
                 Some(n) => format!("cur = {n};"),
@@ -753,7 +756,7 @@ fn emit_op(c: &mut String, st: &StateTable, upper: &str, op: &Op, ind: &str) {
             emit_body(c, st, upper, body, &inner);
             writeln!(c, "{ind}}} else {{ {miss} }}").unwrap();
         }
-        Op::Dispatch { tree, sync, cont } => {
+        Tail::Dispatch { tree, sync, cont } => {
             emit_dispatch_tree(c, st, upper, tree, *sync, *cont, ind);
         }
     }
@@ -764,9 +767,10 @@ fn emit_op(c: &mut String, st: &StateTable, upper: &str, op: &Op, ind: &str) {
 /// the linear emission settles the post-body transition with no
 /// extra glue.
 fn emit_body(c: &mut String, st: &StateTable, upper: &str, body: &Body, ind: &str) {
-    for op in body {
-        emit_op(c, st, upper, op, ind);
+    for op in &body.instrs {
+        emit_instr(c, st, upper, op, ind);
     }
+    emit_tail(c, st, upper, &body.tail, ind);
 }
 
 fn emit_dispatch_tree(

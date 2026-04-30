@@ -135,16 +135,17 @@ pub struct TokenInfo {
     pub kind: u16,
 }
 
-/// One instruction in a parser state.
+/// A non-terminating instruction in a state body.
 ///
-/// States are small straight-line programs built from these ops; control
-/// flow within a state is explicit (`Jump`, `PushRet`/`Ret`) and inter-state
-/// flow is fall-through to the next numeric id.
+/// `Instr`s are sequenceable — any number can appear in a `Body`'s
+/// `instrs` list — but none of them transfer control out of the body.
+/// They're side-effecty (emit events, push to the return stack) and
+/// the runtime executes them in order.
 ///
 /// `PartialEq` is derived so the [`optimize`](crate::lowering::optimize)
 /// fixpoint loop can detect when an iteration produced no change.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Op {
+pub enum Instr {
     /// Emit an `Enter` event for this rule-kind id.
     Enter(u16),
     /// Emit an `Exit` event for this rule-kind id.
@@ -159,9 +160,17 @@ pub enum Op {
         /// SYNC set to recover to on mismatch.
         sync: SyncSetId,
     },
-    /// Push a return state. Followed by a `Jump` into a callee; the
-    /// callee's trailing `Ret` pops this to resume.
+    /// Push a return state. Pairs with a future `Tail::Ret`; the callee's
+    /// `Ret` pops this to resume the caller's flow.
     PushRet(StateId),
+}
+
+/// The terminating op of a state body. Exactly one per [`Body`], always
+/// last. Star/Opt/Dispatch are terminators because their `cont`/tail-call
+/// disposition fully decides where control goes after the body's path
+/// completes — there's no "fall through" past them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Tail {
     /// Unconditional jump to another state id.
     Jump(StateId),
     /// Return to the state id on top of the return stack, or `TERMINATED`
@@ -173,46 +182,46 @@ pub enum Op {
     Star {
         /// FIRST-set id the body opens with.
         first: FirstSetId,
-        /// Body of one iteration: a sequence of ops emitted at the
-        /// call site. Layout starts every body as a single `Jump` to
-        /// a freshly allocated state; the
-        /// [`optimize`](crate::lowering::optimize) inline pass may
-        /// grow it into the full inlined sequence. See [`Body`].
-        body: Body,
+        /// Body of one iteration. Boxed because `Body` itself contains
+        /// a `Tail` — boxing breaks the type's drop-check recursion.
+        /// Layout starts every body as `Body { instrs: [], tail:
+        /// Jump(s) }`; the optimizer's `inline_branch_bodies` pass may
+        /// replace the body wholesale with `s`'s body when the result
+        /// still satisfies the runtime invariants.
+        body: Box<Body>,
         /// What to do when the loop exits (lookahead misses `first`).
         /// `Some(state)` is push-and-jump — `cur = state`. `None` is
         /// a tail call — `cur = ret()` directly. Layout emits `None`
-        /// when the Star is the last op of its block (the body's
-        /// trailing `Ret` already pops *our* caller's continuation),
-        /// and `optimize::fold_trampolines` later rewrites
-        /// `Some(s) → None` whenever `s` turns out to be a
-        /// pure-`Ret` trampoline.
+        /// when the Star is the tail of its block (the body's trailing
+        /// `Ret` already pops *our* caller's continuation), and
+        /// `optimize::fold_trampolines` later rewrites `Some(s) → None`
+        /// whenever `s` turns out to be a pure-`Ret` trampoline.
         ///
         /// Note that `head` itself is never tail-call-eligible: it's
-        /// the state hosting this `Op::Star`, so it always has at
-        /// least one op (this one).
+        /// the state hosting this Star, so it always has a non-empty
+        /// body.
         cont: Option<StateId>,
         /// State to return to after `body` finishes — the loop-head.
         /// Initially the state that contains this Star, but stays
-        /// pointing at the original loop-head if the Star op is
-        /// later spliced into another state by the optimizer.
+        /// pointing at the original loop-head if the Star is later
+        /// spliced into another state by the optimizer.
         head: StateId,
     },
     /// `?` branch: if lookahead matches `first`, call `body` once,
-    /// otherwise skip the body. The continuation is either a state to
-    /// jump to after `body` returns (push-and-jump) or "tail call".
+    /// otherwise skip the body.
     Opt {
         /// FIRST-set id the body opens with.
         first: FirstSetId,
-        /// Body to call when taken. See [`Body`].
-        body: Body,
+        /// Body to call when taken. Boxed for the same reason as
+        /// `Tail::Star::body`.
+        body: Box<Body>,
         /// Continuation. `Some(state)` is push-and-jump —
         /// `push_ret(state); cur = body` on match, `cur = state` on
         /// miss. `None` is a tail call: `cur = body` on match (the
         /// body's trailing `Ret` returns to *our* caller) and
-        /// `cur = ret()` on miss. Layout emits `None` for last-op
-        /// Opts; `optimize::fold_trampolines` later flips
-        /// `Some(s) → None` for pure-`Ret` trampoline targets.
+        /// `cur = ret()` on miss. Layout emits `None` for tail Opts;
+        /// `optimize::fold_trampolines` later flips `Some(s) → None`
+        /// for pure-`Ret` trampoline targets.
         cont: Option<StateId>,
     },
     /// `Alt` dispatch: pick one arm based on up to `k` tokens of
@@ -224,30 +233,64 @@ pub enum Op {
         sync: SyncSetId,
         /// Continuation once an arm's body returns (also used for
         /// `Fallthrough` and post-recovery `Error` paths). Same
-        /// encoding as [`Op::Opt::cont`]: `Some(state)` is
+        /// encoding as [`Tail::Opt::cont`]: `Some(state)` is
         /// push-and-jump, `None` is a tail call (no push, return
         /// directly to caller).
         cont: Option<StateId>,
     },
 }
 
-/// The "where to call into" half of a branchy op (`Op::Opt`,
-/// `Op::Star`, [`DispatchLeaf::Arm`]).
+/// A state body: a sequence of [`Instr`]s followed by exactly one
+/// terminating [`Tail`].
 ///
-/// A body is just a sequence of ops emitted at the call site.
-/// `Op::Star`/`Op::Opt`/`Op::Dispatch` themselves produce no events —
-/// they're pure dispatch — so the body's ops *are* what runs when an
-/// arm is taken. A body that contains a single `Op::Jump(s)` is the
-/// "transition to a separate state" form; anything richer is fully
-/// inlined.
-pub type Body = Vec<Op>;
+/// The split makes "must end in a terminator" structural — you can't
+/// build a `Body` whose last op is something other than `Tail`, and
+/// you can't put two terminators in a row. The `instrs` list never
+/// includes Jump/Ret/Star/Opt/Dispatch; the `tail` field always does.
+///
+/// Note: this *only* enforces the structural part. Two semantic
+/// invariants — "≤ 1 event per execution path" and "no
+/// lookahead-reading op after an `Expect`" — still need a
+/// runtime walk in [`validate`](crate::lowering::validate); they
+/// require flow analysis the type system can't express directly.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Body {
+    pub instrs: Vec<Instr>,
+    pub tail: Tail,
+}
+
+impl Body {
+    /// Empty-instr body that just terminates with a `Jump(s)`. The
+    /// shape layout starts every Star/Opt arm body and every
+    /// dispatch-arm body in.
+    pub fn jump(s: StateId) -> Self {
+        Body {
+            instrs: Vec::new(),
+            tail: Tail::Jump(s),
+        }
+    }
+
+    /// True iff the body has no instrs and its tail is a single
+    /// `Jump(s)`. The "transition-only" shape that
+    /// [`inline_branch_bodies`](crate::lowering::optimize) recognises
+    /// — branchier shapes have already been inlined and don't fold
+    /// further.
+    pub fn jump_target(&self) -> Option<StateId> {
+        match (&self.instrs[..], &self.tail) {
+            ([], Tail::Jump(s)) => Some(*s),
+            _ => None,
+        }
+    }
+}
 
 /// Terminal action at a leaf of a [`DispatchTree`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DispatchLeaf {
     /// Take the arm whose body starts at this body (push the
-    /// dispatch's `next` as the return target first).
-    Arm(Body),
+    /// dispatch's `next` as the return target first). Boxed to break
+    /// the `Body → Tail → DispatchTree → DispatchLeaf → Body` drop-check
+    /// cycle.
+    Arm(Box<Body>),
     /// No arm matched, but the dispatch is nullable — continue at the
     /// dispatch's `next` without emitting an error.
     Fallthrough,
@@ -319,7 +362,7 @@ fn build_trie(
     let mut terminal: Option<DispatchLeaf> = None;
     for entry in entries {
         if entry.0.len() == depth {
-            terminal = Some(DispatchLeaf::Arm(vec![Op::Jump(entry.1)]));
+            terminal = Some(DispatchLeaf::Arm(Box::new(Body::jump(entry.1))));
             break;
         }
         surviving.push(entry.clone());
@@ -357,15 +400,16 @@ fn build_trie(
 /// `label` is a human-readable tag (rule name plus what the state is doing,
 /// e.g. `expr:call:atom`) used in the debug dumps and as a comment in
 /// generated code.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct State {
     /// The state's id — matches its key in [`StateTable::states`].
     pub id: StateId,
     /// Human-readable tag (e.g. `expr:alt0:call:atom`). Used for debug
     /// dumps and emitted as a comment next to the `case` in generated code.
     pub label: String,
-    /// Straight-line ops executed when the parser enters this state.
-    pub ops: Vec<Op>,
+    /// The state's body: a sequence of [`Instr`]s plus a terminating
+    /// [`Tail`]. Always non-empty (the tail is always present).
+    pub body: Body,
 }
 
 /// Toggle bag for the optimizer passes that run inside
@@ -447,56 +491,77 @@ fn mark_first_set_references(table: &mut StateTable) {
     }
     let mut referenced = std::collections::BTreeSet::new();
     for state in table.states.values() {
-        for op in &state.ops {
-            match op {
-                Op::Star { first, .. } | Op::Opt { first, .. } => {
-                    referenced.insert(*first);
-                }
-                _ => {}
-            }
-        }
+        collect_first_refs(&state.body, &mut referenced);
     }
     for f in table.first_sets.iter_mut() {
         f.has_references = referenced.contains(&f.id);
     }
 }
 
-impl State {
-    /// Render the state as a single comment line: label plus the ops
-    /// joined with `;`. Used by the debug dumper and by some backends when
-    /// they want to annotate generated `case` arms.
-    pub fn comment(&self) -> String {
-        let body = if self.ops.is_empty() {
-            "<empty>".to_string()
-        } else {
-            self.ops
-                .iter()
-                .map(format_op)
-                .collect::<Vec<_>>()
-                .join(" ; ")
-        };
-        format!("{}  {}", self.label, body)
+fn collect_first_refs(body: &Body, out: &mut std::collections::BTreeSet<FirstSetId>) {
+    match &body.tail {
+        Tail::Star { first, body, .. } | Tail::Opt { first, body, .. } => {
+            out.insert(*first);
+            collect_first_refs(body, out);
+        }
+        Tail::Dispatch { tree, .. } => collect_first_refs_in_tree(tree, out),
+        Tail::Jump(_) | Tail::Ret => {}
     }
 }
 
-fn format_op(op: &Op) -> String {
-    match op {
-        Op::Enter(k) => format!("Enter({})", k),
-        Op::Exit(k) => format!("Exit({})", k),
-        Op::Expect {
-            kind, token_name, ..
-        } => format!("Expect({} /*{}*/)", kind, token_name),
-        Op::PushRet(r) => format!("PushRet({})", r),
-        Op::Jump(n) => format!("Jump({})", n),
-        Op::Ret => "Ret".to_string(),
-        Op::Star { body, .. } => format!("Star[{}]", format_body(body)),
-        Op::Opt { body, .. } => format!("Opt[{}]", format_body(body)),
-        Op::Dispatch { tree, .. } => format!("Dispatch[{}]", dispatch_tree_shape(tree)),
+fn collect_first_refs_in_tree(
+    tree: &DispatchTree,
+    out: &mut std::collections::BTreeSet<FirstSetId>,
+) {
+    match tree {
+        DispatchTree::Leaf(DispatchLeaf::Arm(b)) => collect_first_refs(b, out),
+        DispatchTree::Leaf(_) => {}
+        DispatchTree::Switch { arms, default, .. } => {
+            if let DispatchLeaf::Arm(b) = default {
+                collect_first_refs(b, out);
+            }
+            for (_, sub) in arms {
+                collect_first_refs_in_tree(sub, out);
+            }
+        }
+    }
+}
+
+impl State {
+    /// Render the state as a single comment line: label plus the body
+    /// (instrs joined with `;` and the tail at the end). Used by the
+    /// debug dumper and by some backends when they want to annotate
+    /// generated `case` arms.
+    pub fn comment(&self) -> String {
+        format!("{}  {}", self.label, format_body(&self.body))
     }
 }
 
 fn format_body(body: &Body) -> String {
-    body.iter().map(format_op).collect::<Vec<_>>().join(" ; ")
+    let mut parts: Vec<String> = body.instrs.iter().map(format_instr).collect();
+    parts.push(format_tail(&body.tail));
+    parts.join(" ; ")
+}
+
+fn format_instr(op: &Instr) -> String {
+    match op {
+        Instr::Enter(k) => format!("Enter({})", k),
+        Instr::Exit(k) => format!("Exit({})", k),
+        Instr::Expect {
+            kind, token_name, ..
+        } => format!("Expect({} /*{}*/)", kind, token_name),
+        Instr::PushRet(r) => format!("PushRet({})", r),
+    }
+}
+
+fn format_tail(tail: &Tail) -> String {
+    match tail {
+        Tail::Jump(n) => format!("Jump({})", n),
+        Tail::Ret => "Ret".to_string(),
+        Tail::Star { body, .. } => format!("Star[{}]", format_body(body)),
+        Tail::Opt { body, .. } => format!("Opt[{}]", format_body(body)),
+        Tail::Dispatch { tree, .. } => format!("Dispatch[{}]", dispatch_tree_shape(tree)),
+    }
 }
 
 fn dispatch_tree_shape(tree: &DispatchTree) -> String {

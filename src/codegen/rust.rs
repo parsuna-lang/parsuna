@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use crate::codegen::common::pascal;
 use crate::codegen::EmittedFile;
 use crate::lowering::lexer_dfa::{DfaState, START};
-use crate::lowering::{Body, DispatchLeaf, DispatchTree, Op, StateTable};
+use crate::lowering::{Body, DispatchLeaf, DispatchTree, Instr, StateTable, Tail};
 
 /// Per-backend arguments. Currently empty — kept as a struct (deriving
 /// [`clap::Args`]) so the CLI can flatten any future flags in directly
@@ -412,23 +412,23 @@ fn kind_pattern(st: &StateTable, first: &[Vec<u16>]) -> String {
         .join(" | ")
 }
 
-fn emit_op(s: &mut String, st: &StateTable, op: &Op, ind: &str) {
+fn emit_instr(s: &mut String, st: &StateTable, op: &Instr, ind: &str) {
     match op {
-        Op::Enter(k) => writeln!(
+        Instr::Enter(k) => writeln!(
             s,
             "{}event = Some(p.enter({}));",
             ind,
             rule_variant(st, *k)
         )
         .unwrap(),
-        Op::Exit(k) => writeln!(
+        Instr::Exit(k) => writeln!(
             s,
             "{}event = Some(p.exit({}));",
             ind,
             rule_variant(st, *k)
         )
         .unwrap(),
-        Op::Expect {
+        Instr::Expect {
             kind,
             token_name,
             sync,
@@ -441,10 +441,15 @@ fn emit_op(s: &mut String, st: &StateTable, op: &Op, ind: &str) {
             token_name
         )
         .unwrap(),
-        Op::PushRet(r) => writeln!(s, "{}p.push_ret({});", ind, r).unwrap(),
-        Op::Jump(n) => writeln!(s, "{}cur = {};", ind, n).unwrap(),
-        Op::Ret => writeln!(s, "{}cur = p.ret();", ind).unwrap(),
-        Op::Star {
+        Instr::PushRet(r) => writeln!(s, "{}p.push_ret({});", ind, r).unwrap(),
+    }
+}
+
+fn emit_tail(s: &mut String, st: &StateTable, tail: &Tail, ind: &str) {
+    match tail {
+        Tail::Jump(n) => writeln!(s, "{}cur = {};", ind, n).unwrap(),
+        Tail::Ret => writeln!(s, "{}cur = p.ret();", ind).unwrap(),
+        Tail::Star {
             first,
             body,
             cont,
@@ -465,7 +470,7 @@ fn emit_op(s: &mut String, st: &StateTable, op: &Op, ind: &str) {
                 },
             );
         }
-        Op::Opt { first, body, cont } => {
+        Tail::Opt { first, body, cont } => {
             emit_lookahead_branch(
                 s,
                 st,
@@ -483,20 +488,21 @@ fn emit_op(s: &mut String, st: &StateTable, op: &Op, ind: &str) {
                 },
             );
         }
-        Op::Dispatch { tree, sync, cont } => {
+        Tail::Dispatch { tree, sync, cont } => {
             emit_dispatch_tree(s, st, tree, *sync, *cont, ind);
         }
     }
 }
 
-/// Emit each op in `body` at the current indent. The body's tail op
-/// is its own terminator (`Ret`, `Jump`, another branchy op …) so
-/// the linear emission already settles the post-body transition with
-/// no extra glue.
+/// Emit each instr in `body`'s head, then the tail. The tail is the
+/// body's terminator — `Ret`, `Jump`, or a branchy op that encodes
+/// its own continuation — so the linear emission already settles the
+/// post-body transition with no extra glue.
 fn emit_body(s: &mut String, st: &StateTable, body: &Body, ind: &str) {
-    for op in body {
-        emit_op(s, st, op, ind);
+    for op in &body.instrs {
+        emit_instr(s, st, op, ind);
     }
+    emit_tail(s, st, &body.tail, ind);
 }
 
 fn emit_lookahead_branch(
@@ -635,9 +641,7 @@ fn emit_step(s: &mut String, st: &StateTable) {
     for state in st.states.values() {
         writeln!(s, "            {} => {{ // {}", state.id, state.label).unwrap();
         let ind = "                ";
-        for op in &state.ops {
-            emit_op(s, st, op, ind);
-        }
+        emit_body(s, st, &state.body, ind);
         writeln!(s, "            }}").unwrap();
     }
     writeln!(s, "            _ => unreachable!(\"unknown state\"),").unwrap();

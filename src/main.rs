@@ -419,10 +419,13 @@ fn print_lowering(_ag: &parsuna::AnalyzedGrammar, st: &StateTable) {
             .map(|n| format!("    ; entry: {}", n))
             .unwrap_or_default();
         println!("{:>w$}  {}{}", state.id, state.label, marker, w = id_width);
-        for op in &state.ops {
-            for line in format_op(op, st) {
+        for instr in &state.body.instrs {
+            for line in format_instr(instr, st) {
                 println!("{:>w$}      {}", "", line, w = id_width);
             }
+        }
+        for line in format_tail(&state.body.tail, st) {
+            println!("{:>w$}      {}", "", line, w = id_width);
         }
         println!();
     }
@@ -565,12 +568,12 @@ fn format_first_set(f: &parsuna::analysis::FirstSet) -> String {
     format!("{{{}}}", rows.join(", "))
 }
 
-fn format_op(op: &parsuna::lowering::Op, st: &StateTable) -> Vec<String> {
-    use parsuna::lowering::Op;
+fn format_instr(op: &parsuna::lowering::Instr, st: &StateTable) -> Vec<String> {
+    use parsuna::lowering::Instr;
     match op {
-        Op::Enter(k) => vec![format!("Enter {}", rule_kind_name(st, *k))],
-        Op::Exit(k) => vec![format!("Exit {}", rule_kind_name(st, *k))],
-        Op::Expect {
+        Instr::Enter(k) => vec![format!("Enter {}", rule_kind_name(st, *k))],
+        Instr::Exit(k) => vec![format!("Exit {}", rule_kind_name(st, *k))],
+        Instr::Expect {
             kind,
             token_name,
             sync,
@@ -579,10 +582,16 @@ fn format_op(op: &parsuna::lowering::Op, st: &StateTable) -> Vec<String> {
             token_name_for_kind_fallback(st, *kind, token_name),
             format_sync_set(st, *sync)
         )],
-        Op::PushRet(r) => vec![format!("PushRet {}", state_ref(st, *r))],
-        Op::Jump(n) => vec![format!("Jump {}", state_ref(st, *n))],
-        Op::Ret => vec!["Ret".into()],
-        Op::Star {
+        Instr::PushRet(r) => vec![format!("PushRet {}", state_ref(st, *r))],
+    }
+}
+
+fn format_tail(tail: &parsuna::lowering::Tail, st: &StateTable) -> Vec<String> {
+    use parsuna::lowering::Tail;
+    match tail {
+        Tail::Jump(n) => vec![format!("Jump {}", state_ref(st, *n))],
+        Tail::Ret => vec!["Ret".into()],
+        Tail::Star {
             first,
             body,
             cont,
@@ -600,7 +609,7 @@ fn format_op(op: &parsuna::lowering::Op, st: &StateTable) -> Vec<String> {
             append_body_ops(st, body, "  ", &mut lines);
             lines
         }
-        Op::Opt { first, body, cont } => {
+        Tail::Opt { first, body, cont } => {
             let mut lines = vec![format!(
                 "Opt {} {}",
                 format_first_pool(st, *first),
@@ -612,7 +621,7 @@ fn format_op(op: &parsuna::lowering::Op, st: &StateTable) -> Vec<String> {
             append_body_ops(st, body, "  ", &mut lines);
             lines
         }
-        Op::Dispatch { tree, sync, cont } => {
+        Tail::Dispatch { tree, sync, cont } => {
             let mut lines = vec![format!(
                 "Dispatch sync={} {}",
                 format_sync_set(st, *sync),
@@ -627,21 +636,22 @@ fn format_op(op: &parsuna::lowering::Op, st: &StateTable) -> Vec<String> {
     }
 }
 
-/// Append every op of `body` to `out`, each prefixed by `indent`.
-/// Bodies are always rendered as a flat list of ops — no
-/// `<inlined>` placeholder, no compact `cur = N` short-form. A body
-/// that's just `[Op::Jump(s)]` shows up as a single `Jump …` line,
-/// which already says exactly what the body does.
+/// Append every instr + the tail of `body` to `out`, each prefixed
+/// by `indent`. A body whose instrs list is empty and whose tail is
+/// `Jump(s)` shows up as a single `Jump …` line.
 fn append_body_ops(
     st: &StateTable,
     body: &parsuna::lowering::Body,
     indent: &str,
     out: &mut Vec<String>,
 ) {
-    for op in body {
-        for line in format_op(op, st) {
+    for instr in &body.instrs {
+        for line in format_instr(instr, st) {
             out.push(format!("{}{}", indent, line));
         }
+    }
+    for line in format_tail(&body.tail, st) {
+        out.push(format!("{}{}", indent, line));
     }
 }
 

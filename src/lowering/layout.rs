@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use crate::analysis::AnalyzedGrammar;
 use crate::lowering::build::{Block, BlockId, Op, Program, Target};
 use crate::lowering::lexer_dfa::{self, DfaOpts};
-use crate::lowering::{build_dispatch_tree, FirstSet, Op as StateOp, State, StateId, StateTable};
+use crate::lowering::{build_dispatch_tree, Body, FirstSet, Instr, State, StateId, StateTable, Tail};
 
 /// Assign state ids to every op in every block, resolve inter-block
 /// targets, and compile the lexer DFA. Produces the [`StateTable`]
@@ -66,7 +66,10 @@ pub fn layout(prog: Program, ag: &AnalyzedGrammar, dopts: DfaOpts) -> StateTable
                 State {
                     id: next_id,
                     label: format!("{}:empty", block.label_prefix),
-                    ops: vec![StateOp::Ret],
+                    body: Body {
+                        instrs: Vec::new(),
+                        tail: Tail::Ret,
+                    },
                 },
             );
             next_id += 1;
@@ -87,7 +90,7 @@ pub fn layout(prog: Program, ag: &AnalyzedGrammar, dopts: DfaOpts) -> StateTable
                 State {
                     id: here,
                     label: block.op_labels[i].clone(),
-                    ops: lower_op(
+                    body: lower_op(
                         op,
                         here,
                         fall,
@@ -170,13 +173,14 @@ fn visit_block_targets(op: &Op, f: &mut dyn FnMut(BlockId)) {
     }
 }
 
-/// Translate one block-level `Op` into the `StateOp` sequence of a single
-/// state.
+/// Translate one block-level `Op` into the [`Body`] of a single state.
 ///
-/// Straight-line ops (Enter/Exit/Expect/Call) emit their action followed
-/// by an explicit `Jump(fall)` so the state always has an exit; the
-/// branchy ops (Opt/Star/Dispatch) encode `next` directly and don't need
-/// a trailing jump.
+/// Straight-line ops (Enter/Exit/Expect/Call) emit their action as an
+/// `Instr` (or sometimes an empty `instrs` list with a tail `Jump`),
+/// then a `Tail` that's `Jump(fall)` for non-tail ops or `Ret` for the
+/// block's last op. Branchy ops (Opt/Star/Dispatch) become the body's
+/// tail directly — they encode their continuation via their own `cont`
+/// field rather than a trailing jump.
 fn lower_op(
     op: &Op,
     here: StateId,
@@ -185,37 +189,43 @@ fn lower_op(
     entry: &HashMap<BlockId, StateId>,
     rules: &HashMap<String, BlockId>,
     first_sets: &[FirstSet],
-) -> Vec<StateOp> {
-    // The "post-op terminator" — what follows the op inside its state
-    // body. For non-tail ops this is `Jump(fall)` (fall-through to the
+) -> Body {
+    // The "post-op terminator" — what closes the body for non-branchy
+    // ops. For non-tail ops this is `Jump(fall)` (fall-through to the
     // next state in the block). For the block's last op this is `Ret`,
     // so the op's drive() call also pops the caller's continuation in
     // the same step — the runtime never lands on a standalone
     // `[Ret]`-only state with an empty stack.
     let after = if is_tail {
-        StateOp::Ret
+        Tail::Ret
     } else {
-        StateOp::Jump(fall)
+        Tail::Jump(fall)
     };
     // Branchy ops encode the post-op transition via their `cont` field
     // — `Some(fall)` is push-and-jump, `None` is tail call (the
     // body's `Ret` pops the *caller's* continuation directly).
     let cont = if is_tail { None } else { Some(fall) };
     match op {
-        Op::Enter { kind } => vec![StateOp::Enter(*kind), after],
-        Op::Exit { kind } => vec![StateOp::Exit(*kind), after],
+        Op::Enter { kind } => Body {
+            instrs: vec![Instr::Enter(*kind)],
+            tail: after,
+        },
+        Op::Exit { kind } => Body {
+            instrs: vec![Instr::Exit(*kind)],
+            tail: after,
+        },
         Op::Expect {
             kind,
             token_name,
             sync,
-        } => vec![
-            StateOp::Expect {
+        } => Body {
+            instrs: vec![Instr::Expect {
                 kind: *kind,
                 token_name: token_name.clone(),
                 sync: *sync,
-            },
-            after,
-        ],
+            }],
+            tail: after,
+        },
         Op::Call { target } => {
             // Call = save fall-through as the return state, then jump
             // to the callee's entry. When the callee's trailing Ret
@@ -224,26 +234,38 @@ fn lower_op(
             // pops *our* caller's continuation directly.
             let target_state = resolve(target, entry, rules);
             if is_tail {
-                vec![StateOp::Jump(target_state)]
+                Body {
+                    instrs: Vec::new(),
+                    tail: Tail::Jump(target_state),
+                }
             } else {
-                vec![StateOp::PushRet(fall), StateOp::Jump(target_state)]
+                Body {
+                    instrs: vec![Instr::PushRet(fall)],
+                    tail: Tail::Jump(target_state),
+                }
             }
         }
-        Op::Opt { first, body } => vec![StateOp::Opt {
-            first: *first,
-            body: vec![StateOp::Jump(resolve(body, entry, rules))],
-            cont,
-        }],
-        Op::Star { first, body } => vec![StateOp::Star {
-            first: *first,
-            body: vec![StateOp::Jump(resolve(body, entry, rules))],
-            cont,
-            // Loop-head defaults to the state we're being placed in.
-            // If the optimizer later splices this Star elsewhere, the
-            // original `here` state stays alive (it's referenced via
-            // `head`) so the body's Ret has somewhere to land.
-            head: here,
-        }],
+        Op::Opt { first, body } => Body {
+            instrs: Vec::new(),
+            tail: Tail::Opt {
+                first: *first,
+                body: Box::new(Body::jump(resolve(body, entry, rules))),
+                cont,
+            },
+        },
+        Op::Star { first, body } => Body {
+            instrs: Vec::new(),
+            tail: Tail::Star {
+                first: *first,
+                body: Box::new(Body::jump(resolve(body, entry, rules))),
+                cont,
+                // Loop-head defaults to the state we're being placed in.
+                // If the optimizer later splices this Star elsewhere, the
+                // original `here` state stays alive (it's referenced via
+                // `head`) so the body's Ret has somewhere to land.
+                head: here,
+            },
+        },
         Op::Dispatch {
             arms,
             has_eps,
@@ -257,11 +279,14 @@ fn lower_op(
                 .map(|(f, t)| (*f, resolve(t, entry, rules)))
                 .collect();
             let tree = build_dispatch_tree(&resolved, first_sets, *has_eps);
-            vec![StateOp::Dispatch {
-                tree,
-                sync: *sync,
-                cont,
-            }]
+            Body {
+                instrs: Vec::new(),
+                tail: Tail::Dispatch {
+                    tree,
+                    sync: *sync,
+                    cont,
+                },
+            }
         }
     }
 }
@@ -286,7 +311,7 @@ mod tests {
     use crate::analysis::analyze;
     use crate::grammar::parse_grammar;
     use crate::lowering::build::build;
-    use crate::lowering::Op as StateOp;
+    use crate::lowering::{Instr, Tail};
 
     fn analyze_src(src: &str) -> AnalyzedGrammar {
         let g = parse_grammar(src).expect("parse");
@@ -320,9 +345,9 @@ mod tests {
         // block — the block's last op carries its own terminator (a
         // direct `Ret`, a tail-call `Jump`, or `cont: None` for branchy
         // ops). The state at `entry_id + ops.len() - 1` is the block's
-        // last op, and its body's tail should be a `Ret` (for the rules
+        // last op, and its body's tail should be `Ret` (for the rules
         // in this grammar, every body ends with `Exit`, which lowers to
-        // `[Exit, Ret]`).
+        // `Body { instrs: [Exit], tail: Ret }`).
         let (ag, st) = lay("T = \"t\"; a = T; main = a T;");
         let prog = build(&ag);
         for (rule_name, entry_id) in &st.entry_states {
@@ -331,9 +356,9 @@ mod tests {
             let last_id = *entry_id + (block.ops.len() - 1) as StateId;
             let last = st.states.get(&last_id).expect("last state of block");
             assert!(
-                matches!(last.ops.last(), Some(StateOp::Ret)),
-                "block last op didn't end in Ret: {:?}",
-                last.ops
+                matches!(last.body.tail, Tail::Ret),
+                "block last op didn't tail in Ret: {:?}",
+                last.body
             );
         }
     }
@@ -349,20 +374,20 @@ mod tests {
     #[test]
     fn straight_line_op_emits_action_followed_by_jump_to_fallthrough() {
         // `main = T;` — the body is a single Expect then the block's Ret.
-        // The Expect state should have ops [Expect, Jump(next)].
+        // The Expect state's body should be { instrs: [Expect], tail: Jump(next) }.
         let (_, st) = lay("T = \"t\"; main = T;");
         let entry_id = st.entry_states[0].1;
         let entry = st.states.get(&entry_id).expect("entry state");
-        // The Enter wrapper is first; find an Expect anywhere in the block.
+        // The Enter wrapper is first; find an Expect Body anywhere with a Jump tail.
         let saw_expect_then_jump = st.states.values().any(|s| {
-            s.ops.len() == 2
-                && matches!(s.ops[0], StateOp::Expect { .. })
-                && matches!(s.ops[1], StateOp::Jump(_))
+            s.body.instrs.len() == 1
+                && matches!(s.body.instrs[0], Instr::Expect { .. })
+                && matches!(s.body.tail, Tail::Jump(_))
         });
         assert!(
             saw_expect_then_jump,
             "no Expect followed by Jump anywhere; entry={:?}",
-            entry.ops
+            entry.body
         );
     }
 
