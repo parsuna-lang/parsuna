@@ -51,7 +51,7 @@ impl Grammar {
 ///
 /// `skip` comes from a `-> skip` action in the grammar and causes the runtime to
 /// drop the token from the structural event stream (while still surfacing
-/// it alongside neighbouring events). `is_fragment` comes from a `_`-prefix
+/// it alongside neighboring events). `is_fragment` comes from a `_`-prefix
 /// and means "usable in other token patterns but not itself a token kind".
 /// `mode` comes from an enclosing `@mode(name) ...` pre-annotation and binds
 /// the token to a lexer mode; `mode_action` comes from a `-> push(name)` or

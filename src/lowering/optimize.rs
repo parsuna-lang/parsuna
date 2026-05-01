@@ -27,7 +27,7 @@
 //!
 //! The four run in a fixpoint loop because they feed each other:
 //! inlining shrinks ref counts (which `eliminate_dead` then drops),
-//! and dropping a state's last reference can turn neighbouring states
+//! and dropping a state's last reference can turn neighboring states
 //! into trampolines.
 
 use std::collections::{BTreeMap, HashSet, VecDeque};

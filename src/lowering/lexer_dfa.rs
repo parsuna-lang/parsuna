@@ -921,7 +921,7 @@ fn new_dfa_state(id: u32, nfa: &Nfa, set: &BTreeSet<NfaStateId>) -> DfaState {
 // DFA minimization (partition refinement)
 // =====================
 
-/// Hopcroft-style partition refinement: merge DFA states that recognise
+/// Hopcroft-style partition refinement: merge DFA states that recognize
 /// the same language. Two states are equivalent when they have the same
 /// `accept` value and every byte transitions both states into the same
 /// equivalence class. The output preserves longest-match semantics, which

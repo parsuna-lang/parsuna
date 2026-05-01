@@ -8,7 +8,7 @@
 //!
 //! The dump is built as `Vec<Vec<DumpSpan>>` where each inner span
 //! carries a [`DumpSpanKind`]. [`lowering_spans`] returns the structured
-//! form (used by the playground for colour rendering); [`lowering_text`]
+//! form (used by the playground for color rendering); [`lowering_text`]
 //! flattens the same data to a single string for the CLI debug dump.
 
 use std::fmt::Write;
@@ -17,7 +17,7 @@ use crate::lowering::{
     Body, DispatchLeaf, DispatchTree, Instr, ModeActionInfo, StateTable, Tail,
 };
 
-/// One coloured fragment of a dump line.
+/// One colored fragment of a dump line.
 #[derive(Clone, Debug)]
 pub struct DumpSpan {
     pub kind: DumpSpanKind,
@@ -28,7 +28,7 @@ pub struct DumpSpan {
 /// playground stylesheet knows how to paint.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum DumpSpanKind {
-    /// Whitespace and other uncoloured filler.
+    /// Whitespace and other uncolored filler.
     Plain,
     /// Pure punctuation (`{`, `}`, `->`, `,`, `:`, `=`).
     Punct,

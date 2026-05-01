@@ -156,7 +156,7 @@ function bytesToByteString(bytes: Uint8Array): string {
  *   each token's text payload. The byte view is what the public Span
  *   offsets refer to.
  * - `buf` (byte-string) — fed to the generated matcher so byte reads
- *   compile to `String.charCodeAt`, which V8 specialises hard for one-byte
+ *   compile to `String.charCodeAt`, which V8 specializes hard for one-byte
  *   strings. Built by hand because `TextDecoder("latin1")` is actually
  *   windows-1252 and remaps 0x80–0x9F.
  */
@@ -449,7 +449,7 @@ export class Parser<
    * happens in the right context.
    *
    * Stored as two parallel arrays to avoid an allocation per push
-   * (V8 specialises `number[]` very hard).
+   * (V8 specializes `number[]` very hard).
    */
   private retStateStack: number[] = [];
   private retModeDepthStack: number[] = [];

@@ -136,7 +136,7 @@ impl StateTable {
     }
 }
 
-/// One lexer mode: a name, a numeric id, and the DFA that recognises
+/// One lexer mode: a name, a numeric id, and the DFA that recognizes
 /// the tokens declared in it. Mode 0 is the default (anonymous) mode;
 /// every grammar has at least this one.
 #[derive(Clone, Debug)]
@@ -337,7 +337,7 @@ impl Body {
 
     /// True iff the body has no instrs and its tail is a single
     /// `Jump(s)`. The "transition-only" shape that
-    /// [`inline_branch_bodies`](crate::lowering::optimize) recognises
+    /// [`inline_branch_bodies`](crate::lowering::optimize) recognizes
     /// — branchier shapes have already been inlined and don't fold
     /// further.
     pub fn jump_target(&self) -> Option<StateId> {

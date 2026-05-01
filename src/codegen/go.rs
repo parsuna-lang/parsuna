@@ -135,7 +135,7 @@ fn emit_constants(s: &mut String, st: &StateTable) {
         "// RuleKindName returns the grammar-declared name of a rule kind,"
     )
     .unwrap();
-    writeln!(s, "// or \"?\" if the kind is not recognised.").unwrap();
+    writeln!(s, "// or \"?\" if the kind is not recognized.").unwrap();
     writeln!(s, "func RuleKindName(k RuleKind) string {{").unwrap();
     writeln!(s, "\tswitch k {{").unwrap();
     for n in &st.rule_kinds {
@@ -179,7 +179,7 @@ fn emit_constants(s: &mut String, st: &StateTable) {
         "// LabelKindName returns the grammar-declared name of a label kind,"
     )
     .unwrap();
-    writeln!(s, "// or \"?\" if the kind is not recognised.").unwrap();
+    writeln!(s, "// or \"?\" if the kind is not recognized.").unwrap();
     writeln!(s, "func LabelKindName(k LabelKind) string {{").unwrap();
     writeln!(s, "\tswitch k {{").unwrap();
     for n in &st.labels {

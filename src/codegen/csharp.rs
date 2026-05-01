@@ -325,8 +325,8 @@ fn emit_dfa_state_arm(
     writeln!(s, "                case {}: {{", ds.id).unwrap();
     let self_loop = ds.self_loop_ranges();
     if !self_loop.is_empty() {
-        // Self-loop scan-skip prologue. RyuJIT recognises this loop
-        // shape and lifts it to vectorised byte tests on x86/Arm.
+        // Self-loop scan-skip prologue. RyuJIT recognizes this loop
+        // shape and lifts it to vectorized byte tests on x86/Arm.
         writeln!(s, "                    while (pos < bufLen) {{").unwrap();
         writeln!(s, "                        int b = buf[pos];").unwrap();
         writeln!(

@@ -731,7 +731,7 @@ fn format_dispatch_tree(
 /// (the token name, "else ", or empty for top-level leaves).
 /// `Arm` leaves print their body's ops on indented lines below the
 /// `->` header, the same way `Op::Star` and `Op::Opt` print their
-/// bodies. `Fallthrough` and `Error` are summarised on the header
+/// bodies. `Fallthrough` and `Error` are summarized on the header
 /// line because they don't carry body ops.
 fn emit_dispatch_leaf(
     st: &StateTable,
