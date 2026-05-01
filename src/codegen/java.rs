@@ -253,7 +253,7 @@ fn emit_dfa(s: &mut String, st: &StateTable) {
         writeln!(s, "        outer: while (true) {{").unwrap();
         writeln!(s, "            switch (state) {{").unwrap();
         for ds in &m.dfa {
-            emit_dfa_state_arm(s, st, ds);
+            emit_dfa_state_arm(s, st, ds, m.id);
         }
         writeln!(s, "                default: break outer;").unwrap();
         writeln!(s, "            }}").unwrap();
@@ -265,6 +265,72 @@ fn emit_dfa(s: &mut String, st: &StateTable) {
         writeln!(s).unwrap();
     }
 
+    for m in &st.modes {
+        for ds in &m.dfa {
+            let sl = ds.self_loop_ranges();
+            if use_class_lookup_table(sl) {
+                writeln!(
+                    s,
+                    "    /** 256-entry membership table for the self-loop class of"
+                )
+                .unwrap();
+                writeln!(
+                    s,
+                    "     *  state {} in lexer mode {} (id {}). One static byte load",
+                    ds.id, m.name, m.id
+                )
+                .unwrap();
+                writeln!(
+                    s,
+                    "     *  per scanned byte beats the 3+ chained range checks the"
+                )
+                .unwrap();
+                writeln!(s, "     *  scalar variant compiles to. */").unwrap();
+                writeln!(
+                    s,
+                    "    private static final boolean[] CLASS_M{}_S{} = {};",
+                    m.id, ds.id,
+                    class_table_initializer(sl)
+                )
+                .unwrap();
+                writeln!(s).unwrap();
+            }
+        }
+    }
+    if needs_swar_long_le(st) {
+        writeln!(
+            s,
+            "    /** Little-endian 8-byte view over the lex buffer. Used by"
+        )
+        .unwrap();
+        writeln!(
+            s,
+            "     *  the SWAR scan-skip prologue in {{@code longestMatchModeN}}"
+        )
+        .unwrap();
+        writeln!(
+            s,
+            "     *  to test 8 bytes at once for the \"ASCII bytes except a single"
+        )
+        .unwrap();
+        writeln!(
+            s,
+            "     *  byte X\" classes that dominate text-content / quoted-string"
+        )
+        .unwrap();
+        writeln!(s, "     *  scans. */").unwrap();
+        writeln!(
+            s,
+            "    private static final java.lang.invoke.VarHandle LONG_LE ="
+        )
+        .unwrap();
+        writeln!(
+            s,
+            "        java.lang.invoke.MethodHandles.byteArrayViewVarHandle(long[].class, java.nio.ByteOrder.LITTLE_ENDIAN);"
+        )
+        .unwrap();
+        writeln!(s).unwrap();
+    }
     writeln!(
         s,
         "    private static final DfaMatcher MATCHER = Grammar::longestMatch;"
@@ -286,10 +352,67 @@ fn emit_dfa(s: &mut String, st: &StateTable) {
     writeln!(s).unwrap();
 }
 
+/// If `ranges` is "ASCII bytes except a single byte X" (i.e. two
+/// contiguous ranges that together cover 0x00..=0x7f minus exactly one
+/// byte), return X. Self-loops with this shape are the dominant cost
+/// for text-content / quoted-string scans, and we can vectorise them
+/// with an 8-byte SWAR test.
+fn detect_ascii_except_x(ranges: &[(u8, u8)]) -> Option<u8> {
+    if ranges.len() != 2 { return None; }
+    let (lo1, hi1) = ranges[0];
+    let (lo2, hi2) = ranges[1];
+    if lo1 != 0x00 || hi2 != 0x7f { return None; }
+    if (hi1 as u16) + 2 != lo2 as u16 { return None; }
+    Some(hi1 + 1)
+}
+
+/// Does any DFA state across any mode have a self-loop the SWAR scan
+/// applies to? Emits `LONG_LE` only when at least one such state exists,
+/// so single-mode token-only grammars don't carry an unused VarHandle.
+fn needs_swar_long_le(st: &StateTable) -> bool {
+    for m in &st.modes {
+        for ds in &m.dfa {
+            if detect_ascii_except_x(ds.self_loop_ranges()).is_some() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// True when the self-loop is a complex byte class that benefits from
+/// a 256-entry boolean lookup table. The threshold is "≥3 disjoint
+/// ranges, and not the SWAR pattern" — 1- and 2-range checks are
+/// cheap enough that JIT folds them into a couple of cmps, but at 3+
+/// the table-lookup variant (1 cache-resident byte load + 1 cmp)
+/// reliably wins on JIT-compiled scalar dispatch.
+fn use_class_lookup_table(ranges: &[(u8, u8)]) -> bool {
+    ranges.len() >= 3 && detect_ascii_except_x(ranges).is_none()
+}
+
+/// Render a byte class as a Java {@code boolean[256]} initializer
+/// expression, marking every byte in any of `ranges` as `true`.
+fn class_table_initializer(ranges: &[(u8, u8)]) -> String {
+    let mut bits = [false; 256];
+    for &(lo, hi) in ranges {
+        for b in lo..=hi {
+            bits[b as usize] = true;
+        }
+    }
+    let mut s = String::from("new boolean[]{");
+    for (i, &v) in bits.iter().enumerate() {
+        if i > 0 { s.push(','); }
+        s.push_str(if v { "true" } else { "false" });
+    }
+    s.push('}');
+    s
+}
+
 fn emit_dfa_state_arm(
     s: &mut String,
     st: &StateTable,
         ds: &DfaState,
+    mode_id: u32,
 ) {
     if ds.arms.is_empty() {
         writeln!(s, "                case {}: break outer;", ds.id).unwrap();
@@ -298,9 +421,113 @@ fn emit_dfa_state_arm(
     writeln!(s, "                case {}: {{", ds.id).unwrap();
     let self_loop = ds.self_loop_ranges();
     if !self_loop.is_empty() {
-        // Self-loop scan-skip prologue. HotSpot's loop optimiser will
-        // unroll and (on supported CPUs) vectorise tight byte-test
-        // loops; keeping the body simple lets the JIT do its work.
+        if use_class_lookup_table(self_loop) {
+            // Lookup-table self-loop scan. The 256-entry boolean[] is
+            // static-initialized once and lives at the top of the
+            // class — JIT keeps it L1-resident, so the inner test is
+            // a single byte load + a single compare per byte. Beats
+            // a 5-range chained check on JIT-compiled scalar paths.
+            writeln!(
+                s,
+                "                    while (pos < bufLen && CLASS_M{}_S{}[buf[pos] & 0xFF]) pos++;",
+                mode_id, ds.id
+            )
+            .unwrap();
+            if let Some(kind) = ds.accept {
+                writeln!(s, "                    bestLen = pos - start;").unwrap();
+                writeln!(
+                    s,
+                    "                    bestKind = {};",
+                    token_id(st, kind)
+                )
+                .unwrap();
+            }
+            writeln!(s, "                    if (pos >= bufLen) break outer;").unwrap();
+            writeln!(s, "                    int b = buf[pos] & 0xFF;").unwrap();
+            // Continue to dispatch arms below. We've already done the
+            // self-loop work, so we'd otherwise duplicate the inner
+            // loop emit; jump directly to the dispatch portion.
+            let mut first = true;
+            for arm in &ds.arms {
+                let cond = byte_cond(&arm.ranges);
+                let kw = if first { "if" } else { "else if" };
+                first = false;
+                write!(
+                    s,
+                    "                    {} ({}) {{ pos++; state = {};",
+                    kw, cond, arm.target
+                )
+                .unwrap();
+                if let Some(kind) = arm.target_accept {
+                    write!(
+                        s,
+                        " bestLen = pos - start; bestKind = {};",
+                        token_id(st, kind)
+                    )
+                    .unwrap();
+                }
+                writeln!(s, " }}").unwrap();
+            }
+            writeln!(s, "                    else break outer;").unwrap();
+            writeln!(s, "                    break;").unwrap();
+            writeln!(s, "                }}").unwrap();
+            return;
+        }
+        if let Some(x) = detect_ascii_except_x(self_loop) {
+            // SWAR-8 prologue. Read 8 bytes as a little-endian long via
+            // VarHandle (a single load on x86 LE), test all 8 bytes in
+            // parallel for `b == X` (the excluded byte) or `b >= 0x80`
+            // (high bit / start of UTF-8 multi-byte). When the chunk is
+            // all class members, advance pos by 8 and continue. When a
+            // terminator hits, jump pos to the first terminator byte and
+            // fall through to the per-byte tail.
+            let x_word = u64::from(x) * 0x0101010101010101u64;
+            writeln!(
+                s,
+                "                    while (pos + 8 <= bufLen) {{"
+            )
+            .unwrap();
+            writeln!(
+                s,
+                "                        long w = (long) LONG_LE.get(buf, pos);"
+            )
+            .unwrap();
+            writeln!(
+                s,
+                "                        long high = w & 0x8080808080808080L;"
+            )
+            .unwrap();
+            writeln!(
+                s,
+                "                        long xor = w ^ 0x{:016x}L;",
+                x_word
+            )
+            .unwrap();
+            writeln!(
+                s,
+                "                        long isX = (xor - 0x0101010101010101L) & ~xor & 0x8080808080808080L;"
+            )
+            .unwrap();
+            writeln!(
+                s,
+                "                        long stop = high | isX;"
+            )
+            .unwrap();
+            writeln!(s, "                        if (stop != 0) {{").unwrap();
+            writeln!(
+                s,
+                "                            pos += Long.numberOfTrailingZeros(stop) >>> 3;"
+            )
+            .unwrap();
+            writeln!(s, "                            break;").unwrap();
+            writeln!(s, "                        }}").unwrap();
+            writeln!(s, "                        pos += 8;").unwrap();
+            writeln!(s, "                    }}").unwrap();
+        }
+        // Per-byte tail. For SWAR'd states this only handles the < 8
+        // byte tail (or the terminator byte itself); for non-SWAR
+        // states it's the full scan loop and HotSpot's loop optimiser
+        // is expected to unroll it.
         writeln!(s, "                    while (pos < bufLen) {{").unwrap();
         writeln!(s, "                        int b = buf[pos] & 0xFF;").unwrap();
         writeln!(
