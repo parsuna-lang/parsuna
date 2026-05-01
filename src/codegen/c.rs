@@ -308,6 +308,47 @@ fn emit_header(h: &mut String, st: &StateTable, stem: &str, upper: &str) {
     writeln!(h, "const char *{stem}_rule_kind_name(int k);").unwrap();
     writeln!(h).unwrap();
 
+    writeln!(
+        h,
+        "/* Optional flags accepted by the `*_with_options` constructors. The"
+    )
+    .unwrap();
+    writeln!(
+        h,
+        " * no-options constructors use a zero-initialized struct (all defaults). */"
+    )
+    .unwrap();
+    writeln!(h, "typedef struct {{").unwrap();
+    writeln!(
+        h,
+        "    /* When non-zero, skip tokens (whitespace, comments) are silently"
+    )
+    .unwrap();
+    writeln!(
+        h,
+        "     * consumed instead of yielded as EV_TOKEN events. */"
+    )
+    .unwrap();
+    writeln!(h, "    int drop_skips;").unwrap();
+    writeln!(
+        h,
+        "    /* When non-zero, every Token whose `Token.label` is NULL (i.e."
+    )
+    .unwrap();
+    writeln!(
+        h,
+        "     * that didn't match a `name:NAME` position) is silently consumed."
+    )
+    .unwrap();
+    writeln!(
+        h,
+        "     * Implies skip-token suppression. */"
+    )
+    .unwrap();
+    writeln!(h, "    int drop_unlabeled_tokens;").unwrap();
+    writeln!(h, "}} {stem}_Options;").unwrap();
+    writeln!(h).unwrap();
+
     for (name, _) in &st.entry_states {
         writeln!(
             h,
@@ -359,23 +400,23 @@ fn emit_header(h: &mut String, st: &StateTable, stem: &str, upper: &str) {
         writeln!(h).unwrap();
         writeln!(
             h,
-            "/* `_no_skips` variants: skip tokens (whitespace, comments) are silently"
+            "/* `_with_options` variants accept a {stem}_Options struct controlling"
         )
         .unwrap();
         writeln!(
             h,
-            " * consumed instead of yielded as EV_TOKEN events. Otherwise identical to"
+            " * skip-token and unlabeled-token suppression. Otherwise identical to"
         )
         .unwrap();
         writeln!(h, " * the constructors above. */").unwrap();
         writeln!(
             h,
-            "{stem}_Parser *{stem}_parser_new_{name}_from_string_no_skips(const char *src, size_t len);"
+            "{stem}_Parser *{stem}_parser_new_{name}_from_string_with_options(const char *src, size_t len, {stem}_Options opts);"
         )
         .unwrap();
         writeln!(
             h,
-            "{stem}_Parser *{stem}_parser_new_{name}_from_read_fn_no_skips({stem}_ReadFn read_fn, void *ctx);"
+            "{stem}_Parser *{stem}_parser_new_{name}_from_read_fn_with_options({stem}_ReadFn read_fn, void *ctx, {stem}_Options opts);"
         )
         .unwrap();
     }
@@ -982,19 +1023,20 @@ fn emit_public_api(c: &mut String, st: &StateTable, stem: &str, upper: &str) {
         writeln!(c, "  parser_init_from_string(p, {id}, src, len);").unwrap();
         writeln!(c, "  return ({stem}_Parser*)p;").unwrap();
         writeln!(c, "}}").unwrap();
-        /* No-skips variants: same constructors, then flip the runtime
-         * flag so parser_next silently consumes skip tokens instead
-         * of yielding them as EV_TOKEN events. */
-        writeln!(c, "{stem}_Parser *{stem}_parser_new_{name}_from_read_fn_no_skips({stem}_ReadFn read_fn, void *ctx) {{").unwrap();
+        /* With-options variants: same construction, then copy the
+         * caller's flags into the runtime parser struct. */
+        writeln!(c, "{stem}_Parser *{stem}_parser_new_{name}_from_read_fn_with_options({stem}_ReadFn read_fn, void *ctx, {stem}_Options opts) {{").unwrap();
         writeln!(c, "  Parser *p = (Parser*)malloc(sizeof *p);").unwrap();
         writeln!(c, "  parser_init_from_read_fn(p, {id}, read_fn, ctx);").unwrap();
-        writeln!(c, "  p->drop_skips = 1;").unwrap();
+        writeln!(c, "  p->drop_skips = opts.drop_skips;").unwrap();
+        writeln!(c, "  p->drop_unlabeled_tokens = opts.drop_unlabeled_tokens;").unwrap();
         writeln!(c, "  return ({stem}_Parser*)p;").unwrap();
         writeln!(c, "}}").unwrap();
-        writeln!(c, "{stem}_Parser *{stem}_parser_new_{name}_from_string_no_skips(const char *src, size_t len) {{").unwrap();
+        writeln!(c, "{stem}_Parser *{stem}_parser_new_{name}_from_string_with_options(const char *src, size_t len, {stem}_Options opts) {{").unwrap();
         writeln!(c, "  Parser *p = (Parser*)malloc(sizeof *p);").unwrap();
         writeln!(c, "  parser_init_from_string(p, {id}, src, len);").unwrap();
-        writeln!(c, "  p->drop_skips = 1;").unwrap();
+        writeln!(c, "  p->drop_skips = opts.drop_skips;").unwrap();
+        writeln!(c, "  p->drop_unlabeled_tokens = opts.drop_unlabeled_tokens;").unwrap();
         writeln!(c, "  return ({stem}_Parser*)p;").unwrap();
         writeln!(c, "}}").unwrap();
     }

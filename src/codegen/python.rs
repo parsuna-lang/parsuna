@@ -143,65 +143,73 @@ fn build_lib_rs(
 
     for r in rules {
         let upper = r.to_uppercase();
-        // Default factory: emits skip tokens, emits unlabeled tokens —
-        // matches the runtime's `EmitSkips` config.
         writeln!(
             &mut out,
-            "/// Parse the `{}` rule from a string and return a [`PyParser`].",
-            r
+            "/// Parse the `{r}` rule. `emit_skips` (default `True`) controls whether"
         )
         .unwrap();
-        writeln!(&mut out, "/// Skip tokens (whitespace, comments) come through as Token events;").unwrap();
-        writeln!(&mut out, "/// call `parse_{}_no_skips` or `parse_{}_labeled_only` for the alternative configs.", r, r).unwrap();
-        writeln!(&mut out, "#[pyo3::pyfunction(name = \"parse_{}\")]", r).unwrap();
-        writeln!(&mut out, "fn parse_{}_py(src: &str) -> PyParser {{", r).unwrap();
-        writeln!(&mut out, "    let lex = parsuna_rt::StreamingLexer::<_, TokenKind, LexerDfa>::new(std::io::Cursor::new(src.as_bytes().to_vec()));").unwrap();
         writeln!(
             &mut out,
-            "    let parser = parsuna_rt::Parser::<_, _, _, _, parsuna_rt::EmitSkips>::new(lex, ENTRY_{});",
-            upper
+            "/// skip tokens (whitespace, comments) reach the consumer; `emit_unlabeled_tokens`"
         )
         .unwrap();
-        writeln!(&mut out, "    PyParser {{ inner: Box::new(parser) }}").unwrap();
-        writeln!(&mut out, "}}").unwrap();
-
-        // No-skips factory: drops skip tokens at the source.
         writeln!(
             &mut out,
-            "/// Parse the `{}` rule, silently consuming skip tokens (no Token events for whitespace / comments).",
-            r
+            "/// (default `True`) controls whether tokens without a `name:NAME` label do."
         )
         .unwrap();
-        writeln!(&mut out, "#[pyo3::pyfunction(name = \"parse_{}_no_skips\")]", r).unwrap();
-        writeln!(&mut out, "fn parse_{}_no_skips_py(src: &str) -> PyParser {{", r).unwrap();
-        writeln!(&mut out, "    let lex = parsuna_rt::StreamingLexer::<_, TokenKind, LexerDfa>::new(std::io::Cursor::new(src.as_bytes().to_vec()));").unwrap();
         writeln!(
             &mut out,
-            "    let parser = parsuna_rt::Parser::<_, _, _, _, parsuna_rt::DropSkips>::new(lex, ENTRY_{});",
-            upper
+            "#[pyo3::pyfunction(name = \"parse_{r}\", signature = (src, *, emit_skips=true, emit_unlabeled_tokens=true))]"
         )
         .unwrap();
-        writeln!(&mut out, "    PyParser {{ inner: Box::new(parser) }}").unwrap();
-        writeln!(&mut out, "}}").unwrap();
-
-        // Labeled-only factory: drops every Token whose Label is None.
         writeln!(
             &mut out,
-            "/// Parse the `{}` rule, dropping every Token event that didn't match a `name:NAME`-labelled position.",
-            r
+            "fn parse_{r}_py(src: &str, emit_skips: bool, emit_unlabeled_tokens: bool) -> PyParser {{"
         )
         .unwrap();
-        writeln!(&mut out, "/// Only labelled tokens and structural events come through — useful for tree builders.").unwrap();
-        writeln!(&mut out, "#[pyo3::pyfunction(name = \"parse_{}_labeled_only\")]", r).unwrap();
-        writeln!(&mut out, "fn parse_{}_labeled_only_py(src: &str) -> PyParser {{", r).unwrap();
-        writeln!(&mut out, "    let lex = parsuna_rt::StreamingLexer::<_, TokenKind, LexerDfa>::new(std::io::Cursor::new(src.as_bytes().to_vec()));").unwrap();
         writeln!(
             &mut out,
-            "    let parser = parsuna_rt::Parser::<_, _, _, _, parsuna_rt::LabeledOnly>::new(lex, ENTRY_{});",
-            upper
+            "    let lex = parsuna_rt::StreamingLexer::<_, TokenKind, LexerDfa>::new(std::io::Cursor::new(src.as_bytes().to_vec()));"
         )
         .unwrap();
-        writeln!(&mut out, "    PyParser {{ inner: Box::new(parser) }}").unwrap();
+        writeln!(
+            &mut out,
+            "    // Map the (emit_skips, emit_unlabeled_tokens) combo to the matching"
+        )
+        .unwrap();
+        writeln!(
+            &mut out,
+            "    // ParserConfig — boxed so PyParser can hold any of the variants."
+        )
+        .unwrap();
+        writeln!(
+            &mut out,
+            "    let inner: Box<dyn Iterator<Item = parsuna_rt::Event<'static, TokenKind, RuleKind>>> ="
+        )
+        .unwrap();
+        writeln!(
+            &mut out,
+            "        match (emit_skips, emit_unlabeled_tokens) {{"
+        )
+        .unwrap();
+        writeln!(
+            &mut out,
+            "            (true, true) => Box::new(parsuna_rt::Parser::<_, _, _, _, parsuna_rt::EmitSkips>::new(lex, ENTRY_{upper})),"
+        )
+        .unwrap();
+        writeln!(
+            &mut out,
+            "            (false, true) => Box::new(parsuna_rt::Parser::<_, _, _, _, parsuna_rt::DropSkips>::new(lex, ENTRY_{upper})),"
+        )
+        .unwrap();
+        writeln!(
+            &mut out,
+            "            (_, false) => Box::new(parsuna_rt::Parser::<_, _, _, _, parsuna_rt::LabeledOnly>::new(lex, ENTRY_{upper})),"
+        )
+        .unwrap();
+        writeln!(&mut out, "        }};").unwrap();
+        writeln!(&mut out, "    PyParser {{ inner }}").unwrap();
         writeln!(&mut out, "}}").unwrap();
     }
     writeln!(&mut out).unwrap();
@@ -224,18 +232,6 @@ fn build_lib_rs(
         writeln!(
             &mut out,
             "    m.add_function(pyo3::wrap_pyfunction!(parse_{}_py, m)?)?;",
-            r
-        )
-        .unwrap();
-        writeln!(
-            &mut out,
-            "    m.add_function(pyo3::wrap_pyfunction!(parse_{}_no_skips_py, m)?)?;",
-            r
-        )
-        .unwrap();
-        writeln!(
-            &mut out,
-            "    m.add_function(pyo3::wrap_pyfunction!(parse_{}_labeled_only_py, m)?)?;",
             r
         )
         .unwrap();

@@ -717,7 +717,11 @@ fn emit_public_api(s: &mut String, st: &StateTable) {
         let pascal_name = pascal(name);
         let upper = name.to_uppercase();
 
-        writeln!(s, "/** Parse the `{}` rule from a source string. Skip tokens are surfaced as `Event::Token`; pass `{{ emitSkips: false }}` (or call `parse{}NoSkips`) to drop them. Pass `{{ emitUnlabeledTokens: false }}` (or call `parse{}LabeledOnly`) to drop every unlabeled token, leaving only `name:NAME`-labeled positions plus structural events — useful for tree-builders that don't need to filter punctuation. */", name, pascal_name, pascal_name).unwrap();
+        writeln!(
+            s,
+            "/** Parse the `{name}` rule from a source string. `options.emitSkips` (default `true`) controls whether skip tokens (whitespace, comments) reach the consumer; `options.emitUnlabeledTokens` (default `true`) controls whether tokens without a `name:NAME` label do. Pass `{{ emitSkips: false, emitUnlabeledTokens: false }}` for an AST-shaped event stream that only surfaces labelled positions. */"
+        )
+        .unwrap();
         writeln!(
             s,
             "export function parse{pascal_name}(src: string, options?: {{ emitSkips?: boolean; emitUnlabeledTokens?: boolean }}): Parser<TokenKind, RuleKind> {{"
@@ -731,40 +735,6 @@ fn emit_public_api(s: &mut String, st: &StateTable) {
         writeln!(
             s,
             "  return new Parser<TokenKind, RuleKind>(lex, ENTRY_{upper}, PARSER_CONFIG, options);"
-        )
-        .unwrap();
-        writeln!(s, "}}").unwrap();
-        writeln!(s).unwrap();
-
-        writeln!(
-            s,
-            "/** Parse the `{}` rule from a source string, silently consuming skip tokens. Equivalent to calling `parse{}` with `{{ emitSkips: false }}`. */",
-            name, pascal_name
-        )
-        .unwrap();
-        writeln!(
-            s,
-            "export function parse{pascal_name}NoSkips(src: string): Parser<TokenKind, RuleKind> {{"
-        )
-        .unwrap();
-        writeln!(s, "  return parse{pascal_name}(src, {{ emitSkips: false }});").unwrap();
-        writeln!(s, "}}").unwrap();
-        writeln!(s).unwrap();
-
-        writeln!(
-            s,
-            "/** Parse the `{}` rule from a source string, dropping every unlabeled token. Only `name:NAME`-labeled positions and structural events come through — equivalent to `parse{}` with `{{ emitSkips: false, emitUnlabeledTokens: false }}`. */",
-            name, pascal_name
-        )
-        .unwrap();
-        writeln!(
-            s,
-            "export function parse{pascal_name}LabeledOnly(src: string): Parser<TokenKind, RuleKind> {{"
-        )
-        .unwrap();
-        writeln!(
-            s,
-            "  return parse{pascal_name}(src, {{ emitSkips: false, emitUnlabeledTokens: false }});"
         )
         .unwrap();
         writeln!(s, "}}").unwrap();

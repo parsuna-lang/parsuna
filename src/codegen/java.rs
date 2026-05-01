@@ -942,7 +942,7 @@ fn emit_public_api(s: &mut String, st: &StateTable) {
         writeln!(s).unwrap();
         writeln!(
             s,
-            "    /** Parse the `{name}` rule from an InputStream (read lazily in 16 KiB chunks). Skip tokens are surfaced as Event.Token; call parse{pname}NoSkips or pass a ParserOptions with dropSkips=true to silently consume them. */",
+            "    /** Parse the `{name}` rule from an InputStream (read lazily in 16 KiB chunks). Pass a ParserOptions to silently consume skip tokens (`dropSkips`) or drop unlabeled tokens (`dropUnlabeledTokens`). */",
         )
         .unwrap();
         writeln!(
@@ -978,23 +978,6 @@ fn emit_public_api(s: &mut String, st: &StateTable) {
         writeln!(
             s,
             "    public static Parser parse{pname}(String src, ParserOptions opts) {{ return parse{pname}(src.getBytes(StandardCharsets.UTF_8), opts); }}"
-        ).unwrap();
-        writeln!(
-            s,
-            "    /** Parse the `{name}` rule and silently consume skip tokens. */",
-        )
-        .unwrap();
-        writeln!(
-            s,
-            "    public static Parser parse{pname}NoSkips(InputStream in) {{ return fromInputStream(in, ENTRY_{upper}, new ParserOptions(true)); }}"
-        ).unwrap();
-        writeln!(
-            s,
-            "    public static Parser parse{pname}NoSkips(byte[] data) {{ return fromBytes(data, ENTRY_{upper}, new ParserOptions(true)); }}"
-        ).unwrap();
-        writeln!(
-            s,
-            "    public static Parser parse{pname}NoSkips(String src) {{ return parse{pname}NoSkips(src.getBytes(StandardCharsets.UTF_8)); }}"
         ).unwrap();
     }
 }

@@ -499,7 +499,7 @@ fn emit_grammar(s: &mut String, st: &StateTable) {
 
         writeln!(
             s,
-            "    /// <summary>Parse the <c>{name}</c> rule from a byte <c>Stream</c>. Skip tokens are surfaced as <see cref=\"TokenEvent\"/>; pass a <see cref=\"ParserOptions\"/> with <c>DropSkips = true</c> (or call <c>Parse{cap}NoSkips</c>) to silently consume them.</summary>",
+            "    /// <summary>Parse the <c>{name}</c> rule from a byte <c>Stream</c>. Pass a <see cref=\"ParserOptions\"/> to silently consume skip tokens (<c>DropSkips</c>) or unlabeled tokens (<c>DropUnlabeledTokens</c>).</summary>",
         )
         .unwrap();
         writeln!(
@@ -515,26 +515,6 @@ fn emit_grammar(s: &mut String, st: &StateTable) {
         writeln!(
             s,
             "    public static Parser Parse{cap}(string src, ParserOptions? options = null) => Parse{cap}(new MemoryStream(Encoding.UTF8.GetBytes(src)), options);"
-        )
-        .unwrap();
-        writeln!(
-            s,
-            "    /// <summary>Parse the <c>{name}</c> rule from a byte <c>Stream</c>, silently consuming skip tokens.</summary>",
-        )
-        .unwrap();
-        writeln!(
-            s,
-            "    public static Parser Parse{cap}NoSkips(Stream stream) => FromStream(stream, Entry{cap}, new ParserOptions {{ DropSkips = true }});"
-        )
-        .unwrap();
-        writeln!(
-            s,
-            "    /// <summary>Parse the <c>{name}</c> rule from a UTF-8 string, silently consuming skip tokens.</summary>",
-        )
-        .unwrap();
-        writeln!(
-            s,
-            "    public static Parser Parse{cap}NoSkips(string src) => Parse{cap}NoSkips(new MemoryStream(Encoding.UTF8.GetBytes(src)));"
         )
         .unwrap();
         writeln!(s).unwrap();
