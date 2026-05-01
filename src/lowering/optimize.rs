@@ -33,7 +33,10 @@
 use std::collections::{BTreeMap, HashSet, VecDeque};
 
 use crate::lowering::validate::is_valid_body;
-use crate::lowering::{Body, DispatchLeaf, DispatchTree, Instr, LoweringOpts, StateId, StateTable, Tail};
+use crate::lowering::{
+    Body, DispatchLeaf, DispatchTree, FirstSet, FirstSetId, FirstSetPool, Instr, LoweringOpts,
+    StateId, StateTable, Tail,
+};
 
 /// Run enabled passes to a fixpoint. With every flag off the loop
 /// converges in a single iteration (no change), which is fine: the
@@ -45,6 +48,9 @@ use crate::lowering::{Body, DispatchLeaf, DispatchTree, Instr, LoweringOpts, Sta
 pub fn optimize(table: &mut StateTable, opts: LoweringOpts) {
     loop {
         let snapshot = body_snapshot(table);
+        if opts.recover_opt_star {
+            recover_opt_star(table);
+        }
         if opts.inline_jumps {
             inline_jumps(table);
         }
@@ -449,6 +455,108 @@ fn remap_tree(tree: &mut DispatchTree, remap: &BTreeMap<StateId, StateId>) {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// recover_opt_star
+// ---------------------------------------------------------------------------
+
+/// Rewrite single-arm Fallthrough Dispatches back to `Tail::Opt`, and
+/// the self-loop variant to `Tail::Star`. `foo = A | ;` lowers to a
+/// Dispatch shape semantically identical to `foo = A?;`, so without
+/// this pass two equivalent grammars produce different generated
+/// code (a one-case `switch` vs. a clean `if`).
+///
+/// Recognized patterns:
+///
+/// * **Opt**: `Dispatch { tree: Switch { depth: 0, arms: [(k, Arm(b))],
+///   default: Fallthrough }, cont }` → `Opt { first: {[k]}, body: b, cont }`.
+///
+/// * **Star**: same as Opt but `b.tail == Jump(host)` where `host` is
+///   the state owning the Dispatch — i.e. each iteration tail-jumps
+///   back to the loop head. Rewrite to `Star { first, body: <b with
+///   tail=Ret>, cont, head: host }`.
+///
+/// The original Dispatch's `sync` set is dropped: with Fallthrough on
+/// miss, the runtime never reaches the recovery path it described.
+fn recover_opt_star(table: &mut StateTable) {
+    enum Rewrite {
+        Opt { kind: u16, body: Body, cont: Option<StateId> },
+        Star { kind: u16, body: Body, cont: Option<StateId> },
+    }
+
+    let mut rewrites: Vec<(StateId, Rewrite)> = Vec::new();
+    for state in table.states.values() {
+        let Tail::Dispatch { tree, cont, .. } = &state.body.tail else {
+            continue;
+        };
+        let DispatchTree::Switch {
+            depth: 0,
+            arms,
+            default: DispatchLeaf::Fallthrough,
+        } = tree
+        else {
+            continue;
+        };
+        if arms.len() != 1 {
+            continue;
+        }
+        let (kind, sub) = &arms[0];
+        let DispatchTree::Leaf(DispatchLeaf::Arm(body)) = sub else {
+            continue;
+        };
+        let body = (**body).clone();
+        let kind = *kind;
+        let cont = *cont;
+        if matches!(&body.tail, Tail::Jump(t) if *t == state.id) {
+            rewrites.push((state.id, Rewrite::Star { kind, body, cont }));
+        } else {
+            rewrites.push((state.id, Rewrite::Opt { kind, body, cont }));
+        }
+    }
+
+    for (id, r) in rewrites {
+        let kind = match &r {
+            Rewrite::Opt { kind, .. } | Rewrite::Star { kind, .. } => *kind,
+        };
+        let first = first_set_for_single_kind(&mut table.first_sets, kind);
+        let state = table.states.get_mut(&id).expect("rewritten state exists");
+        state.body.tail = match r {
+            Rewrite::Opt { body, cont, .. } => Tail::Opt {
+                first,
+                body: Box::new(body),
+                cont,
+            },
+            Rewrite::Star { mut body, cont, .. } => {
+                // Star's runtime returns control to `head` after the body
+                // completes, so the trailing `Jump(head)` becomes `Ret`.
+                body.tail = Tail::Ret;
+                Tail::Star {
+                    first,
+                    body: Box::new(body),
+                    cont,
+                    head: id,
+                }
+            }
+        };
+    }
+}
+
+/// Find or create a FIRST-set pool entry whose only sequence is `[kind]`.
+/// `has_references` is left `false`; [`crate::lowering::mark_first_set_references`]
+/// re-stamps every entry once optimization settles.
+fn first_set_for_single_kind(pool: &mut FirstSetPool, kind: u16) -> FirstSetId {
+    let target: Vec<Vec<u16>> = vec![vec![kind]];
+    if let Some(existing) = pool.iter().find(|fs| fs.seqs == target) {
+        return existing.id;
+    }
+    let id = pool.len() as FirstSetId;
+    pool.push(FirstSet {
+        id,
+        seqs: target,
+        has_references: false,
+    });
+    id
 }
 
 #[cfg(test)]

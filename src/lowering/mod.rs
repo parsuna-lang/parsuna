@@ -507,6 +507,12 @@ pub struct LoweringOpts {
     /// the table; the generated parser still works (they're never
     /// entered) but the emitted source is bigger.
     pub eliminate_dead: bool,
+    /// Rewrite single-arm `Tail::Dispatch` shapes back to `Tail::Opt`
+    /// (and self-looping ones to `Tail::Star`) when the dispatch's
+    /// default arm is `Fallthrough`. Lets a user-written `foo = A | ;`
+    /// emit the same `if`/`while` shape as the equivalent `foo = A?;`.
+    /// Off: the dispatch stays a one-case `switch` in generated code.
+    pub recover_opt_star: bool,
 }
 
 impl Default for LoweringOpts {
@@ -516,6 +522,7 @@ impl Default for LoweringOpts {
             fold_trampolines: true,
             inline_branch_bodies: true,
             eliminate_dead: true,
+            recover_opt_star: true,
         }
     }
 }

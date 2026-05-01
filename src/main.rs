@@ -69,6 +69,12 @@ struct OptArgs {
     #[arg(long = "no-eliminate-dead", global = true, help_heading = "Optimizer")]
     no_eliminate_dead: bool,
 
+    /// Disable rewriting single-arm Fallthrough Dispatches back to
+    /// `Tail::Opt`/`Tail::Star`. With this flag on, `foo = A | ;`
+    /// emits a one-case `switch` instead of an `if`.
+    #[arg(long = "no-recover-opt-star", global = true, help_heading = "Optimizer")]
+    no_recover_opt_star: bool,
+
     /// Disable lexer-DFA partition-refinement minimization. Keeps
     /// the raw subset-construction output.
     #[arg(long = "no-dfa-minimize", global = true, help_heading = "Optimizer")]
@@ -82,6 +88,7 @@ impl OptArgs {
             fold_trampolines: !self.no_fold_trampolines,
             inline_branch_bodies: !self.no_inline_branch_bodies,
             eliminate_dead: !self.no_eliminate_dead,
+            recover_opt_star: !self.no_recover_opt_star,
         }
     }
 
