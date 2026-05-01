@@ -921,17 +921,73 @@ impl parsuna_rt::Grammar<K> for Grammar {
                         p.push_ret(58);
                         event = Some(p.expect(TokenKind::Lparen, SYNC_3, "expected LPAREN"));
                         p.push_ret(59);
-                        cur = 50;
+                        cur = 61;
                     }
                     Some(TokenKind::Dot) => {
                         p.push_ret(58);
-                        event = Some(p.enter(RuleKind::CharPrimary));
-                        cur = 51;
+                        match p.look(0).kind {
+                            Some(TokenKind::Dot) => {
+                                event = Some(p.enter(RuleKind::CharPrimary));
+                                cur = 51;
+                            }
+                            Some(TokenKind::String) => {
+                                event = Some(p.expect(TokenKind::String, SYNC_3, "expected STRING"));
+                                cur = p.ret();
+                            }
+                            Some(TokenKind::Char) => {
+                                event = Some(p.enter(RuleKind::CharPrimary));
+                                cur = 51;
+                            }
+                            _ => {
+                                event = Some(p.error_here("unexpected token"));
+                                p.recover_to(SYNC_3);
+                                cur = p.ret();
+                            }
+                        }
+                    }
+                    Some(TokenKind::String) => {
+                        p.push_ret(58);
+                        match p.look(0).kind {
+                            Some(TokenKind::Dot) => {
+                                event = Some(p.enter(RuleKind::CharPrimary));
+                                cur = 51;
+                            }
+                            Some(TokenKind::String) => {
+                                event = Some(p.expect(TokenKind::String, SYNC_3, "expected STRING"));
+                                cur = p.ret();
+                            }
+                            Some(TokenKind::Char) => {
+                                event = Some(p.enter(RuleKind::CharPrimary));
+                                cur = 51;
+                            }
+                            _ => {
+                                event = Some(p.error_here("unexpected token"));
+                                p.recover_to(SYNC_3);
+                                cur = p.ret();
+                            }
+                        }
                     }
                     Some(TokenKind::Char) => {
                         p.push_ret(58);
-                        event = Some(p.enter(RuleKind::CharPrimary));
-                        cur = 51;
+                        match p.look(0).kind {
+                            Some(TokenKind::Dot) => {
+                                event = Some(p.enter(RuleKind::CharPrimary));
+                                cur = 51;
+                            }
+                            Some(TokenKind::String) => {
+                                event = Some(p.expect(TokenKind::String, SYNC_3, "expected STRING"));
+                                cur = p.ret();
+                            }
+                            Some(TokenKind::Char) => {
+                                event = Some(p.enter(RuleKind::CharPrimary));
+                                cur = 51;
+                            }
+                            _ => {
+                                event = Some(p.error_here("unexpected token"));
+                                p.recover_to(SYNC_3);
+                                cur = p.ret();
+                            }
+                        }
                     }
                     _ => {
                         cur = 58;
@@ -949,7 +1005,7 @@ impl parsuna_rt::Grammar<K> for Grammar {
                     Some(TokenKind::Pipe) => {
                         p.push_ret(59);
                         event = Some(p.expect(TokenKind::Pipe, SYNC_3, "expected PIPE"));
-                        cur = 50;
+                        cur = 61;
                     }
                     _ => {
                         cur = 60;
@@ -959,6 +1015,27 @@ impl parsuna_rt::Grammar<K> for Grammar {
             60 => { // neg_class:alt1:expect:RPAREN
                 event = Some(p.expect(TokenKind::Rparen, SYNC_3, "expected RPAREN"));
                 cur = p.ret();
+            }
+            61 => { // _neg_atom:dispatch
+                match p.look(0).kind {
+                    Some(TokenKind::Dot) => {
+                        event = Some(p.enter(RuleKind::CharPrimary));
+                        cur = 51;
+                    }
+                    Some(TokenKind::String) => {
+                        event = Some(p.expect(TokenKind::String, SYNC_3, "expected STRING"));
+                        cur = p.ret();
+                    }
+                    Some(TokenKind::Char) => {
+                        event = Some(p.enter(RuleKind::CharPrimary));
+                        cur = 51;
+                    }
+                    _ => {
+                        event = Some(p.error_here("unexpected token"));
+                        p.recover_to(SYNC_3);
+                        cur = p.ret();
+                    }
+                }
             }
             _ => unreachable!("unknown state"),
         }

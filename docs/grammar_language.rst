@@ -58,9 +58,13 @@ A token body is a regular expression over characters. The atoms are:
 * ``'a'..'z'`` — a character range, matches any codepoint in the
   inclusive range.
 * ``.`` — matches any codepoint.
-* ``!x`` — the negation of character atom ``x`` (or a list of atoms in
-  parentheses separated by ``|``). For example, ``!('"' | '\n')``
-  matches any codepoint that is neither ``"`` nor a newline.
+* ``!x`` — the negation of an atom ``x`` (or a list of atoms in
+  parentheses separated by ``|``). The atom can be a character primary
+  (``'a'``, ``'a'..'z'``, ``.``) or a string literal (``"*/"``,
+  ``"-->"``). Single-char atoms negate at the byte level
+  (``!('"' | '\n')`` is "any codepoint that's neither ``"`` nor a
+  newline"); string atoms add multi-byte lookahead — see
+  *Negated string lookahead* below.
 * ``NAME`` — reference to another token (usually a fragment).
 
 Operators, from tightest to loosest binding:
@@ -72,6 +76,56 @@ Operators, from tightest to loosest binding:
 * ``x | y`` — alternation.
 
 Parentheses group.
+
+Negated string lookahead
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+A string literal inside ``!(...)`` matches one byte such that the input
+*at this position* does not start that literal. Combine with ``*`` or
+``+`` to get the "scan until literal" idiom that block comments,
+here-docs, and string bodies usually want::
+
+    BLOCK   = "/*" !"*/"* "*/";
+    COMMENT = "//" !'\n'* '\n';
+    HTML    = "<!--" !"-->"* "-->";
+    STRING  = "\"" (!("\"" | "\\") | "\\" .)* "\"";
+
+The negation is per-position: at each input position the lexer checks
+whether any of the listed strings would start there, and if not,
+consumes one byte. Multiple alternatives compose under the same
+``!(...)``, mixing chars and strings::
+
+    LINE = !("\r\n" | "\n")*;        // any byte that doesn't start a newline form
+    MIXED = !("end" | '*' | "//")*;  // any byte that doesn't start any of these
+
+A few rules to keep in mind:
+
+* **Quantifier required.** ``!"L"`` with a multi-byte string is only
+  valid as the body of ``*`` or ``+``. Standalone ``!"L"`` and
+  ``!"L"?`` are rejected — the per-position semantics for those would
+  need multi-byte rewind, which the runtime doesn't have. ``!"L"+``
+  works the same as ``!"L"*`` but requires at least one consumed byte.
+* **Single-codepoint strings collapse.** ``!"x"`` is folded into
+  ``!'x'`` at parse time; the IR and the compiled DFA are identical
+  to the char-only form.
+* **No ranges alongside strings.** Mixing a character range (``'a'..'z'``)
+  with a string atom inside the same ``!(...)`` is an error — the
+  trie compiler can't expand "range at every position" without an
+  explosion in pattern count. Split the negation into two groups, or
+  use a separate token rule.
+* **Self-overlapping terminators are conservative.** Most real
+  terminators (``*/``, ``\n``, ``"``, ``-->`` is the rare exception)
+  don't share a proper prefix with a proper suffix. For
+  non-self-overlapping terminators the body matches exactly up to the
+  position where the terminator starts. For self-overlapping
+  terminators (``aa``, ``aba``) the body may stop a few bytes earlier
+  than strict per-position semantics would; the surrounding pattern
+  catches the same final outcome in practice.
+
+Editor tooling: tree-sitter has native negative lookahead in its regex
+syntax, so the ``parsuna ... tree-sitter`` backend translates a
+``NegLook`` to a ``(?!literal).`` regex. Highlighting matches the
+runtime's behaviour for typical patterns.
 
 Escapes inside string and char literals follow a small fixed set:
 ``\n``, ``\r``, ``\t``, ``\0``, ``\\``, ``\'``, ``\"``, and

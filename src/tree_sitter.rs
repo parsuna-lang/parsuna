@@ -96,8 +96,9 @@ fn render_token(p: &TokenPattern, g: &Grammar) -> String {
         TokenPattern::Empty => "''".to_string(),
         TokenPattern::Literal(s) => js_string(s),
         TokenPattern::Class(cc) => render_class(cc),
+        TokenPattern::NegLook { chars, strings } => render_neg_look(chars, strings),
         TokenPattern::Ref(name) => {
-            
+
             let t = g.tokens.get(name).expect("reference validated upstream");
             render_token(&t.pattern, g)
         }
@@ -113,6 +114,61 @@ fn render_token(p: &TokenPattern, g: &Grammar) -> String {
         TokenPattern::Star(x) => format!("repeat({})", render_token(x, g)),
         TokenPattern::Plus(x) => format!("repeat1({})", render_token(x, g)),
     }
+}
+
+/// Render a NegLook pattern as a JS regex with negative lookaheads for
+/// the multi-byte strings plus a negated char class for the chars. The
+/// emitted regex matches a single byte; tree-sitter's regex engine
+/// handles `(?!...)` natively, so this stays accurate for the typical
+/// `!"L"*` block-comment idiom.
+fn render_neg_look(chars: &CharClass, strings: &[String]) -> String {
+    let mut out = String::from("/");
+    for s in strings {
+        out.push_str("(?!");
+        out.push_str(&regex_escape_literal(s));
+        out.push(')');
+    }
+    if chars.items.is_empty() {
+        out.push('.');
+    } else {
+        out.push_str("[^");
+        for item in &chars.items {
+            match *item {
+                ClassItem::Char(c) => out.push_str(&escape_class_char(c)),
+                ClassItem::Range(lo, hi) => {
+                    out.push_str(&escape_class_char(lo));
+                    out.push('-');
+                    out.push_str(&escape_class_char(hi));
+                }
+            }
+        }
+        out.push(']');
+    }
+    out.push('/');
+    out
+}
+
+/// Escape a literal string for inclusion inside a JS regex (in `(?!...)`).
+/// Same metacharacter set as a regex pattern body.
+fn regex_escape_literal(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' | '/' | '.' | '*' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|'
+            | '^' | '$' => {
+                out.push('\\');
+                out.push(c);
+            }
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 || (c as u32) == 0x7F => {
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 fn render_class(cc: &CharClass) -> String {

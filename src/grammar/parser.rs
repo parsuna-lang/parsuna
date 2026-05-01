@@ -626,30 +626,93 @@ fn read_neg_class<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>) -> T
     r.expect_enter(RuleKind::NegClass);
     let bang = r.next_token();
     let mut items: Vec<ClassItem> = Vec::new();
+    let mut strings: Vec<String> = Vec::new();
 
     if r.eat_token(TokenKind::Lparen).is_some() {
         loop {
-            collect_class_items(r, &mut items, bang.span);
+            collect_neg_atom(r, &mut items, &mut strings, bang.span);
             if r.eat_token(TokenKind::Pipe).is_none() {
                 break;
             }
         }
         r.eat_token(TokenKind::Rparen);
     } else {
-        collect_class_items(r, &mut items, bang.span);
+        collect_neg_atom(r, &mut items, &mut strings, bang.span);
     }
     r.expect_exit(RuleKind::NegClass);
-    TokenPattern::Class(CharClass {
-        negated: true,
-        items,
-    })
+    if strings.is_empty() {
+        TokenPattern::Class(CharClass {
+            negated: true,
+            items,
+        })
+    } else {
+        // Reject ranges in NegLook chars — the AC trie compiler can't
+        // handle ranges-on-each-position; ranges'd have to expand to
+        // per-codepoint patterns, which can blow up. Single chars and
+        // string literals are fine.
+        if items
+            .iter()
+            .any(|it| matches!(it, ClassItem::Range(_, _)))
+        {
+            r.issues.push(
+                Error::new(
+                    "character ranges are not supported alongside string atoms inside `!(...)`; \
+                     split the negation into a separate `!('a'..'z')` group",
+                )
+                .at(bang.span),
+            );
+        }
+        TokenPattern::NegLook {
+            chars: CharClass {
+                negated: true,
+                items,
+            },
+            strings,
+        }
+    }
 }
 
-fn collect_class_items<'a, I: Iterator<Item = Event<'a>>>(
+/// Read one `_neg_atom` from the event stream, folding it into either
+/// `items` (single-codepoint atoms — chars, ranges, dot, single-codepoint
+/// strings) or `strings` (multi-codepoint string literals).
+fn collect_neg_atom<'a, I: Iterator<Item = Event<'a>>>(
     r: &mut Reader<'a, I>,
-    out: &mut Vec<ClassItem>,
+    items: &mut Vec<ClassItem>,
+    strings: &mut Vec<String>,
     fallback_span: Span,
 ) {
+    // `_neg_atom` is a fragment, so its events are inlined: we see
+    // either `Enter(CharPrimary)` ... or a bare `Token(STRING)` here.
+    if let Some(Event::Token(t)) = r.peek() {
+        if t.kind == Some(TokenKind::String) {
+            let tok = r.next_token();
+            let text_owned = tok.text.clone().into_owned();
+            let s = unquote_string(&text_owned, tok.span, &mut r.issues);
+            // Single-codepoint strings collapse into the chars set —
+            // `!"x"` is identical to `!'x'`. Empty strings can't be
+            // negated meaningfully.
+            let mut iter = s.chars();
+            let first = iter.next();
+            let second = iter.next();
+            match (first, second) {
+                (None, _) => {
+                    r.issues.push(
+                        Error::new(
+                            "cannot negate empty string; an empty literal can never start at a position",
+                        )
+                        .at(tok.span),
+                    );
+                }
+                (Some(ch), None) => {
+                    items.push(ClassItem::Char(ch as u32));
+                }
+                (Some(_), Some(_)) => {
+                    strings.push(s);
+                }
+            }
+            return;
+        }
+    }
     let p = read_char_primary(r);
     match p {
         TokenPattern::Class(c) if c.negated && c.items.is_empty() => {
@@ -658,16 +721,16 @@ fn collect_class_items<'a, I: Iterator<Item = Event<'a>>>(
                     .at(fallback_span),
             );
         }
-        TokenPattern::Class(c) => out.extend(c.items),
+        TokenPattern::Class(c) => items.extend(c.items),
         TokenPattern::Literal(s) => {
             let mut it = s.chars();
             if let Some(ch) = it.next() {
-                out.push(ClassItem::Char(ch as u32));
+                items.push(ClassItem::Char(ch as u32));
             }
         }
         _ => {
             r.issues
-                .push(Error::new("expected a character primary in negation").at(fallback_span));
+                .push(Error::new("expected a character primary or string in negation").at(fallback_span));
         }
     }
 }
@@ -1021,6 +1084,90 @@ mod tests {
             }
             _ => panic!("expected negated class, got {:?}", pat),
         }
+    }
+
+    // ----- NegLook (string negation) -----------------------------------
+
+    #[test]
+    fn neg_string_under_star_yields_neg_look() {
+        let g = parse_grammar(r#"BLOCK = "/*" !"*/"* "*/"; main = BLOCK;"#).expect("ok");
+        let pat = &g.tokens.get("BLOCK").unwrap().pattern;
+        // Walk to the Star inside the Seq.
+        let TokenPattern::Seq(xs) = pat else {
+            panic!("expected Seq, got {:?}", pat)
+        };
+        let TokenPattern::Star(inner) = &xs[1] else {
+            panic!("expected Star at position 1, got {:?}", xs[1])
+        };
+        match inner.as_ref() {
+            TokenPattern::NegLook { chars, strings } => {
+                assert!(chars.negated);
+                assert!(chars.items.is_empty());
+                assert_eq!(strings, &vec!["*/".to_string()]);
+            }
+            other => panic!("expected NegLook, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn neg_string_grouped_with_chars_yields_neg_look() {
+        let g = parse_grammar(r#"T = !("*/" | '\n')*; B = "x"; main = T B;"#).expect("ok");
+        let pat = &g.tokens.get("T").unwrap().pattern;
+        let TokenPattern::Star(inner) = pat else {
+            panic!("expected Star, got {:?}", pat)
+        };
+        match inner.as_ref() {
+            TokenPattern::NegLook { chars, strings } => {
+                assert!(chars.negated);
+                assert_eq!(chars.items.len(), 1); // '\n'
+                assert_eq!(strings, &vec!["*/".to_string()]);
+            }
+            other => panic!("expected NegLook, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn single_codepoint_string_in_neg_collapses_to_chars() {
+        // !"x"  is identical to !'x'  — both produce a Class, not a NegLook.
+        let g = parse_grammar(r#"T = !"x"*; B = "y"; main = T B;"#).expect("ok");
+        let pat = &g.tokens.get("T").unwrap().pattern;
+        let TokenPattern::Star(inner) = pat else {
+            panic!("expected Star, got {:?}", pat)
+        };
+        match inner.as_ref() {
+            TokenPattern::Class(cc) => {
+                assert!(cc.negated);
+                assert_eq!(cc.items.len(), 1);
+                assert!(matches!(cc.items[0], ClassItem::Char(0x78)));
+            }
+            other => panic!("expected Class, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn empty_neg_string_is_rejected() {
+        let errs = parse_grammar(r#"T = !""*; B = "x"; main = T B;"#)
+            .err()
+            .expect("err");
+        assert!(
+            errs.iter().any(|e| e.message.contains("empty string")),
+            "diagnostics: {:?}",
+            errs.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn neg_string_with_range_atom_is_rejected() {
+        // Mixing a string with a char range inside the same `!(...)` is
+        // refused — the AC trie can't handle ranges-on-each-position.
+        let errs = parse_grammar(r#"T = !('a'..'z' | "abc")*; B = "x"; main = T B;"#)
+            .err()
+            .expect("err");
+        assert!(
+            errs.iter().any(|e| e.message.contains("ranges are not supported")),
+            "diagnostics: {:?}",
+            errs.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
     }
 
     #[test]

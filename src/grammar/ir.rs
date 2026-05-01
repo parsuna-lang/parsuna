@@ -105,6 +105,20 @@ pub enum TokenPattern {
     /// Reference to another token pattern by name. Resolved (inlined)
     /// during lowering, so this never reaches the DFA builder.
     Ref(String),
+    /// Negated lookahead: matches one byte such that the input at this
+    /// position does not start any of `strings`, and the byte is also
+    /// not in the negated `chars` class. Built from `!("L1" | "L2" |
+    /// 'c' | ...)` when at least one alternative is a multi-codepoint
+    /// string. Single-codepoint atoms (chars, ranges, single-codepoint
+    /// strings) are folded into `chars` at parse time, so every
+    /// element of `strings` has length ≥ 2 codepoints. `chars.negated`
+    /// is always `true`.
+    ///
+    /// Standalone (not under `*`/`+`/`?`) is rejected by analysis —
+    /// the per-position semantics only compose cleanly under a
+    /// quantifier. See `lowering::lexer_dfa` for the AC-trie-based
+    /// compile.
+    NegLook { chars: CharClass, strings: Vec<String> },
     /// Concatenation: match the children in order.
     Seq(Vec<TokenPattern>),
     /// Alternation: match any one child.

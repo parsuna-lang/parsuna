@@ -41,6 +41,8 @@ fn pattern_nullable(p: &TokenPattern, g: &Grammar, visiting: &mut BTreeSet<Strin
         TokenPattern::Empty => true,
         TokenPattern::Literal(s) => s.is_empty(),
         TokenPattern::Class(_) => false,
+        // Always consumes one byte — same as Class.
+        TokenPattern::NegLook { .. } => false,
         TokenPattern::Ref(n) => {
             if !visiting.insert(n.clone()) {
                 return false;
@@ -135,6 +137,8 @@ fn check_unused_fragments(g: &Grammar, issues: &mut Vec<Diagnostic>) {
 fn collect_pattern_refs(p: &TokenPattern, out: &mut Vec<String>) {
     match p {
         TokenPattern::Empty | TokenPattern::Literal(_) | TokenPattern::Class(_) => {}
+        // No token refs inside — `chars` and `strings` are inline literals.
+        TokenPattern::NegLook { .. } => {}
         TokenPattern::Ref(n) => out.push(n.clone()),
         TokenPattern::Seq(xs) | TokenPattern::Alt(xs) => {
             xs.iter().for_each(|x| collect_pattern_refs(x, out))

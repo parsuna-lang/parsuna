@@ -76,6 +76,19 @@ fn ends(pat: &TokenPattern, s: &[u8], start: usize, out: &mut BTreeSet<usize>) {
                 out.insert(start + 1);
             }
         }
+        // Conservative over-approximation: pretend NegLook can match any
+        // single byte, so a token whose body contains `!"L"*` is treated
+        // as if it could swallow everything that comes after, including
+        // a later literal-token's text. This is the safe direction for
+        // the shadow lint — false positives flag a grammar where a real
+        // shadow *might* happen, prompting the user to look. The
+        // alternative (modelling NegLook precisely) would require
+        // implementing AC traversal in the lint, which isn't worth it.
+        TokenPattern::NegLook { .. } => {
+            if start < s.len() {
+                out.insert(start + 1);
+            }
+        }
         TokenPattern::Ref(_) => {
             // resolve_pattern should have inlined these.
         }
@@ -146,6 +159,8 @@ fn iterate_body(
 fn resolve_pattern(p: &TokenPattern, g: &Grammar) -> TokenPattern {
     match p {
         TokenPattern::Empty | TokenPattern::Literal(_) | TokenPattern::Class(_) => p.clone(),
+        // Self-contained — no token refs to resolve.
+        TokenPattern::NegLook { .. } => p.clone(),
         TokenPattern::Ref(n) => match g.tokens.get(n) {
             Some(td) => resolve_pattern(&td.pattern, g),
             None => TokenPattern::Empty,

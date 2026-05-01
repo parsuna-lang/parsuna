@@ -45,4 +45,5 @@ atom = IDENT | STRING | char_primary | neg_class;
 
 char_primary = CHAR (DOTDOT CHAR)? | DOT;
 
-neg_class = BANG (char_primary | LPAREN char_primary (PIPE char_primary)* RPAREN);
+neg_class = BANG (_neg_atom | LPAREN _neg_atom (PIPE _neg_atom)* RPAREN);
+_neg_atom = char_primary | STRING;

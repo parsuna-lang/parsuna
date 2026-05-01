@@ -45,6 +45,7 @@ pub fn run(g: &Grammar, issues: &mut Vec<Diagnostic>) {
 
     for t in g.tokens.values() {
         check_pattern_refs(&t.pattern, &known_tokens, issues, &t.name, t.span);
+        check_neg_look_quantified(&t.pattern, false, issues, &t.name, t.span);
     }
 
     detect_token_cycles(g, &known_tokens, issues);
@@ -116,6 +117,8 @@ fn check_pattern_refs(
 ) {
     match p {
         TokenPattern::Empty | TokenPattern::Literal(_) | TokenPattern::Class(_) => {}
+        // No refs inside — `chars` and `strings` are inline literals.
+        TokenPattern::NegLook { .. } => {}
         TokenPattern::Ref(n) => {
             if !tk.contains_key(n.as_str()) {
                 issues.push(
@@ -133,10 +136,70 @@ fn check_pattern_refs(
     }
 }
 
+/// Walk a token pattern checking the rule "`!"L"`-style negations with
+/// multi-codepoint string atoms must appear directly under `*` or `+`".
+///
+/// Standalone (`T = !"abc";`) and `?` (`T = !"abc"?;`) are rejected:
+/// per-position semantics for those would require multi-byte lookahead
+/// without a clean compile target. `*` and `+` work because the AC trie
+/// state persists across the iteration, so the body's bytes are checked
+/// against the negated literals in context.
+///
+/// `under_star_or_plus` is `true` when the parent pattern is `Star` or
+/// `Plus`; in that case a direct `NegLook` child is allowed.
+fn check_neg_look_quantified(
+    p: &TokenPattern,
+    under_star_or_plus: bool,
+    issues: &mut Vec<Diagnostic>,
+    ctx: &str,
+    ctx_span: Span,
+) {
+    match p {
+        TokenPattern::Empty
+        | TokenPattern::Literal(_)
+        | TokenPattern::Class(_)
+        | TokenPattern::Ref(_) => {}
+        TokenPattern::NegLook { .. } => {
+            if !under_star_or_plus {
+                issues.push(
+                    Diagnostic::error(format!(
+                        "negated string lookahead in token `{}` must appear directly under `*` or `+` \
+                         (e.g. `!\"*/\"*` or `!(\"a\" | \"b\")+`); standalone or `?`-quantified \
+                         multi-byte negation has no clean lexer encoding",
+                        ctx
+                    ))
+                    .at(ctx_span),
+                );
+            }
+        }
+        TokenPattern::Seq(xs) | TokenPattern::Alt(xs) => {
+            for x in xs {
+                check_neg_look_quantified(x, false, issues, ctx, ctx_span);
+            }
+        }
+        TokenPattern::Opt(x) => {
+            // `?` is *not* a license for NegLook — explicitly walk with
+            // under_star_or_plus = false.
+            check_neg_look_quantified(x, false, issues, ctx, ctx_span);
+        }
+        TokenPattern::Star(x) | TokenPattern::Plus(x) => {
+            // Direct child can be NegLook; deeper descendants reset the flag.
+            if let TokenPattern::NegLook { .. } = x.as_ref() {
+                // OK, no diagnostic; also no need to recurse into NegLook
+                // (it has no sub-patterns).
+            } else {
+                check_neg_look_quantified(x, false, issues, ctx, ctx_span);
+            }
+        }
+    }
+}
+
 fn detect_token_cycles(g: &Grammar, tk: &BTreeMap<&str, &TokenDef>, issues: &mut Vec<Diagnostic>) {
     fn collect_refs(p: &TokenPattern, out: &mut Vec<String>) {
         match p {
             TokenPattern::Empty | TokenPattern::Literal(_) | TokenPattern::Class(_) => {}
+            // No refs inside — inline literals only.
+            TokenPattern::NegLook { .. } => {}
             TokenPattern::Ref(n) => out.push(n.clone()),
             TokenPattern::Seq(xs) | TokenPattern::Alt(xs) => {
                 xs.iter().for_each(|x| collect_refs(x, out))
@@ -396,5 +459,104 @@ mod tests {
         g.add_rule(rule("main", Expr::Token("T".into())));
         let issues = run_collect(&g);
         assert!(issues.is_empty(), "{:?}", issues);
+    }
+
+    fn neg_look(s: &str) -> TokenPattern {
+        TokenPattern::NegLook {
+            chars: CharClass {
+                negated: true,
+                items: vec![],
+            },
+            strings: vec![s.into()],
+        }
+    }
+
+    #[test]
+    fn neg_look_under_star_is_accepted() {
+        let mut g = Grammar::default();
+        g.add_token(tok(
+            "T",
+            TokenPattern::Seq(vec![
+                lit("("),
+                TokenPattern::Star(Box::new(neg_look("*/"))),
+                lit("*/"),
+            ]),
+        ));
+        g.add_rule(rule("main", Expr::Token("T".into())));
+        let issues = run_collect(&g);
+        assert!(issues.is_empty(), "{:?}", issues);
+    }
+
+    #[test]
+    fn neg_look_under_plus_is_accepted() {
+        let mut g = Grammar::default();
+        g.add_token(tok(
+            "T",
+            TokenPattern::Seq(vec![
+                TokenPattern::Plus(Box::new(neg_look("end"))),
+                lit("end"),
+            ]),
+        ));
+        g.add_rule(rule("main", Expr::Token("T".into())));
+        let issues = run_collect(&g);
+        assert!(issues.is_empty(), "{:?}", issues);
+    }
+
+    #[test]
+    fn standalone_neg_look_is_rejected() {
+        let mut g = Grammar::default();
+        // `T = !"abc";` — no quantifier wrapping the NegLook.
+        g.add_token(tok("T", neg_look("abc")));
+        g.add_rule(rule("main", Expr::Token("T".into())));
+        let issues = run_collect(&g);
+        assert!(
+            issues
+                .iter()
+                .any(|d| d.message.contains("must appear directly under `*` or `+`")),
+            "diagnostics: {:?}",
+            issues.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn neg_look_under_opt_is_rejected() {
+        let mut g = Grammar::default();
+        // `T = !"abc"?;` — Opt is explicitly disallowed.
+        g.add_token(
+            tok("T", TokenPattern::Opt(Box::new(neg_look("abc")))),
+        );
+        g.add_rule(rule("main", Expr::Token("T".into())));
+        let issues = run_collect(&g);
+        assert!(
+            issues
+                .iter()
+                .any(|d| d.message.contains("must appear directly under `*` or `+`")),
+            "diagnostics: {:?}",
+            issues.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn neg_look_inside_seq_inside_star_is_rejected() {
+        // `T = (!"abc" "x")*;` — NegLook is inside a Seq, and the Star
+        // wraps the Seq. The direct parent of NegLook is Seq, not Star,
+        // so it's rejected.
+        let mut g = Grammar::default();
+        g.add_token(tok(
+            "T",
+            TokenPattern::Star(Box::new(TokenPattern::Seq(vec![
+                neg_look("abc"),
+                lit("x"),
+            ]))),
+        ));
+        g.add_rule(rule("main", Expr::Token("T".into())));
+        let issues = run_collect(&g);
+        assert!(
+            issues
+                .iter()
+                .any(|d| d.message.contains("must appear directly under `*` or `+`")),
+            "diagnostics: {:?}",
+            issues.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
     }
 }

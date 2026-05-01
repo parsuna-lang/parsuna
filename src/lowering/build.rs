@@ -614,6 +614,8 @@ fn token_kind(ag: &AnalyzedGrammar, name: &str) -> u16 {
 fn resolve_pattern(p: &TokenPattern, g: &Grammar) -> TokenPattern {
     match p {
         TokenPattern::Empty | TokenPattern::Literal(_) | TokenPattern::Class(_) => p.clone(),
+        // Self-contained — `chars` and `strings` are inline literals.
+        TokenPattern::NegLook { .. } => p.clone(),
         TokenPattern::Ref(n) => match g.tokens.get(n) {
             Some(td) => resolve_pattern(&td.pattern, g),
             None => TokenPattern::Empty,
@@ -655,6 +657,7 @@ mod tests {
     fn pattern_has_no_refs(p: &TokenPattern) -> bool {
         match p {
             TokenPattern::Empty | TokenPattern::Literal(_) | TokenPattern::Class(_) => true,
+            TokenPattern::NegLook { .. } => true,
             TokenPattern::Ref(_) => false,
             TokenPattern::Seq(xs) | TokenPattern::Alt(xs) => {
                 xs.iter().all(pattern_has_no_refs)

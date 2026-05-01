@@ -484,6 +484,7 @@ fn format_pattern(p: &TokenPattern) -> String {
         TokenPattern::Empty => "ε".to_string(),
         TokenPattern::Literal(s) => format!("{:?}", s),
         TokenPattern::Class(cc) => format_class(cc),
+        TokenPattern::NegLook { chars, strings } => format_neg_look(chars, strings),
         TokenPattern::Ref(n) => n.clone(),
         TokenPattern::Seq(xs) => xs.iter().map(format_pattern).collect::<Vec<_>>().join(" "),
         TokenPattern::Alt(xs) => {
@@ -493,6 +494,26 @@ fn format_pattern(p: &TokenPattern) -> String {
         TokenPattern::Opt(x) => format!("{}?", paren_if_composite(x)),
         TokenPattern::Star(x) => format!("{}*", paren_if_composite(x)),
         TokenPattern::Plus(x) => format!("{}+", paren_if_composite(x)),
+    }
+}
+
+fn format_neg_look(chars: &CharClass, strings: &[String]) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for it in &chars.items {
+        match *it {
+            ClassItem::Char(c) => parts.push(format!("'{}'", format_char(c))),
+            ClassItem::Range(lo, hi) => {
+                parts.push(format!("'{}'..'{}'", format_char(lo), format_char(hi)))
+            }
+        }
+    }
+    for s in strings {
+        parts.push(format!("{:?}", s));
+    }
+    if parts.len() == 1 {
+        format!("!{}", parts[0])
+    } else {
+        format!("!({})", parts.join(" | "))
     }
 }
 
@@ -1094,6 +1115,7 @@ fn dot_escape(s: &str) -> String {
 fn resolve_pattern(p: &TokenPattern, g: &parsuna::Grammar) -> TokenPattern {
     match p {
         TokenPattern::Empty | TokenPattern::Literal(_) | TokenPattern::Class(_) => p.clone(),
+        TokenPattern::NegLook { .. } => p.clone(),
         TokenPattern::Ref(n) => match g.tokens.get(n) {
             Some(td) => resolve_pattern(&td.pattern, g),
             None => TokenPattern::Empty,
