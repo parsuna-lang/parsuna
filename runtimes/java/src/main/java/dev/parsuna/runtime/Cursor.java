@@ -32,7 +32,10 @@ public final class Cursor {
     /** Overwrite the current state. */
     public void setState(int s) { p.state = s; }
 
-    /** Push a return state onto the call stack. */
+    /** Push a return state onto the call stack along with the
+     *  current lex mode-stack depth, so recovery can unwind interior
+     *  mode pushes back to the depth that was in place when this
+     *  rule started. */
     public void pushRet(int s) {
         int top = p.retTop + 1;
         int[] stk = p.retStack;
@@ -41,8 +44,12 @@ public final class Cursor {
             System.arraycopy(stk, 0, next, 0, stk.length);
             p.retStack = next;
             stk = next;
+            int[] nextDepth = new int[next.length];
+            System.arraycopy(p.retModeDepth, 0, nextDepth, 0, p.retModeDepth.length);
+            p.retModeDepth = nextDepth;
         }
         stk[top] = s;
+        p.retModeDepth[top] = p.lex.modeDepth();
         p.retTop = top;
     }
 
@@ -117,6 +124,7 @@ public final class Cursor {
             s.start().offset(), s.start().line(), s.start().column(),
             s.end().offset(), s.end().line(), s.end().column());
         pp.recovery = new Parser.Recovery(sync, kind);
+        unwindModes(pp);
         return pp.evtError;
     }
 
@@ -129,6 +137,20 @@ public final class Cursor {
      */
     public void recoverTo(int[] sync) {
         p.recovery = new Parser.Recovery(sync, -1);
+        unwindModes(p);
+    }
+
+    /**
+     * Unwind any interior mode pushes the now-erroring rule made.
+     * The top of {@link Parser#retModeDepth} is the depth at the
+     * moment the rule we're inside was entered; popping back to it
+     * brings the lexer to the same context the surrounding caller
+     * expects. With an empty stack (recovery in the entry rule) we
+     * restore to depth 1 — the default mode.
+     */
+    private static void unwindModes(Parser pp) {
+        int target = pp.retTop >= 0 ? pp.retModeDepth[pp.retTop] : 1;
+        pp.lex.popModesTo(target);
     }
 
     /** Build a recoverable error event at the current lookahead. */

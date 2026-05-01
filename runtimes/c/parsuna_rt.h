@@ -177,6 +177,12 @@ typedef struct Parser {
     Pos   prev_end;
     int   state;
     int   *ret; size_t ret_len, ret_cap;
+    /* Lex mode-stack depth captured at each ret_push, indexed in
+     * lockstep with `ret`. Recovery uses the top entry to unwind
+     * interior mode pushes back to the depth in place when the rule
+     * we're now inside was entered, so SYNC tokens are interpreted
+     * in the right context. */
+    size_t *ret_mode_depth;
 
     Recovery recovery;
 
@@ -331,9 +337,17 @@ static inline Token lex_next(Parser *p) {
         Token t = { PARSUNA_TK_EOF, { pos, pos }, NULL, 0 };
         return t;
     }
+    /* Auto-pop on mismatch: if no DFA match in the active mode and
+     * we're not at the default mode, drop one mode and retry. Keeps
+     * a stray byte from stranding the lexer in an interior mode for
+     * the rest of the input. */
     uint16_t best_kind;
     int best_len;
     longest_match(p, &best_kind, &best_len);
+    while (best_len == 0 && p->mode_top > 0) {
+        p->mode_top--;
+        longest_match(p, &best_kind, &best_len);
+    }
     Pos start = { p->offset, p->line, p->col };
     if (best_len == 0) {
         uint32_t cp; size_t n = utf8_decode(p->buf, p->buf_pos, p->buf_len, &cp);
@@ -376,7 +390,9 @@ static inline void ret_push(Parser *p, int s) {
     if (p->ret_len == p->ret_cap) {
         p->ret_cap = p->ret_cap ? p->ret_cap * 2 : 8;
         p->ret = (int*)realloc(p->ret, p->ret_cap * sizeof(int));
+        p->ret_mode_depth = (size_t*)realloc(p->ret_mode_depth, p->ret_cap * sizeof(size_t));
     }
+    p->ret_mode_depth[p->ret_len] = p->mode_top + 1;
     p->ret[p->ret_len++] = s;
 }
 
@@ -388,6 +404,23 @@ static inline void push_ret(Parser *p, int s) { ret_push(p, s); }
 static inline int pop_ret(Parser *p) {
     if (p->ret_len > 0) return p->ret[--p->ret_len];
     return TERMINATED;
+}
+
+/* Pop modes until the stack reaches target_depth, clamped at the
+ * default mode. No-op when already at or below target_depth. */
+static inline void parser_pop_modes_to(Parser *p, size_t target_depth) {
+    if (target_depth < 1) target_depth = 1;
+    if (p->mode_top + 1 > target_depth) p->mode_top = target_depth - 1;
+}
+
+/* Unwind any interior mode pushes the now-erroring rule made. Top of
+ * `ret_mode_depth` is the depth at the moment the rule we're inside
+ * was entered; popping back to it brings the lexer to the same context
+ * the surrounding caller expects. With an empty stack (recovery in the
+ * entry rule) we restore to depth 1. */
+static inline void parser_unwind_modes_for_recovery(Parser *p) {
+    size_t target = p->ret_len > 0 ? p->ret_mode_depth[p->ret_len - 1] : 1;
+    parser_pop_modes_to(p, target);
 }
 static inline Token look(const Parser *p, int i) { return p->look_buf[i]; }
 
@@ -483,6 +516,7 @@ static inline Event try_consume(Parser *p, uint16_t kind, const uint16_t *sync, 
     p->recovery.expected_set = 1;
     p->recovery.expected_kind = kind;
     p->recovery.sync = sync;
+    parser_unwind_modes_for_recovery(p);
     return e;
 }
 
@@ -495,6 +529,7 @@ static inline void recover_to(Parser *p, const uint16_t *sync) {
     p->recovery.expected_set = 0;
     p->recovery.expected_kind = 0;
     p->recovery.sync = sync;
+    parser_unwind_modes_for_recovery(p);
 }
 
 /* ---------- pump (next_event helper) ---------- */
@@ -682,6 +717,7 @@ static inline int parser_next(Parser *p, Event *out) {
             p->recovery.expected_set = 0;
             p->recovery.expected_kind = 0;
             p->recovery.sync = empty_sync;
+            parser_pop_modes_to(p, 1);
             return yield_event(p, e, out);
         }
         Event e;
@@ -693,6 +729,7 @@ static inline void parser_destroy(Parser *p) {
     if (!p) return;
     if (!p->borrow_buf) free(p->buf);
     free(p->ret);
+    free(p->ret_mode_depth);
     free(p->mode_stack);
 
     /* look_buf is an inline fixed-size array — no free. Free each

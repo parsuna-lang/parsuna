@@ -196,6 +196,29 @@ export class Lexer<TK extends number> {
     if (this.modeStack.length > 1) this.modeStack.pop();
   }
 
+  /**
+   * Number of modes currently on the stack. Always `>= 1` (the
+   * default mode is never popped). Used by the parser's recovery
+   * path to remember "the depth at the time we entered this rule",
+   * so a SYNC-armed mismatch can unwind the lex mode stack back to
+   * the rule's start.
+   */
+  modeDepth(): number {
+    return this.modeStack.length;
+  }
+
+  /**
+   * Pop modes until the stack reaches `targetDepth`, clamped at the
+   * bottom by the default mode. No-op when the stack is already at
+   * or below `targetDepth`.
+   */
+  popModesTo(targetDepth: number): void {
+    const target = Math.max(1, targetDepth);
+    if (this.modeStack.length > target) {
+      this.modeStack.length = target;
+    }
+  }
+
   private pos(): Pos {
     return { offset: this.i, line: this.line, column: this.col };
   }
@@ -228,20 +251,42 @@ export class Lexer<TK extends number> {
     }
   }
 
-  /** Produce the next token. Returns repeated EOF once input is exhausted. */
+  /**
+   * Produce the next token. Returns repeated EOF once input is
+   * exhausted.
+   *
+   * Auto-pop on mismatch: if the active mode's DFA finds nothing at
+   * the current position *and* the mode stack has more than just the
+   * default mode, drop one mode and retry — under the rule "if you
+   * can't find a token in this mode, you weren't supposed to be in
+   * this mode anymore." That keeps a stray byte (e.g. unescaped `&`
+   * followed by free-form text) from stranding the lexer in an
+   * interior mode for the rest of the input. After popping all the
+   * way to default without a hit the lexer falls back to a
+   * single-codepoint `kind: null` token so the parser can surface an
+   * error and recover.
+   */
   nextToken(): Token<TK> {
     if (this.i >= this.bytes.length) {
       const p = this.pos();
       return { kind: this.eofKind, span: pointSpan(p), text: "", label: null };
     }
 
-    const mode = this.modeStack[this.modeStack.length - 1];
-    const { bestLen, bestKind } = this.matcher(this.buf, this.i, mode);
+    let bestLen: number;
+    let bestKind: TK | null;
+    while (true) {
+      const mode = this.modeStack[this.modeStack.length - 1];
+      const m = this.matcher(this.buf, this.i, mode);
+      if (m.bestLen > 0 || this.modeStack.length <= 1) {
+        bestLen = m.bestLen;
+        bestKind = m.bestKind;
+        break;
+      }
+      this.modeStack.pop();
+    }
 
     const start = this.pos();
     if (bestLen === 0) {
-      // No token pattern matched — emit a single-codepoint token with
-      // kind = null so the parser can flag it and keep going.
       const b = this.bytes[this.i];
       const cpLen = b < 0x80 ? 1 : b < 0xe0 ? 2 : b < 0xf0 ? 3 : 4;
       const n = Math.min(cpLen, this.bytes.length - this.i);
@@ -391,7 +436,19 @@ export class Parser<
   private lookBuf: (Token<TK> | null)[];
   private prevEnd: Pos;
   private state: number;
-  private retStack: number[] = [];
+  /**
+   * Return stack. Each entry pairs the state to resume at with the
+   * lex mode-stack depth captured when the rule was entered. On
+   * recovery we use the top entry's depth to pop the lex mode stack
+   * back to where the now-erroring rule started — modes pushed
+   * mid-rule (e.g. by an opener token) get unwound so the SYNC scan
+   * happens in the right context.
+   *
+   * Stored as two parallel arrays to avoid an allocation per push
+   * (V8 specialises `number[]` very hard).
+   */
+  private retStateStack: number[] = [];
+  private retModeDepthStack: number[] = [];
   private recovery: Recovery<TK> | null = null;
   private readonly emitSkips: boolean;
   // Holds the lex-failure token (kind=null) whose paired `error` event
@@ -442,12 +499,15 @@ export class Parser<
 
   /** @internal */
   pushRet(s: number): void {
-    this.retStack.push(s);
+    this.retStateStack.push(s);
+    this.retModeDepthStack.push(this.lex.modeDepth());
   }
 
   /** @internal */
   popRet(): number {
-    return this.retStack.length ? this.retStack.pop()! : TERMINATED;
+    if (this.retStateStack.length === 0) return TERMINATED;
+    this.retModeDepthStack.pop();
+    return this.retStateStack.pop()!;
   }
 
   /** @internal */
@@ -515,13 +575,32 @@ export class Parser<
       return this.consume();
     }
     const event = this.errorHere(expectedMsg);
-    this.recovery = { sync, expected: kind };
+    this.armRecovery(sync, kind);
     return event;
   }
 
   /** @internal */
   recoverTo(sync: readonly TK[]): void {
-    this.recovery = { sync, expected: null };
+    this.armRecovery(sync, null);
+  }
+
+  /**
+   * Arm recovery and unwind any interior lex mode pushes the
+   * now-erroring rule made. The top of `retModeDepthStack` is the
+   * depth at the moment the rule we're inside was entered; popping
+   * back to it brings the lexer to the same context the surrounding
+   * caller expects, so SYNC tokens are interpreted in the right mode
+   * and a stray push can't leave the lexer marooned past the
+   * recovery point. With an empty stack (recovery in the entry
+   * rule) we restore to depth 1 — the default mode.
+   */
+  private armRecovery(sync: readonly TK[], expected: TK | null): void {
+    this.recovery = { sync, expected };
+    const depth =
+      this.retModeDepthStack.length > 0
+        ? this.retModeDepthStack[this.retModeDepthStack.length - 1]
+        : 1;
+    this.lex.popModesTo(depth);
   }
 
   /** @internal */
@@ -627,7 +706,7 @@ export class Parser<
           return { done: true, value: undefined as unknown as Event<TK, RK> };
         }
         const event = this.errorHere("expected end of input");
-        this.recovery = { sync: [], expected: null };
+        this.armRecovery([], null);
         return { done: false, value: event };
       }
 

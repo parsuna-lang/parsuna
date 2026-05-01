@@ -153,6 +153,20 @@ public sealed class Lexer
         if (_modeTop > 0) _modeTop--;
     }
 
+    /// <summary>Number of modes currently on the stack — always &gt;= 1.
+    /// Used by the parser's recovery path to remember "the depth at the
+    /// time we entered this rule".</summary>
+    public int ModeDepth => _modeTop + 1;
+
+    /// <summary>Pop modes until the stack reaches <paramref name="targetDepth"/>,
+    /// clamped at the bottom by the default mode. No-op when the stack
+    /// is already at or below <paramref name="targetDepth"/>.</summary>
+    public void PopModesTo(int targetDepth)
+    {
+        var target = Math.Max(1, targetDepth);
+        if (_modeTop + 1 > target) _modeTop = target - 1;
+    }
+
     private Pos CurPos() => new(_offset, _line, _col);
 
     private bool ReadMore()
@@ -231,11 +245,23 @@ public sealed class Lexer
     /// consumed; lex failures (no DFA pattern matched) come through with
     /// <c>Token.Kind == <see cref="ErrorKind"/></c> (0xFFFF).
     /// </summary>
+    /// <remarks>
+    /// Auto-pop on mismatch: if no DFA match in the active mode and the
+    /// mode stack has more than just the default mode, drop one mode and
+    /// retry — "if you can't find a token in this mode, you weren't
+    /// supposed to be in this mode anymore." Keeps a stray byte from
+    /// stranding the lexer in an interior mode for the rest of the input.
+    /// </remarks>
     public Token NextToken()
     {
         Ensure(Chunk);
         if (_bufLen - _bufPos == 0) { var p = CurPos(); return new Token(0, Span.Point(p), ""); }
         var best = LongestMatch();
+        while (best.Len == 0 && _modeTop > 0)
+        {
+            _modeTop--;
+            best = LongestMatch();
+        }
         var start = CurPos();
         if (best.Len == 0)
         {
@@ -363,6 +389,11 @@ public sealed class Parser : IEnumerable<Event>, IEnumerator<Event>
     internal Pos _prevEnd;
     internal int _state;
     internal readonly Stack<int> _ret = new();
+    /// <summary>Lex mode-stack depth captured at each PushRet, in
+    /// lockstep with <see cref="_ret"/>. Recovery uses the top entry
+    /// to unwind interior mode pushes back to the depth in place
+    /// when the rule we're now inside was entered.</summary>
+    internal readonly Stack<int> _retModeDepth = new();
 
     private Event? _current;
 
@@ -509,6 +540,7 @@ public sealed class Parser : IEnumerable<Event>, IEnumerator<Event>
                 _current = ErrorHere("expected end of input");
                 _recovery = new Recovery { Sync = Array.Empty<ushort>(), ExpectedPlusOne = 0 };
                 _recoveryActive = true;
+                _lex.PopModesTo(1);
                 return true;
             }
             var stepEv = _cfg.Step(new Cursor(this));
@@ -552,12 +584,24 @@ public sealed class Cursor
     /// <summary>Overwrite the current state id.</summary>
     public void SetState(int s) => _p._state = s;
 
-    /// <summary>Push a return address onto the call stack.</summary>
-    public void PushRet(int s) => _p._ret.Push(s);
+    /// <summary>Push a return address onto the call stack along with
+    /// the current lex mode-stack depth, so recovery can unwind
+    /// interior mode pushes back to the depth in place when this
+    /// rule started.</summary>
+    public void PushRet(int s)
+    {
+        _p._ret.Push(s);
+        _p._retModeDepth.Push(_p._lex.ModeDepth);
+    }
 
     /// <summary>Pop the top return address, or <see cref="Parser.Terminated"/>
     /// when the stack is empty.</summary>
-    public int PopRet() => _p._ret.Count > 0 ? _p._ret.Pop() : Parser.Terminated;
+    public int PopRet()
+    {
+        if (_p._ret.Count == 0) return Parser.Terminated;
+        _p._retModeDepth.Pop();
+        return _p._ret.Pop();
+    }
 
     /// <summary>True iff the current lookahead matches any of the given
     /// prefixes.</summary>
@@ -610,6 +654,7 @@ public sealed class Cursor
         var ev = _p.ErrorHere($"expected {name}");
         _p._recovery = new Parser.Recovery { Sync = sync, ExpectedPlusOne = kind + 1 };
         _p._recoveryActive = true;
+        UnwindModes();
         return ev;
     }
 
@@ -622,6 +667,19 @@ public sealed class Cursor
     {
         _p._recovery = new Parser.Recovery { Sync = sync, ExpectedPlusOne = 0 };
         _p._recoveryActive = true;
+        UnwindModes();
+    }
+
+    /// <summary>Unwind any interior lex mode pushes the now-erroring
+    /// rule made. The top of <see cref="Parser._retModeDepth"/> is the
+    /// depth at the moment the rule we're inside was entered; popping
+    /// back to it brings the lexer to the same context the surrounding
+    /// caller expects. With an empty stack (recovery in the entry
+    /// rule) we restore to depth 1 — the default mode.</summary>
+    private void UnwindModes()
+    {
+        var target = _p._retModeDepth.Count > 0 ? _p._retModeDepth.Peek() : 1;
+        _p._lex.PopModesTo(target);
     }
 
     /// <summary>Build a recoverable error event at the current

@@ -77,6 +77,19 @@ public final class Lexer {
         if (modeTop > 0) modeTop--;
     }
 
+    /** Number of modes currently on the stack (always &gt;= 1). Used by
+     *  the parser's recovery path to remember "the depth at the time
+     *  we entered this rule". */
+    public int modeDepth() { return modeTop + 1; }
+
+    /** Pop modes until the stack reaches {@code targetDepth}, clamped
+     *  at the bottom by the default mode. No-op when already at or
+     *  below {@code targetDepth}. */
+    public void popModesTo(int targetDepth) {
+        int target = Math.max(1, targetDepth);
+        if (modeTop + 1 > target) modeTop = target - 1;
+    }
+
     private boolean readMore() {
         if (eof) return false;
         if (buf.length - bufLen < CHUNK) {
@@ -147,7 +160,18 @@ public final class Lexer {
                 offset, line, col);
             return;
         }
+        // Auto-pop on mismatch: if no DFA match in the active mode and
+        // we're not at the default mode, drop one mode and retry —
+        // "if you can't find a token in this mode, you weren't
+        // supposed to be in this mode anymore." Keeps a stray byte
+        // (e.g. unescaped `&` followed by free-form text) from
+        // stranding the lexer in an interior mode for the rest of
+        // the input.
         runMatch();
+        while (matchOut[0] == 0 && modeTop > 0) {
+            modeTop--;
+            runMatch();
+        }
         int sOff = offset, sLine = line, sCol = col;
         int startBufPos = bufPos;
         int matchLen;

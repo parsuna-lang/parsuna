@@ -88,6 +88,12 @@ public final class Parser implements Iterator<Event> {
     /** Return stack as a primitive int[], grown on push. Beats
      *  {@code ArrayDeque<Integer>}: no autoboxing per push/pop. */
     int[] retStack = new int[16];
+    /** Lex mode-stack depth captured at each {@code pushRet}, indexed
+     *  in lockstep with {@link #retStack}. Recovery uses the top
+     *  entry to unwind interior mode pushes back to where the rule
+     *  we're inside started, so SYNC tokens are interpreted in the
+     *  right context. */
+    int[] retModeDepth = new int[16];
     int retTop = -1;
 
     Recovery recovery;
@@ -272,6 +278,10 @@ public final class Parser implements Iterator<Event> {
                 }
                 Event ev = errorHere("expected end of input");
                 recovery = new Recovery(new int[0], -1);
+                // Recovery in the entry rule (retTop = -1): unwind to
+                // default mode so the trailing-input drain happens in
+                // the right context.
+                lex.popModesTo(1);
                 return ev;
             }
             Event ev = cfg.step.step(cursor);

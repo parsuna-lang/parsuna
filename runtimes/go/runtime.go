@@ -150,6 +150,23 @@ func (l *Lexer) PopMode() {
 	}
 }
 
+// ModeDepth is the number of modes currently on the stack. Always >= 1
+// (the default mode is never popped). Used by the parser's recovery
+// path to remember "the depth at the time we entered this rule".
+func (l *Lexer) ModeDepth() int { return len(l.modeStack) }
+
+// PopModesTo pops modes until the stack reaches targetDepth, clamped
+// at the bottom by the default mode. No-op when the stack is already
+// at or below targetDepth.
+func (l *Lexer) PopModesTo(targetDepth int) {
+	if targetDepth < 1 {
+		targetDepth = 1
+	}
+	if len(l.modeStack) > targetDepth {
+		l.modeStack = l.modeStack[:targetDepth]
+	}
+}
+
 func (l *Lexer) pos() Pos { return Pos{Offset: l.offset, Line: l.line, Column: l.col} }
 
 func (l *Lexer) readMore() bool {
@@ -235,15 +252,31 @@ func (l *Lexer) longestMatch() (int, uint16) {
 	}
 }
 
-// NextToken produces the next token. Emits repeated EOF once input ends.
-// Lex failures come through with Kind == ErrorKind (0xFFFF).
+// NextToken produces the next token. Emits repeated EOF once input
+// ends. Lex failures come through with Kind == ErrorKind (0xFFFF).
+//
+// Auto-pop on mismatch: if the active mode's DFA finds nothing at the
+// current position *and* the mode stack has more than just the
+// default mode, drop one mode and retry — under the rule "if you
+// can't find a token in this mode, you weren't supposed to be in this
+// mode anymore." That keeps a stray byte (e.g. unescaped `&` followed
+// by free-form text) from stranding the lexer in an interior mode for
+// the rest of the input.
 func (l *Lexer) NextToken() Token {
 	l.ensure(lexChunk)
 	if len(l.buf)-l.bufPos == 0 {
 		p := l.pos()
 		return Token{Kind: EofKind, Span: PointSpan(p)}
 	}
-	bestLen, bestKind := l.longestMatch()
+	var bestLen int
+	var bestKind uint16
+	for {
+		bestLen, bestKind = l.longestMatch()
+		if bestLen > 0 || len(l.modeStack) <= 1 {
+			break
+		}
+		l.modeStack = l.modeStack[:len(l.modeStack)-1]
+	}
 	start := l.pos()
 	if bestLen == 0 {
 		_, n := utf8.DecodeRune(l.buf[l.bufPos:])
@@ -332,9 +365,16 @@ type Parser struct {
 	lookFilled []bool
 	prevEnd    Pos
 	state      int
-	ret        []int
-	rec        recovery
-	recActive  bool
+	// ret pairs each return-state with the lex mode-stack depth
+	// captured when the rule was entered. On recovery we use the
+	// top entry's depth to pop the lex mode stack back to where the
+	// now-erroring rule started — modes pushed mid-rule (e.g. by an
+	// opener token) get unwound so the SYNC scan happens in the
+	// right context.
+	ret          []int
+	retModeDepth []int
+	rec          recovery
+	recActive    bool
 	// pendingLexGarbage holds the lex-failure token (Kind = ErrorKind)
 	// whose paired EvError the previous Next call returned; this call
 	// owes the matching EvGarbage. Lex-failure tokens never enter
@@ -398,6 +438,19 @@ func (p *Parser) errorHere(msg string) Event {
 func (p *Parser) armRecovery(sync []uint16, expected uint16, expectedSet bool) {
 	p.rec = recovery{sync: sync, expected: expected, expectedSet: expectedSet}
 	p.recActive = true
+	// Unwind any interior mode pushes the now-erroring rule made.
+	// The top of retModeDepth is the depth at the moment the rule
+	// we're inside was entered; popping back to it brings the lexer
+	// to the same context the surrounding caller expects, so SYNC
+	// tokens are interpreted in the right mode and a stray push
+	// can't leave the lexer marooned past the recovery point. Empty
+	// stack (recovery in the entry rule) → restore to depth 1 (the
+	// default mode).
+	target := 1
+	if n := len(p.retModeDepth); n > 0 {
+		target = p.retModeDepth[n-1]
+	}
+	p.lex.PopModesTo(target)
 }
 
 func containsKind(set []uint16, k uint16) bool {
@@ -431,8 +484,13 @@ func (c *Cursor) State() int { return c.state }
 // SetState overwrites the current state id.
 func (c *Cursor) SetState(s int) { c.state = s }
 
-// PushRet pushes a return address onto the call stack.
-func (c *Cursor) PushRet(s int) { c.ret = append(c.ret, s) }
+// PushRet pushes a return address onto the call stack along with the
+// current lex mode-stack depth, so recovery can unwind interior mode
+// pushes back to the depth that was in place when this rule started.
+func (c *Cursor) PushRet(s int) {
+	c.ret = append(c.ret, s)
+	c.retModeDepth = append(c.retModeDepth, c.lex.ModeDepth())
+}
 
 // PopRet pops the top return address, or Terminated when the stack is empty.
 func (c *Cursor) PopRet() int {
@@ -441,6 +499,7 @@ func (c *Cursor) PopRet() int {
 	}
 	s := c.ret[len(c.ret)-1]
 	c.ret = c.ret[:len(c.ret)-1]
+	c.retModeDepth = c.retModeDepth[:len(c.retModeDepth)-1]
 	return s
 }
 

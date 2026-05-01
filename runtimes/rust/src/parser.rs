@@ -99,6 +99,16 @@ pub trait Grammar<const K: usize>: Sized {
     }
 }
 
+/// One slot on the parser's return stack: the state to resume at
+/// when the current rule's body finishes, plus the lex mode-stack
+/// depth captured at the moment the corresponding `PushRet` ran (so
+/// recovery can unwind interior mode pushes).
+#[derive(Clone, Copy, Debug)]
+struct RetFrame {
+    state: u32,
+    mode_depth: usize,
+}
+
 /// In-flight error recovery. Armed by [`Cursor::expect`] (mismatch path)
 /// and [`Cursor::recover_to`]; cleared by the pull loop's recovery branch
 /// once the lookahead lands on a sync token (or EOF). Each call in
@@ -156,7 +166,15 @@ pub struct Parser<
     look: [Option<Token<'a, G::TokenKind>>; K],
     prev_end: Pos,
     state: u32,
-    ret_stack: Vec<u32>,
+    /// Return stack. Each entry pairs the state to resume at with the
+    /// lex mode-stack depth at the moment the rule was *entered*. On
+    /// recovery we use the top entry's depth to pop the lex mode
+    /// stack back to where the now-erroring rule started — modes
+    /// pushed mid-rule (e.g. by an opener token) get unwound so the
+    /// SYNC scan happens in the right context, and stray input that
+    /// would otherwise leave the lexer marooned in an interior mode
+    /// can't propagate past the recovering rule.
+    ret_stack: Vec<RetFrame>,
     recovery: Option<Recovery<G::TokenKind>>,
     /// Holds the lex-failure token whose paired [`Event::Error`] the
     /// previous [`Iterator::next`] call returned; this call owes the
@@ -230,6 +248,22 @@ impl<'a, L: LexerBackend<'a, G::TokenKind>, const K: usize, G: Grammar<K>, C: Pa
     #[inline]
     fn arm_recovery(&mut self, sync: &'static [G::TokenKind], expected: Option<G::TokenKind>) {
         self.recovery = Some(Recovery { sync, expected });
+        // Unwind any interior mode pushes the now-erroring rule made.
+        // The top of `ret_stack` is the call frame for whichever
+        // rule's body we're currently inside, and its `mode_depth`
+        // was captured at the moment that rule was entered. Popping
+        // back to it brings the lexer to the same context the
+        // surrounding caller expects, so SYNC tokens are interpreted
+        // in the right mode and a stray push can't leave the lexer
+        // marooned past the recovery point. With an empty stack
+        // (recovery in the entry rule) we restore to depth 1 — the
+        // default mode, which is where the parser started.
+        let target = self
+            .ret_stack
+            .last()
+            .map(|f| f.mode_depth)
+            .unwrap_or(1);
+        self.lex.pop_modes_to(target);
     }
 }
 
@@ -279,16 +313,24 @@ impl<
     /// Push a return address onto the call stack. Used for rule calls
     /// (the caller saves the state to resume after the callee's `Ret`)
     /// and for `*`/`+` loops (each iteration re-enters the loop state).
+    ///
+    /// The current lex mode-stack depth is captured alongside the
+    /// state — recovery uses it to unwind interior mode pushes back
+    /// to the rule's entry depth (see [`Parser::arm_recovery`]).
     #[inline]
     pub fn push_ret(&mut self, s: u32) {
-        self.p.ret_stack.push(s);
+        let mode_depth = self.p.lex.mode_depth();
+        self.p.ret_stack.push(RetFrame {
+            state: s,
+            mode_depth,
+        });
     }
 
     /// Pop the top return address, or [`TERMINATED`] if the stack is
     /// empty (meaning we have finished the entry rule).
     #[inline]
     pub fn ret(&mut self) -> u32 {
-        self.p.ret_stack.pop().unwrap_or(TERMINATED)
+        self.p.ret_stack.pop().map(|f| f.state).unwrap_or(TERMINATED)
     }
 
     /// Peek at the `i`-th lookahead token. `i` must be `< K`.

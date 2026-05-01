@@ -75,6 +75,19 @@ pub trait LexerBackend<'a, TK: TokenKindEnum> {
     /// Pop the topmost mode off the stack, leaving at least the default
     /// mode in place. Underflow is silently ignored.
     fn pop_mode(&mut self);
+    /// Number of modes currently on the stack. Always `>= 1` (the
+    /// default mode is never popped). Used by the parser's recovery
+    /// path to remember "the depth at the time we entered this rule"
+    /// so that on a SYNC-armed mismatch the lexer can be unwound back
+    /// to the rule's start without dragging mid-rule mode pushes
+    /// across the recovery boundary.
+    fn mode_depth(&self) -> usize;
+    /// Pop modes until the stack reaches `target_depth`, clamped at
+    /// the bottom by the default mode. No-op when the stack is
+    /// already at or below `target_depth`. Called by the parser on
+    /// recovery arming to restore the lex mode stack to the depth
+    /// saved at rule entry.
+    fn pop_modes_to(&mut self, target_depth: usize);
 }
 
 /// In-memory, zero-copy lexer that runs the generated DFA over a `&str`.
@@ -160,10 +173,18 @@ impl<'a, TK: TokenKindEnum, D: DfaMatcher<TK>> Scanner<'a, TK, D> {
 impl<'a, TK: TokenKindEnum, D: DfaMatcher<TK>> LexerBackend<'a, TK> for Scanner<'a, TK, D> {
     /// Produce the next token, advancing the scanner.
     ///
-    /// Behaviour at the boundary: if no token pattern matches at the current
-    /// position, the scanner emits a single-codepoint token with `kind: None`
-    /// so the parser can surface an error and recover. On exhaustion it
-    /// emits repeated `Some(TK::EOF)` tokens.
+    /// Behaviour at the boundary: if no token pattern matches at the
+    /// current position *and* the mode stack has more than just the
+    /// default mode, the scanner pops one mode and retries — under the
+    /// rule "if you can't find a token in this mode, you weren't
+    /// supposed to be in this mode anymore." That keeps a stray byte
+    /// (e.g. unescaped `&` followed by free-form text) from stranding
+    /// the lexer in an interior mode for the rest of the input. After
+    /// popping all the way to the default mode without finding a
+    /// match the scanner falls back to emitting a single-codepoint
+    /// `kind: None` token so the parser can surface an error and
+    /// recover the structural state. On exhaustion it emits repeated
+    /// `Some(TK::EOF)` tokens.
     #[inline]
     fn next_token(&mut self) -> Token<'a, TK> {
         if self.pos >= self.buf.len() {
@@ -175,7 +196,13 @@ impl<'a, TK: TokenKindEnum, D: DfaMatcher<TK>> LexerBackend<'a, TK> for Scanner<
                 label: None,
             };
         }
-        let m = D::longest_match(self.buf, self.pos, self.current_mode());
+        let m = loop {
+            let m = D::longest_match(self.buf, self.pos, self.current_mode());
+            if m.best_len > 0 || self.modes.len() <= 1 {
+                break m;
+            }
+            self.modes.pop();
+        };
         let start = self.cur_pos();
         if m.best_len > 0 {
             let text: Cow<'a, str> = Cow::Borrowed(&self.src[self.pos..self.pos + m.best_len]);
@@ -208,6 +235,19 @@ impl<'a, TK: TokenKindEnum, D: DfaMatcher<TK>> LexerBackend<'a, TK> for Scanner<
     fn pop_mode(&mut self) {
         if self.modes.len() > 1 {
             self.modes.pop();
+        }
+    }
+
+    #[inline]
+    fn mode_depth(&self) -> usize {
+        self.modes.len()
+    }
+
+    #[inline]
+    fn pop_modes_to(&mut self, target_depth: usize) {
+        let target = target_depth.max(1);
+        if self.modes.len() > target {
+            self.modes.truncate(target);
         }
     }
 }
@@ -354,7 +394,16 @@ impl<R: Read, TK: TokenKindEnum, D: DfaMatcher<TK>> LexerBackend<'static, TK>
                 label: None,
             };
         }
-        let (len, kind) = self.longest_match();
+        // Same auto-pop-on-mismatch policy as `Scanner::next_token`:
+        // if no DFA match in the active mode, drop one mode and retry
+        // before falling back to the kind=None path.
+        let (len, kind) = loop {
+            let (len, kind) = self.longest_match();
+            if len > 0 || self.modes.len() <= 1 {
+                break (len, kind);
+            }
+            self.modes.pop();
+        };
         let start = self.pos();
         if len > 0 {
             let text = Cow::Owned(String::from_utf8_lossy(&self.view()[..len]).into_owned());
@@ -387,6 +436,19 @@ impl<R: Read, TK: TokenKindEnum, D: DfaMatcher<TK>> LexerBackend<'static, TK>
     fn pop_mode(&mut self) {
         if self.modes.len() > 1 {
             self.modes.pop();
+        }
+    }
+
+    #[inline]
+    fn mode_depth(&self) -> usize {
+        self.modes.len()
+    }
+
+    #[inline]
+    fn pop_modes_to(&mut self, target_depth: usize) {
+        let target = target_depth.max(1);
+        if self.modes.len() > target {
+            self.modes.truncate(target);
         }
     }
 }
