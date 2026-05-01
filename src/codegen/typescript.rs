@@ -532,11 +532,11 @@ fn emit_tables(s: &mut String, st: &StateTable) {
 fn emit_drive(s: &mut String, st: &StateTable) {
     writeln!(
         s,
-        "function step(p: Cursor<TokenKind, RuleKind>): Event<TokenKind, RuleKind> | undefined {{"
+        "function step(p: Cursor<TokenKind, RuleKind, LabelKind>): Event<TokenKind, RuleKind, LabelKind> | undefined {{"
     )
     .unwrap();
     writeln!(s, "  let cur = p.getState();").unwrap();
-    writeln!(s, "  let event: Event<TokenKind, RuleKind> | undefined = undefined;").unwrap();
+    writeln!(s, "  let event: Event<TokenKind, RuleKind, LabelKind> | undefined = undefined;").unwrap();
     writeln!(s, "  switch (cur) {{").unwrap();
     for state in st.states.values() {
         writeln!(s, "    case {}: {{ // {}", state.id, state.label).unwrap();

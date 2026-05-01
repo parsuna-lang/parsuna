@@ -476,7 +476,7 @@ export class Parser<
   constructor(
     private readonly lex: Lexer<TK, LK>,
     entry: number,
-    private readonly cfg: ParserConfig<TK, RK>,
+    private readonly cfg: ParserConfig<TK, RK, LK>,
     options?: { emitSkips?: boolean; emitUnlabeledTokens?: boolean },
   ) {
     this.state = entry;
