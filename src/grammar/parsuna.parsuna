@@ -24,27 +24,34 @@ IDENT  = ('A'..'Z' | 'a'..'z' | '_') ('A'..'Z' | 'a'..'z' | '_' | '0'..'9')*;
 WS      = (' ' | '\t' | '\r' | '\n')+  -> skip;
 COMMENT = "//" (!'\n')*                -> skip;
 
+// Labels mark every position the IR builder needs. Punctuation
+// (EQ, SEMI, PIPE, LPAREN, RPAREN, COMMA, AT, ARROW, BANG, DOTDOT)
+// has no label, so consumers running under `LabeledOnly` only see
+// the meaningful events. Quantifier tokens are individually labeled
+// so a consumer can tell `?` from `*` from `+` without needing the
+// raw token kind.
+
 file = item*;
 
 item = mode_pre? decl;
 
-mode_pre = AT IDENT LPAREN IDENT (COMMA IDENT)* RPAREN;
+mode_pre = AT kind:IDENT LPAREN m:IDENT (COMMA m:IDENT)* RPAREN;
 
-decl = IDENT EQ alt_expr actions? SEMI;
+decl = name:IDENT EQ alt_expr actions? SEMI;
 
 actions = ARROW action (COMMA action)*;
-action  = IDENT action_arg?;
-action_arg = LPAREN IDENT RPAREN;
+action  = name:IDENT action_arg?;
+action_arg = LPAREN arg:IDENT (COMMA arg:IDENT)* RPAREN;
 
 alt_expr = seq_expr (PIPE seq_expr)*;
 seq_expr = _postfix_expr*;
-_postfix_expr = LABEL? _primary_expr _quant_op*;
-_quant_op     = QUESTION | STAR | PLUS;
+_postfix_expr = lbl:LABEL? _primary_expr _quant_op*;
+_quant_op     = q_opt:QUESTION | q_star:STAR | q_plus:PLUS;
 _primary_expr = group | atom;
 group = LPAREN alt_expr RPAREN;
-atom = IDENT | STRING | char_primary | neg_class;
+atom = ref:IDENT | string:STRING | char_primary | neg_class;
 
-char_primary = CHAR (DOTDOT CHAR)? | DOT;
+char_primary = lo:CHAR (DOTDOT hi:CHAR)? | dot:DOT;
 
 neg_class = BANG (_neg_atom | LPAREN _neg_atom (PIPE _neg_atom)* RPAREN);
-_neg_atom = char_primary | STRING;
+_neg_atom = char_primary | string:STRING;

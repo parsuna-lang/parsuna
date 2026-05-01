@@ -3,9 +3,8 @@ package dev.parsuna.runtime;
 /**
  * Runtime-level toggles the caller picks per parser construction.
  *
- * <p>Today the only knob is {@link #dropSkips}; future runtime-level
- * options can extend the class without breaking call sites because the
- * default constructor stays compatible.
+ * <p>Zero-argument construction matches the historic emit-everything
+ * behaviour, so existing callers stay unchanged.
  */
 public final class ParserOptions {
     /**
@@ -16,12 +15,31 @@ public final class ParserOptions {
      * historic behaviour.
      */
     public final boolean dropSkips;
+    /**
+     * When {@code true}, every {@link Event.Token} whose {@link Token#label()}
+     * is {@code null} (i.e. that didn't match a {@code name:NAME} position
+     * in the grammar) is silently consumed. Structural events
+     * ({@link Event.Enter}/{@link Event.Exit}/{@link Event.Error}) and
+     * {@link Event.Garbage} still flow through. The "give me an AST shape,
+     * drop the punctuation" mode for tree-building consumers.
+     *
+     * <p>Implies skip-token suppression — skip tokens never carry a label.
+     * Default {@code false}.
+     */
+    public final boolean dropUnlabeledTokens;
 
     public ParserOptions() {
         this.dropSkips = false;
+        this.dropUnlabeledTokens = false;
     }
 
     public ParserOptions(boolean dropSkips) {
         this.dropSkips = dropSkips;
+        this.dropUnlabeledTokens = false;
+    }
+
+    public ParserOptions(boolean dropSkips, boolean dropUnlabeledTokens) {
+        this.dropSkips = dropSkips;
+        this.dropUnlabeledTokens = dropUnlabeledTokens;
     }
 }

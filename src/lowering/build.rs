@@ -600,14 +600,14 @@ impl Builder<'_> {
 /// Names of the public (non-fragment) rules, in declaration order.
 /// Fragments are excluded because they don't become `RuleKind` variants.
 fn collect_rules(g: &Grammar) -> Vec<String> {
-    let mut set: BTreeSet<String> = BTreeSet::new();
-    for r in g.rules.values() {
-        if r.is_fragment {
-            continue;
-        }
-        set.insert(r.name.clone());
-    }
-    set.into_iter().collect()
+    // `g.rules` is an `IndexMap` keyed by name; iterating values yields
+    // them in insertion (i.e. declaration) order. Filter out fragments
+    // — they're inlined at lex time and don't need a `RuleKind` slot.
+    g.rules
+        .values()
+        .filter(|r| !r.is_fragment)
+        .map(|r| r.name.clone())
+        .collect()
 }
 
 /// SYNC set for a rule: every real token in its FOLLOW plus EOF. `EOF`

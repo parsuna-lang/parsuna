@@ -22,17 +22,25 @@ public readonly record struct Span(Pos Start, Pos End)
 }
 
 /// <summary>
-/// A lexed token: kind id, source span, and the matched text.
+/// A lexed token: kind id, source span, matched text, and an optional
+/// grammar-position <see cref="Label"/>.
 /// </summary>
 /// <remarks>
-/// <c>Kind</c> is a <c>ushort</c> matching the generated <c>TokenKind</c>
-/// enum's underlying value. EOF = 0; grammar tokens have ids starting at
-/// 1; the lexer emits <see cref="Lexer.ErrorKind"/> (0xFFFF) when no DFA
-/// pattern matched at the current position. The parser runtime turns
-/// those into a paired <see cref="ErrorEvent"/>+<see cref="GarbageEvent"/>
-/// sequence at pump time and never lets them reach generated dispatch.
+/// <para><c>Kind</c> is a <c>ushort</c> matching the generated
+/// <c>TokenKind</c> enum's underlying value. EOF = 0; grammar tokens have
+/// ids starting at 1; the lexer emits <see cref="Lexer.ErrorKind"/>
+/// (0xFFFF) when no DFA pattern matched at the current position. The
+/// parser runtime turns those into a paired <see cref="ErrorEvent"/>
+/// +<see cref="GarbageEvent"/> sequence at pump time and never lets
+/// them reach generated dispatch.</para>
+///
+/// <para><c>Label</c> is the grammar-position name from a
+/// <c>name:NAME</c> form, or <c>null</c> for unlabeled positions. Set by
+/// the dispatch's labeled <see cref="Cursor.TryConsumeLabeled"/> on the
+/// success path, so consumers can identify a token by its position name
+/// without walking surrounding rule context.</para>
 /// </remarks>
-public sealed record Token(ushort Kind, Span Span, string Text);
+public sealed record Token(ushort Kind, Span Span, string Text, string? Label = null);
 
 /// <summary>A recoverable parse or lex error with its source span.</summary>
 public sealed record ParseError(string Message, Span Span)
@@ -324,6 +332,17 @@ public sealed record ParserConfig(
 public sealed record ParserOptions
 {
     public bool DropSkips { get; init; } = false;
+    /// <summary>
+    /// When <c>true</c>, every <see cref="TokenEvent"/> whose
+    /// <see cref="Token.Label"/> is <c>null</c> (i.e. that didn't match
+    /// a <c>name:NAME</c> position in the grammar) is silently consumed.
+    /// Structural events (<see cref="EnterEvent"/>, <see cref="ExitEvent"/>,
+    /// <see cref="ErrorEvent"/>) and <see cref="GarbageEvent"/> still
+    /// flow through. The "give me an AST shape, drop the punctuation"
+    /// mode for tree-building consumers. Implies skip-token suppression
+    /// (skip tokens never carry a label).
+    /// </summary>
+    public bool DropUnlabeledTokens { get; init; } = false;
 }
 
 /// <summary>
@@ -496,7 +515,10 @@ public sealed class Parser : IEnumerable<Event>, IEnumerator<Event>
                 }
                 if (_cfg.HasSkips && _cfg.IsSkip(t.Kind))
                 {
-                    if (!_opts.DropSkips)
+                    // Skip tokens carry no label, so DropUnlabeledTokens
+                    // would also drop them; the DropSkips gate is
+                    // strictly tighter and runs first.
+                    if (!_opts.DropSkips && !_opts.DropUnlabeledTokens)
                     {
                         _current = new TokenEvent(t);
                         return true;
@@ -521,7 +543,19 @@ public sealed class Parser : IEnumerable<Event>, IEnumerator<Event>
                     bool wasExpected = _recovery.ExpectedPlusOne != 0
                         && (ushort)(_recovery.ExpectedPlusOne - 1) == look0;
                     _recoveryActive = false;
-                    if (wasExpected) { _current = Consume(); return true; }
+                    if (wasExpected)
+                    {
+                        // Honour the label filter on the recovered
+                        // token (in practice the labeled-expect path
+                        // doesn't run during recovery so the recovered
+                        // token has no label; the gate is here for
+                        // symmetry with drive-mode emit).
+                        var ev = (TokenEvent)Consume();
+                        if (_opts.DropUnlabeledTokens && ev.Token.Label is null)
+                            continue;
+                        _current = ev;
+                        return true;
+                    }
                     continue;
                 }
                 _current = new GarbageEvent(TakeToken());
@@ -544,7 +578,17 @@ public sealed class Parser : IEnumerable<Event>, IEnumerator<Event>
                 return true;
             }
             var stepEv = _cfg.Step(new Cursor(this));
-            if (stepEv is not null) { _current = stepEv; return true; }
+            if (stepEv is not null)
+            {
+                if (_opts.DropUnlabeledTokens
+                    && stepEv is TokenEvent t2
+                    && t2.Token.Label is null)
+                {
+                    continue;
+                }
+                _current = stepEv;
+                return true;
+            }
         }
     }
 
@@ -648,9 +692,29 @@ public sealed class Cursor
     /// one at a time until the lookahead lands on <paramref name="sync"/>
     /// (when it does, the matching token comes through as a normal
     /// <see cref="TokenEvent"/>).</summary>
-    public Event TryConsume(ushort kind, ushort[] sync, string name)
+    public Event TryConsume(ushort kind, ushort[] sync, string name) =>
+        TryConsumeLabeled(kind, sync, name, null);
+
+    /// <summary><see cref="TryConsume"/> with a <paramref name="label"/>
+    /// stamped on the consumed token's <see cref="Token.Label"/> on the
+    /// success path. Used by generated dispatch for <c>name:NAME</c>
+    /// positions; the label travels through to the consumer's event
+    /// stream so they can identify the position by name without
+    /// tracking surrounding rule context. Pass <c>null</c> for
+    /// unlabeled positions.</summary>
+    public Event TryConsumeLabeled(ushort kind, ushort[] sync, string name, string? label)
     {
-        if (_p._look[0]!.Kind == kind) return _p.Consume();
+        if (_p._look[0]!.Kind == kind)
+        {
+            // `Token` is an immutable record — use `with` to stamp the
+            // label and write it back into the lookahead slot before
+            // Consume rotates it out.
+            if (label is not null)
+            {
+                _p._look[0] = _p._look[0]! with { Label = label };
+            }
+            return _p.Consume();
+        }
         var ev = _p.ErrorHere($"expected {name}");
         _p._recovery = new Parser.Recovery { Sync = sync, ExpectedPlusOne = kind + 1 };
         _p._recoveryActive = true;

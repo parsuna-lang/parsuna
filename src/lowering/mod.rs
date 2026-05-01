@@ -17,6 +17,7 @@
 //!    optimize before codegen sees the table.
 
 mod build;
+pub mod dump;
 mod layout;
 pub mod lexer_dfa;
 pub mod optimize;

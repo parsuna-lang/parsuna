@@ -42,7 +42,12 @@ typedef struct { Pos start, end; } Span;
  * In *string* mode (parser_init_from_string) `text` points directly into
  * the caller's source buffer — zero-copy and NOT NUL-terminated; read
  * exactly `text_len` bytes. Use `text_len` in both modes. */
-typedef struct { uint16_t kind; Span span; char *text; size_t text_len; } Token;
+/* `label` is the grammar-position name from a `name:NAME` form, or NULL
+ * for unlabeled positions. Set by the dispatch's labeled `try_consume`
+ * on the success path; points at a static literal baked into the
+ * generated parser source, so it has program lifetime and the runtime
+ * never owns or frees it. */
+typedef struct { uint16_t kind; Span span; char *text; size_t text_len; const char *label; } Token;
 
 /* A recoverable parse or lex error. `message` is owned by the parser
  * until the next call to parser_next. */
@@ -210,6 +215,13 @@ typedef struct Parser {
      * parser_next loop never returns them. Default 0, matching the
      * historic behaviour. */
     int drop_skips;
+    /* When non-zero, every EV_TOKEN whose `Token.label` is NULL (i.e.
+     * that didn't match a `name:NAME` position in the grammar) is
+     * silently consumed. Structural events (ENTER/EXIT/ERROR) and
+     * GARBAGE still flow through. The "give me an AST shape, drop the
+     * punctuation" mode for tree-building consumers. Implies skip
+     * suppression — skip tokens never carry a label. Default 0. */
+    int drop_unlabeled_tokens;
 
     /* Strings owned by the last yielded event. Freed at the top of the
      * next parser_next call so the caller can keep reading them until
@@ -502,8 +514,15 @@ static inline Event ev_error_here(Parser *p, const char *msg) {
  * `sync` is typically the caller rule's FOLLOW set: recovery skips
  * unexpected tokens until the lookahead lands on one of these, which
  * gives the surrounding rule a reasonable place to resume. */
-static inline Event try_consume(Parser *p, uint16_t kind, const uint16_t *sync, const char *name) {
-    if (p->look_buf[0].kind == kind) return ev_consume(p);
+static inline Event try_consume_labeled(Parser *p, uint16_t kind, const uint16_t *sync, const char *name, const char *label) {
+    if (p->look_buf[0].kind == kind) {
+        /* Stamp the label directly on the slot's token before
+         * ev_consume rotates it out — keeps the unlabeled hot path
+         * branch-free (the field stays NULL from the lex-time
+         * initialisation). */
+        if (label != NULL) p->look_buf[0].label = label;
+        return ev_consume(p);
+    }
     size_t nlen = strlen(name) + 16;
     char *msg = (char*)malloc(nlen);
     snprintf(msg, nlen, "expected %s", name);
@@ -518,6 +537,10 @@ static inline Event try_consume(Parser *p, uint16_t kind, const uint16_t *sync, 
     p->recovery.sync = sync;
     parser_unwind_modes_for_recovery(p);
     return e;
+}
+
+static inline Event try_consume(Parser *p, uint16_t kind, const uint16_t *sync, const char *name) {
+    return try_consume_labeled(p, kind, sync, name, NULL);
 }
 
 /* Arm recovery-mode without an expected kind. Called from a dispatch
@@ -666,7 +689,10 @@ static inline int parser_next(Parser *p, Event *out) {
                 return yield_event(p, e, out);
             }
             if (is_skip(t.kind)) {
-                if (!p->drop_skips) {
+                /* Skip tokens carry no label, so drop_unlabeled_tokens
+                 * would also drop them; the drop_skips gate is strictly
+                 * tighter and runs first. */
+                if (!p->drop_skips && !p->drop_unlabeled_tokens) {
                     Event e = {0};
                     e.tag = EV_TOKEN;
                     e.token = t;
@@ -695,7 +721,19 @@ static inline int parser_next(Parser *p, Event *out) {
             if (synced) {
                 int was_expected = p->recovery.expected_set && p->recovery.expected_kind == k;
                 p->recovery.active = 0;
-                if (was_expected) return yield_event(p, ev_consume(p), out);
+                if (was_expected) {
+                    /* Honour the label filter on the recovered token
+                     * (in practice the labeled-expect path doesn't run
+                     * during recovery so the recovered token has no
+                     * label; the gate is here for symmetry with
+                     * drive-mode emit). */
+                    Event ev = ev_consume(p);
+                    if (p->drop_unlabeled_tokens && ev.token.label == NULL) {
+                        if (!p->borrow_buf) free(ev.token.text);
+                        continue;
+                    }
+                    return yield_event(p, ev, out);
+                }
                 continue;
             }
             Event e = {0};
@@ -721,7 +759,13 @@ static inline int parser_next(Parser *p, Event *out) {
             return yield_event(p, e, out);
         }
         Event e;
-        if (step(p, &e)) return yield_event(p, e, out);
+        if (step(p, &e)) {
+            if (p->drop_unlabeled_tokens && e.tag == EV_TOKEN && e.token.label == NULL) {
+                if (!p->borrow_buf) free(e.token.text);
+                continue;
+            }
+            return yield_event(p, e, out);
+        }
     }
 }
 

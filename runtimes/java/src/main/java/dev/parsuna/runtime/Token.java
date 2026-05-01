@@ -35,6 +35,12 @@ public final class Token {
     int byteLen;
     private final Span span = new Span();
     private String textCache;
+    /** Grammar-position label from a {@code name:NAME} form, or
+     *  {@code null} if the position wasn't labeled. Set by the
+     *  dispatch's labeled {@code tryConsume} on the success path; the
+     *  runtime clears it on every lex-time {@link #set} so the field
+     *  defaults to {@code null} until a labeled-expect re-stamps it. */
+    String label;
 
     public Token() {
         this.data = EMPTY;
@@ -64,6 +70,10 @@ public final class Token {
      *  next {@link Parser#next()} call. */
     public Span span() { return span; }
 
+    /** Grammar label (e.g. {@code "name"} for a {@code name:IDENT}
+     *  position), or {@code null} for unlabeled positions. */
+    public String label() { return label; }
+
     /** Decoded UTF-8 text. Cached on first call; the cache is cleared
      *  the next time the runtime rewrites this token. */
     public String text() {
@@ -91,6 +101,7 @@ public final class Token {
         c.byteLen = this.byteLen;
         c.span.copyFrom(this.span);
         c.textCache = this.textCache;
+        c.label = this.label;
         return c;
     }
 
@@ -109,6 +120,9 @@ public final class Token {
         this.byteLen = byteLen;
         this.span.set(sOff, sLine, sCol, eOff, eLine, eCol);
         this.textCache = null;
+        // Reset on every fresh lex hit; the labeled-expect path
+        // re-stamps it on the success branch.
+        this.label = null;
     }
 
     private static final byte[] EMPTY = new byte[0];

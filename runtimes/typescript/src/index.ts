@@ -451,6 +451,17 @@ export class Parser<
   private retModeDepthStack: number[] = [];
   private recovery: Recovery<TK> | null = null;
   private readonly emitSkips: boolean;
+  /**
+   * When `false`, `token` events whose `Token.label` is `null` are
+   * silently consumed at the emit site. Only labeled tokens (from
+   * `name:NAME` positions in the grammar) and structural events (enter,
+   * exit, error, garbage) reach the consumer. The "give me an AST shape,
+   * drop the punctuation" mode for tree-building consumers.
+   *
+   * Implies skip-token suppression — skip tokens never carry a label,
+   * so `emitUnlabeledTokens=false` would drop them anyway. Default: true.
+   */
+  private readonly emitUnlabeledTokens: boolean;
   // Holds the lex-failure token (kind=null) whose paired `error` event
   // the previous `next()` call already returned; this call owes the
   // matching `garbage` event. Lex-failure tokens never enter
@@ -462,7 +473,7 @@ export class Parser<
     private readonly lex: Lexer<TK>,
     entry: number,
     private readonly cfg: ParserConfig<TK, RK>,
-    options?: { emitSkips?: boolean },
+    options?: { emitSkips?: boolean; emitUnlabeledTokens?: boolean },
   ) {
     this.state = entry;
     this.lookBuf = new Array<Token<TK> | null>(cfg.k).fill(null);
@@ -470,6 +481,7 @@ export class Parser<
     // then it just needs to be a valid Pos; pin it at the source origin.
     this.prevEnd = { offset: 0, line: 1, column: 1 };
     this.emitSkips = options?.emitSkips ?? true;
+    this.emitUnlabeledTokens = options?.emitUnlabeledTokens ?? true;
   }
 
   // -------------------------------------------------------------------
@@ -657,7 +669,9 @@ export class Parser<
           };
         }
         if (this.cfg.isSkip(t.kind)) {
-          if (this.emitSkips) {
+          // Skip tokens carry no label, so `emitUnlabeledTokens=false`
+          // would also drop them; gate is strictly tighter and runs first.
+          if (this.emitSkips && this.emitUnlabeledTokens) {
             return { done: false, value: { tag: "token", token: t } };
           }
           continue;
@@ -688,7 +702,19 @@ export class Parser<
           const wasExpected = rec.expected !== null && rec.expected === look0Kind;
           this.recovery = null;
           if (wasExpected) {
-            return { done: false, value: this.consume() };
+            // Honour the label filter on the recovered token. In practice
+            // labeled-expect doesn't run during recovery so the recovered
+            // token has no label; the gate is here for symmetry with
+            // drive-mode emit.
+            const event = this.consume();
+            if (
+              !this.emitUnlabeledTokens &&
+              event.tag === "token" &&
+              event.token.label === null
+            ) {
+              continue;
+            }
+            return { done: false, value: event };
           }
           continue;
         }
@@ -710,12 +736,22 @@ export class Parser<
         return { done: false, value: event };
       }
 
-      // Drive mode: run one state body. If `step` emitted, yield it.
-      // Otherwise it just transitioned `cur` (and possibly the return
-      // stack); loop and run the next body. The cursor is just `this`
-      // narrowed to the dispatch interface — no allocation, no hop.
+      // Drive mode: run one state body. If `step` emitted, yield it
+      // (modulo the label filter); otherwise it just transitioned `cur`
+      // (and possibly the return stack), so loop and run the next body.
+      // The cursor is just `this` narrowed to the dispatch interface —
+      // no allocation, no hop.
       const ev = this.cfg.step(this);
-      if (ev !== undefined) return { done: false, value: ev };
+      if (ev !== undefined) {
+        if (
+          !this.emitUnlabeledTokens &&
+          ev.tag === "token" &&
+          ev.token.label === null
+        ) {
+          continue;
+        }
+        return { done: false, value: ev };
+      }
     }
   }
 

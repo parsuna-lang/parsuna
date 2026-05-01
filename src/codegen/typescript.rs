@@ -717,10 +717,10 @@ fn emit_public_api(s: &mut String, st: &StateTable) {
         let pascal_name = pascal(name);
         let upper = name.to_uppercase();
 
-        writeln!(s, "/** Parse the `{}` rule from a source string. Skip tokens are surfaced as `Event::Token`; pass `{{ emitSkips: false }}` (or call `parse{}NoSkips`) to drop them. */", name, pascal_name).unwrap();
+        writeln!(s, "/** Parse the `{}` rule from a source string. Skip tokens are surfaced as `Event::Token`; pass `{{ emitSkips: false }}` (or call `parse{}NoSkips`) to drop them. Pass `{{ emitUnlabeledTokens: false }}` (or call `parse{}LabeledOnly`) to drop every unlabeled token, leaving only `name:NAME`-labeled positions plus structural events — useful for tree-builders that don't need to filter punctuation. */", name, pascal_name, pascal_name).unwrap();
         writeln!(
             s,
-            "export function parse{pascal_name}(src: string, options?: {{ emitSkips?: boolean }}): Parser<TokenKind, RuleKind> {{"
+            "export function parse{pascal_name}(src: string, options?: {{ emitSkips?: boolean; emitUnlabeledTokens?: boolean }}): Parser<TokenKind, RuleKind> {{"
         )
         .unwrap();
         writeln!(
@@ -748,6 +748,25 @@ fn emit_public_api(s: &mut String, st: &StateTable) {
         )
         .unwrap();
         writeln!(s, "  return parse{pascal_name}(src, {{ emitSkips: false }});").unwrap();
+        writeln!(s, "}}").unwrap();
+        writeln!(s).unwrap();
+
+        writeln!(
+            s,
+            "/** Parse the `{}` rule from a source string, dropping every unlabeled token. Only `name:NAME`-labeled positions and structural events come through — equivalent to `parse{}` with `{{ emitSkips: false, emitUnlabeledTokens: false }}`. */",
+            name, pascal_name
+        )
+        .unwrap();
+        writeln!(
+            s,
+            "export function parse{pascal_name}LabeledOnly(src: string): Parser<TokenKind, RuleKind> {{"
+        )
+        .unwrap();
+        writeln!(
+            s,
+            "  return parse{pascal_name}(src, {{ emitSkips: false, emitUnlabeledTokens: false }});"
+        )
+        .unwrap();
         writeln!(s, "}}").unwrap();
         writeln!(s).unwrap();
     }

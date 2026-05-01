@@ -42,6 +42,13 @@ type Token struct {
 	Kind uint16
 	Span Span
 	Text string
+	// Label is the grammar-position name from a `name:NAME` form,
+	// or "" if the position wasn't labeled. Set by the dispatch's
+	// labeled TryConsume on the success path; the empty string is
+	// the sentinel "no label". Generated parsers never write a
+	// labeled token with an empty label, so `tok.Label != ""` is a
+	// reliable "this position is labeled" check.
+	Label string
 }
 
 // EofKind is the token-kind id reserved for end-of-input. Always 0.
@@ -315,15 +322,22 @@ type Config struct {
 }
 
 // Options controls runtime behaviour the caller picks per parser
-// construction. Today this is just the skip-emission knob; future
-// runtime-level toggles can extend the struct without breaking
-// existing call sites because of zero-value defaults.
+// construction. Zero-value defaults match the historic emit-everything
+// behaviour, so passing `Options{}` is equivalent to `NewParser`.
 type Options struct {
 	// DropSkips suppresses skip tokens at the source: the lexer still
 	// matches them (they delimit structural tokens), but the parser's
 	// Next loop never returns them. Default false (= emit skip tokens
 	// as EvToken events, matching the historic behaviour).
 	DropSkips bool
+	// DropUnlabeledTokens suppresses every Token event whose
+	// `Token.Label` is empty (i.e. that didn't match a `name:NAME`
+	// position in the grammar). Structural events (Enter/Exit/Error)
+	// and Garbage events still flow through. The "give me an AST
+	// shape, drop the punctuation" mode for tree-building consumers.
+	// Default false. Implies skip-token suppression — skip tokens
+	// never carry a label.
+	DropUnlabeledTokens bool
 }
 
 // recovery is in-flight error recovery. Set by TryConsume's mismatch
@@ -545,8 +559,25 @@ func (c *Cursor) Consume() Event { return (*Parser)(c).consume() }
 // the lookahead lands on `sync` (when it does, the matching token
 // comes through as a normal Token event).
 func (c *Cursor) TryConsume(kind uint16, sync []uint16, name string) Event {
+	return c.TryConsumeLabeled(kind, sync, name, "")
+}
+
+// TryConsumeLabeled is TryConsume with a `name:NAME` grammar label
+// stamped on the produced Token's `Label` field on the success path.
+// Used by generated dispatch for `name:NAME` positions; the label
+// travels through to the consumer's event stream so they can identify
+// the position by name without tracking surrounding rule context.
+// Pass label = "" for unlabeled positions.
+func (c *Cursor) TryConsumeLabeled(kind uint16, sync []uint16, name, label string) Event {
 	p := (*Parser)(c)
 	if c.look[0].Kind == kind {
+		// Stamp the label directly on the slot's token before
+		// consume rotates it out — keeps the unlabeled hot path
+		// branch-free (the zero-value empty string from the
+		// lex-time construction is left in place).
+		if label != "" {
+			p.look[0].Label = label
+		}
 		return p.consume()
 	}
 	ev := p.errorHere("expected " + name)
@@ -601,7 +632,10 @@ func (p *Parser) Next() (Event, bool) {
 				return Event{Tag: EvError, Err: ParseError{Message: "unexpected character", Span: t.Span}}, true
 			}
 			if p.cfg.IsSkip(t.Kind) {
-				if !p.opts.DropSkips {
+				// Skip tokens carry no label, so DropUnlabeledTokens
+				// would also drop them; gate is strictly tighter
+				// and runs first.
+				if !p.opts.DropSkips && !p.opts.DropUnlabeledTokens {
 					return Event{Tag: EvToken, Token: t}, true
 				}
 				continue
@@ -629,7 +663,16 @@ func (p *Parser) Next() (Event, bool) {
 				wasExpected := p.rec.expectedSet && p.rec.expected == k
 				p.recActive = false
 				if wasExpected {
-					return p.consume(), true
+					// Honour the label filter on the recovered
+					// token (in practice the labeled-expect path
+					// doesn't run during recovery so the recovered
+					// token has no label; the gate is here for
+					// symmetry with the drive-mode emit).
+					ev := p.consume()
+					if p.opts.DropUnlabeledTokens && ev.Token.Label == "" {
+						continue
+					}
+					return ev, true
 				}
 				continue
 			}
@@ -652,11 +695,15 @@ func (p *Parser) Next() (Event, bool) {
 		}
 
 		// Drive mode: run one state body. If Step emitted, yield
-		// it. Otherwise it just transitioned `cur` (and possibly
-		// the return stack); loop and run the next body.
-		// `(*Cursor)(p)` is a free cast — Cursor is `type Cursor
-		// Parser` so the layouts are identical.
+		// it (modulo the label filter); otherwise it just
+		// transitioned `cur` (and possibly the return stack), so
+		// loop and run the next body. `(*Cursor)(p)` is a free
+		// cast — Cursor is `type Cursor Parser` so the layouts are
+		// identical.
 		if ev, ok := p.cfg.Step((*Cursor)(p)); ok {
+			if p.opts.DropUnlabeledTokens && ev.Tag == EvToken && ev.Token.Label == "" {
+				continue
+			}
 			return ev, true
 		}
 	}

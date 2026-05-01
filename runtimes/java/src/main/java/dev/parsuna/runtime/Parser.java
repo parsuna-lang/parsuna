@@ -243,7 +243,10 @@ public final class Parser implements Iterator<Event> {
                     return evtError;
                 }
                 if (cfg.isSkip.test(kind)) {
-                    if (!opts.dropSkips) {
+                    // Skip tokens carry no label, so dropUnlabeledTokens
+                    // would also drop them; the dropSkips gate is
+                    // strictly tighter and runs first.
+                    if (!opts.dropSkips && !opts.dropUnlabeledTokens) {
                         evtToken.token = t;
                         return evtToken;
                     }
@@ -261,7 +264,19 @@ public final class Parser implements Iterator<Event> {
                 if (synced) {
                     boolean wasExpected = recovery.expected == look0;
                     recovery = null;
-                    if (wasExpected) return consume();
+                    if (wasExpected) {
+                        // Honour the label filter on the recovered
+                        // token (in practice the labeled-expect path
+                        // doesn't run during recovery, so the recovered
+                        // token has no label; the gate is here for
+                        // symmetry with the drive-mode emit).
+                        Event ev = consume();
+                        if (opts.dropUnlabeledTokens
+                                && ((Event.Token) ev).token.label == null) {
+                            continue;
+                        }
+                        return ev;
+                    }
                     continue;
                 }
                 return garbage();
@@ -285,7 +300,13 @@ public final class Parser implements Iterator<Event> {
                 return ev;
             }
             Event ev = cfg.step.step(cursor);
-            if (ev != null) return ev;
+            if (ev != null) {
+                if (opts.dropUnlabeledTokens && ev instanceof Event.Token
+                        && ((Event.Token) ev).token.label == null) {
+                    continue;
+                }
+                return ev;
+            }
         }
     }
 

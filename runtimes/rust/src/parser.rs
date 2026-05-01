@@ -23,6 +23,16 @@ pub trait ParserConfig {
     /// silently consumed instead of yielded as `Event::Token`. The
     /// structural event stream is unchanged.
     const EMIT_SKIPS: bool;
+    /// When `false`, `Event::Token` events whose `Token::label` is
+    /// `None` are silently consumed. Only labeled tokens (i.e. the
+    /// positions a grammar marked with `name:NAME` syntax) reach the
+    /// iterator. Structural events (`Enter`/`Exit`/`Error`) and
+    /// labeled tokens still come through; this is the "give me an AST
+    /// shape, drop the punctuation" mode for consumers that don't need
+    /// to see things like commas, semicolons, or bracket tokens.
+    /// `Event::Garbage` events also pass through — they still signal
+    /// recovery. Default: `true` (yield every Token).
+    const EMIT_UNLABELED_TOKENS: bool = true;
 }
 
 /// Default config: skip tokens are surfaced as `Event::Token` so the
@@ -40,6 +50,20 @@ impl ParserConfig for EmitSkips {
 pub struct DropSkips;
 impl ParserConfig for DropSkips {
     const EMIT_SKIPS: bool = false;
+}
+
+/// Drop *every* unlabeled token — only labeled tokens (from
+/// `name:NAME` positions in the grammar) and the structural events
+/// reach the consumer. Useful for tree-building consumers that only
+/// care about the meaningful positions and don't want to filter
+/// punctuation tokens themselves.
+///
+/// Implies skip-token suppression (a skip token by definition has no
+/// label, so dropping unlabeled covers it).
+pub struct LabeledOnly;
+impl ParserConfig for LabeledOnly {
+    const EMIT_SKIPS: bool = false;
+    const EMIT_UNLABELED_TOKENS: bool = false;
 }
 
 /// Bridge from a generated grammar into the runtime's pull loop.
@@ -465,7 +489,10 @@ impl<'a, L: LexerBackend<'a, G::TokenKind>, const K: usize, G: Grammar<K>, C: Pa
     ///
     /// One iteration of the loop fires exactly one of three modes; each
     /// mode either yields one event or transitions out (so the loop
-    /// retries).
+    /// retries). Each Token-emit site additionally honours
+    /// `C::EMIT_UNLABELED_TOKENS` — dropping unlabeled tokens at the
+    /// emit site keeps the dropped path the same cost as a skip token,
+    /// rather than paying a round trip back into pump/drive.
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         loop {
@@ -507,8 +534,11 @@ impl<'a, L: LexerBackend<'a, G::TokenKind>, const K: usize, G: Grammar<K>, C: Pa
                 if G::HAS_SKIPS && G::is_skip(k) {
                     // Compile-time gate: with `C = DropSkips`,
                     // monomorphization removes the yield arm, so
-                    // the skip token is silently consumed.
-                    if C::EMIT_SKIPS {
+                    // the skip token is silently consumed. Skip
+                    // tokens carry no label, so EMIT_UNLABELED=false
+                    // would also drop them; the EMIT_SKIPS gate is
+                    // strictly tighter and runs first.
+                    if C::EMIT_SKIPS && C::EMIT_UNLABELED_TOKENS {
                         return Some(Event::Token(t));
                     }
                     continue;
@@ -540,7 +570,21 @@ impl<'a, L: LexerBackend<'a, G::TokenKind>, const K: usize, G: Grammar<K>, C: Pa
                     let was_expected = rec.expected == Some(look0_kind);
                     self.recovery = None;
                     if was_expected {
-                        return Some(self.consume());
+                        // The synced-to-expected token comes through as
+                        // a normal Token event; honour the label filter
+                        // even on this fast path. (In practice the
+                        // recovered token has no label since the
+                        // labeled-expect path doesn't run during
+                        // recovery; the check is here for symmetry.)
+                        let event = self.consume();
+                        if !C::EMIT_UNLABELED_TOKENS {
+                            if let Event::Token(ref t) = event {
+                                if t.label.is_none() {
+                                    continue;
+                                }
+                            }
+                        }
+                        return Some(event);
                     }
                     continue;
                 }
@@ -563,9 +607,17 @@ impl<'a, L: LexerBackend<'a, G::TokenKind>, const K: usize, G: Grammar<K>, C: Pa
             }
 
             // Drive mode: run one state body. If that body emitted,
-            // yield. Otherwise it just transitioned the current state
-            // (and maybe the return stack); loop and run the next body.
+            // yield (modulo the label filter); otherwise it just
+            // transitioned the current state (and maybe the return
+            // stack), so loop and run the next body.
             if let Some(e) = G::step(&mut Cursor { p: self }) {
+                if !C::EMIT_UNLABELED_TOKENS {
+                    if let Event::Token(ref t) = e {
+                        if t.label.is_none() {
+                            continue;
+                        }
+                    }
+                }
                 return Some(e);
             }
         }

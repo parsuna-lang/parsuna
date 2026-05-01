@@ -142,21 +142,66 @@ fn build_lib_rs(
     writeln!(&mut out).unwrap();
 
     for r in rules {
+        let upper = r.to_uppercase();
+        // Default factory: emits skip tokens, emits unlabeled tokens —
+        // matches the runtime's `EmitSkips` config.
         writeln!(
             &mut out,
             "/// Parse the `{}` rule from a string and return a [`PyParser`].",
             r
         )
         .unwrap();
+        writeln!(&mut out, "/// Skip tokens (whitespace, comments) come through as Token events;").unwrap();
+        writeln!(&mut out, "/// call `parse_{}_no_skips` or `parse_{}_labeled_only` for the alternative configs.", r, r).unwrap();
         writeln!(&mut out, "#[pyo3::pyfunction(name = \"parse_{}\")]", r).unwrap();
         writeln!(&mut out, "fn parse_{}_py(src: &str) -> PyParser {{", r).unwrap();
         writeln!(&mut out, "    let lex = parsuna_rt::StreamingLexer::<_, TokenKind, LexerDfa>::new(std::io::Cursor::new(src.as_bytes().to_vec()));").unwrap();
         writeln!(
             &mut out,
-            "    PyParser {{ inner: Parser::new(lex, ENTRY_{}) }}",
-            r.to_uppercase()
+            "    let parser = parsuna_rt::Parser::<_, _, _, _, parsuna_rt::EmitSkips>::new(lex, ENTRY_{});",
+            upper
         )
         .unwrap();
+        writeln!(&mut out, "    PyParser {{ inner: Box::new(parser) }}").unwrap();
+        writeln!(&mut out, "}}").unwrap();
+
+        // No-skips factory: drops skip tokens at the source.
+        writeln!(
+            &mut out,
+            "/// Parse the `{}` rule, silently consuming skip tokens (no Token events for whitespace / comments).",
+            r
+        )
+        .unwrap();
+        writeln!(&mut out, "#[pyo3::pyfunction(name = \"parse_{}_no_skips\")]", r).unwrap();
+        writeln!(&mut out, "fn parse_{}_no_skips_py(src: &str) -> PyParser {{", r).unwrap();
+        writeln!(&mut out, "    let lex = parsuna_rt::StreamingLexer::<_, TokenKind, LexerDfa>::new(std::io::Cursor::new(src.as_bytes().to_vec()));").unwrap();
+        writeln!(
+            &mut out,
+            "    let parser = parsuna_rt::Parser::<_, _, _, _, parsuna_rt::DropSkips>::new(lex, ENTRY_{});",
+            upper
+        )
+        .unwrap();
+        writeln!(&mut out, "    PyParser {{ inner: Box::new(parser) }}").unwrap();
+        writeln!(&mut out, "}}").unwrap();
+
+        // Labeled-only factory: drops every Token whose Label is None.
+        writeln!(
+            &mut out,
+            "/// Parse the `{}` rule, dropping every Token event that didn't match a `name:NAME`-labelled position.",
+            r
+        )
+        .unwrap();
+        writeln!(&mut out, "/// Only labelled tokens and structural events come through — useful for tree builders.").unwrap();
+        writeln!(&mut out, "#[pyo3::pyfunction(name = \"parse_{}_labeled_only\")]", r).unwrap();
+        writeln!(&mut out, "fn parse_{}_labeled_only_py(src: &str) -> PyParser {{", r).unwrap();
+        writeln!(&mut out, "    let lex = parsuna_rt::StreamingLexer::<_, TokenKind, LexerDfa>::new(std::io::Cursor::new(src.as_bytes().to_vec()));").unwrap();
+        writeln!(
+            &mut out,
+            "    let parser = parsuna_rt::Parser::<_, _, _, _, parsuna_rt::LabeledOnly>::new(lex, ENTRY_{});",
+            upper
+        )
+        .unwrap();
+        writeln!(&mut out, "    PyParser {{ inner: Box::new(parser) }}").unwrap();
         writeln!(&mut out, "}}").unwrap();
     }
     writeln!(&mut out).unwrap();
@@ -179,6 +224,18 @@ fn build_lib_rs(
         writeln!(
             &mut out,
             "    m.add_function(pyo3::wrap_pyfunction!(parse_{}_py, m)?)?;",
+            r
+        )
+        .unwrap();
+        writeln!(
+            &mut out,
+            "    m.add_function(pyo3::wrap_pyfunction!(parse_{}_no_skips_py, m)?)?;",
+            r
+        )
+        .unwrap();
+        writeln!(
+            &mut out,
+            "    m.add_function(pyo3::wrap_pyfunction!(parse_{}_labeled_only_py, m)?)?;",
             r
         )
         .unwrap();
@@ -270,6 +327,11 @@ impl PyError {
 
 /// A single pull-parser event. `tag` is one of "enter", "exit", "token",
 /// "garbage", or "error"; the populated payload field depends on the tag.
+///
+/// `label` is set on token events whose grammar position used the
+/// `name:NAME` form (parsuna's labeled-position syntax) — it's the
+/// position name. `None` for unlabeled positions and for non-token
+/// events.
 #[pyclass(frozen, get_all, name = "Event")]
 #[derive(Clone, Debug)]
 struct PyEvent {
@@ -277,6 +339,7 @@ struct PyEvent {
     span: PySpan,
     kind: Option<i32>,
     text: Option<String>,
+    label: Option<String>,
     error: Option<PyError>,
 }
 
@@ -313,6 +376,7 @@ fn to_py_event(ev: Event) -> PyEvent {
             span: to_py_span(parsuna_rt::Span::point(pos)),
             kind: Some(rule as i32),
             text: None,
+            label: None,
             error: None,
         },
         parsuna_rt::Event::Exit { rule, pos } => PyEvent {
@@ -320,31 +384,53 @@ fn to_py_event(ev: Event) -> PyEvent {
             span: to_py_span(parsuna_rt::Span::point(pos)),
             kind: Some(rule as i32),
             text: None,
+            label: None,
             error: None,
         },
         parsuna_rt::Event::Error(d) => {
             let span = to_py_span(d.span);
-            PyEvent { tag: "error".into(), span, kind: None, text: None, error: Some(to_py_diag(d)) }
+            PyEvent { tag: "error".into(), span, kind: None, text: None, label: None, error: Some(to_py_diag(d)) }
         }
         parsuna_rt::Event::Token(t) => {
             let span = to_py_span(t.span);
-            PyEvent { tag: "token".into(), span, kind: t.kind.map(|k| k as i32), text: Some(t.text.into_owned()), error: None }
+            PyEvent {
+                tag: "token".into(),
+                span,
+                kind: t.kind.map(|k| k as i32),
+                text: Some(t.text.into_owned()),
+                label: t.label.map(|s| s.to_string()),
+                error: None,
+            }
         }
         parsuna_rt::Event::Garbage(t) => {
             let span = to_py_span(t.span);
-            PyEvent { tag: "garbage".into(), span, kind: t.kind.map(|k| k as i32), text: Some(t.text.into_owned()), error: None }
+            PyEvent {
+                tag: "garbage".into(),
+                span,
+                kind: t.kind.map(|k| k as i32),
+                text: Some(t.text.into_owned()),
+                label: t.label.map(|s| s.to_string()),
+                error: None,
+            }
         }
     }
 }
 
 /// Pull-based parser. Iterate to walk the parse as a sequence of
 /// [`PyEvent`] values, or call `next_event` manually.
+///
+/// The wrapped iterator is boxed so the same Python type can hold any
+/// of the runtime's `ParserConfig` variants (`EmitSkips`, `DropSkips`,
+/// `LabeledOnly`) — the per-rule factory functions construct the
+/// matching `Parser<...>` and box it.
 #[pyclass(unsendable, name = "Parser")]
-struct PyParser { inner: Parser<'static, parsuna_rt::StreamingLexer<std::io::Cursor<Vec<u8>>, TokenKind, LexerDfa>> }
+struct PyParser {
+    inner: Box<dyn Iterator<Item = Event<'static, TokenKind, RuleKind>>>,
+}
 
 #[pymethods]
 impl PyParser {
-    fn next_event(&mut self) -> Option<PyEvent> { self.inner.next_event().map(to_py_event) }
+    fn next_event(&mut self) -> Option<PyEvent> { self.inner.next().map(to_py_event) }
 
     fn __iter__(slf: PyRef<Self>) -> PyRef<Self> { slf }
     fn __next__(&mut self) -> Option<PyEvent> { self.next_event() }

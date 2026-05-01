@@ -1,4 +1,4 @@
-use parsuna_rt::RuleKindEnum;
+use parsuna_rt::LabeledOnly;
 
 use crate::grammar::ir::*;
 use crate::Span;
@@ -19,8 +19,15 @@ fn event_span(e: &Event<'_>) -> Span {
 /// Returns a bag of errors rather than the first failure so callers can
 /// show all syntactic issues at once. Semantic checks (undefined references,
 /// left-recursion, etc.) happen later in [`crate::analysis::analyze`].
+///
+/// The reader runs the event stream under `LabeledOnly`, so unlabeled
+/// punctuation (`EQ`, `SEMI`, `LPAREN`, `RPAREN`, `COMMA`, `PIPE`,
+/// `ARROW`, `AT`, `BANG`, `DOTDOT`) never reaches us — every position the
+/// reader cares about is identified either by its `Enter`/`Exit` event or
+/// by a stamped label on the labeled token (e.g. `name`, `ref`, `string`,
+/// `lo`/`hi`, `q_opt`/`q_star`/`q_plus`, `lbl`).
 pub fn parse_grammar(source: &str) -> Result<Grammar, Vec<Error>> {
-    let events = generated::parse_file_from_str(source);
+    let events = generated::parse_file_from_str_with::<LabeledOnly>(source);
     let mut r = Reader::new(events);
     let mut g = Grammar::default();
 
@@ -45,11 +52,12 @@ struct Reader<'a, I: Iterator<Item = Event<'a>>> {
 
 impl<'a, I: Iterator<Item = Event<'a>>> Reader<'a, I> {
     fn new(mut inner: I) -> Self {
-        let look = pull_significant(&mut inner);
+        let mut issues = Vec::new();
+        let look = pull_significant(&mut inner, &mut issues);
         Self {
             inner,
             look,
-            issues: Vec::new(),
+            issues,
         }
     }
 
@@ -57,9 +65,13 @@ impl<'a, I: Iterator<Item = Event<'a>>> Reader<'a, I> {
         self.look.as_ref()
     }
 
+    fn peek_span(&self) -> Span {
+        self.peek().map(event_span).unwrap_or_default()
+    }
+
     fn advance(&mut self) -> Option<Event<'a>> {
         let ret = self.look.take();
-        self.look = pull_significant(&mut self.inner);
+        self.look = pull_significant(&mut self.inner, &mut self.issues);
         ret
     }
 
@@ -70,16 +82,22 @@ impl<'a, I: Iterator<Item = Event<'a>>> Reader<'a, I> {
         }
     }
 
+    /// True iff the next event is a labeled token whose `label` equals
+    /// `want`. Used as the `LabeledOnly` substitute for the previous
+    /// "is the next event a Token of kind X" branch checks.
+    fn peek_token_label(&self, want: &str) -> bool {
+        matches!(
+            self.peek(),
+            Some(Event::Token(t)) if t.label == Some(want)
+        )
+    }
+
     fn expect_enter(&mut self, want: RuleKind) {
         match self.peek() {
             Some(Event::Enter { rule, .. }) if *rule == want => {
                 self.advance();
             }
-            other => {
-                let span = other.map(event_span).unwrap_or_default();
-                self.issues
-                    .push(Error::new(format!("expected Enter({})", want.name())).at(span));
-            }
+            _ => self.note_structural_mismatch(want, "Enter"),
         }
     }
 
@@ -88,70 +106,78 @@ impl<'a, I: Iterator<Item = Event<'a>>> Reader<'a, I> {
             Some(Event::Exit { rule, .. }) if *rule == want => {
                 self.advance();
             }
-            other => {
-                let span = other.map(event_span).unwrap_or_default();
-                self.issues
-                    .push(Error::new(format!("expected Exit({})", want.name())).at(span));
-            }
+            _ => self.note_structural_mismatch(want, "Exit"),
         }
+    }
+
+    /// A failed `expect_enter` / `expect_exit` is always downstream of
+    /// either (a) a real parse error already collected in `issues`, or
+    /// (b) a parser-layer bug that we want to surface as a generic
+    /// "could not parse this grammar" message rather than the internal
+    /// rule-boundary jargon. Either way "expected Exit(decl)" buries
+    /// the useful information, so don't emit it directly. Fall back to
+    /// a single sentinel only when nothing else has been reported.
+    fn note_structural_mismatch(&mut self, _want: RuleKind, _kind: &str) {
+        if !self.issues.is_empty() {
+            return;
+        }
+        let span = self.peek().map(event_span).unwrap_or_default();
+        self.issues
+            .push(Error::new("could not parse the grammar (no diagnostics produced)").at(span));
     }
 
     fn next_token(&mut self) -> Token<'a> {
-        loop {
-            match self.advance() {
-                Some(Event::Token(t)) => return t,
-                Some(Event::Error(d)) => self.issues.push(d),
-                Some(Event::Garbage(_)) => {
-                    // Recovery skipped this token — keep walking.
-                }
-                Some(Event::Enter { pos, .. }) | Some(Event::Exit { pos, .. }) => {
-                    let span = Span::point(pos);
-                    self.issues
-                        .push(Error::new("expected a token, got a structural mark").at(span));
-                    return Token {
-                        kind: None,
-                        span,
-                        text: std::borrow::Cow::Borrowed(""),
-                        label: None,
-                    };
-                }
-                None => {
-                    return Token {
-                        kind: Some(TokenKind::Eof),
-                        span: Span::default(),
-                        text: std::borrow::Cow::Borrowed(""),
-                        label: None,
-                    }
+        // `pull_significant` already drained any Error/Garbage events
+        // into `issues` during the most recent advance, so the look
+        // slot is guaranteed to be a Token / Enter / Exit / None.
+        match self.advance() {
+            Some(Event::Token(t)) => t,
+            Some(Event::Enter { pos, .. }) | Some(Event::Exit { pos, .. }) => {
+                let span = Span::point(pos);
+                self.issues
+                    .push(Error::new("expected a token, got a structural mark").at(span));
+                Token {
+                    kind: None,
+                    span,
+                    text: std::borrow::Cow::Borrowed(""),
+                    label: None,
                 }
             }
-        }
-    }
-
-    fn eat_token(&mut self, want_kind: TokenKind) -> Option<Token<'a>> {
-        match self.peek() {
-            Some(Event::Token(t)) if t.kind == Some(want_kind) => {
-                if let Some(Event::Token(t)) = self.advance() {
-                    Some(t)
-                } else {
-                    None
-                }
-            }
-            _ => None,
+            Some(Event::Error(_)) | Some(Event::Garbage(_)) => unreachable!(
+                "pull_significant should have drained Error/Garbage before they reach next_token"
+            ),
+            None => Token {
+                kind: Some(TokenKind::Eof),
+                span: Span::default(),
+                text: std::borrow::Cow::Borrowed(""),
+                label: None,
+            },
         }
     }
 }
 
-fn pull_significant<'a, I: Iterator<Item = Event<'a>>>(inner: &mut I) -> Option<Event<'a>> {
+/// Pull from `inner` until we reach a structural / token event. Any
+/// intervening `Error` events get appended to `issues`; `Garbage`
+/// events are recovery noise and silently skipped.
+///
+/// Doing this eagerly during refill keeps the reader's `look` slot
+/// clean — every peek is guaranteed to see an `Enter`/`Exit`/`Token`
+/// or `None`, never a recovery diagnostic. That matters for
+/// `expect_enter`/`expect_exit`, which would otherwise mistake a
+/// recovery `Error` event sitting in front of the missing boundary
+/// for a structural mismatch and emit a misleading "expected
+/// Exit(...)" on top of the parser's actual diagnostic.
+fn pull_significant<'a, I: Iterator<Item = Event<'a>>>(
+    inner: &mut I,
+    issues: &mut Vec<Error>,
+) -> Option<Event<'a>> {
     loop {
         match inner.next()? {
-            Event::Token(t) if t.kind.map_or(false, is_skip) => continue,
+            Event::Error(d) => issues.push(d),
+            Event::Garbage(_) => continue,
             other => return Some(other),
         }
     }
-}
-
-fn is_skip(kind: TokenKind) -> bool {
-    kind == TokenKind::Ws || kind == TokenKind::Comment
 }
 
 /// One item at the file's top level: an optional `@mode(...)`
@@ -171,23 +197,18 @@ fn read_item<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>, g: &mut G
     r.expect_exit(RuleKind::Item);
 }
 
-/// `mode_pre = AT IDENT LPAREN IDENT (COMMA IDENT)* RPAREN` — the only
-/// annotation kind today is `@mode(...)`. Returns the listed mode
-/// names. Other annotation names are recorded as an error; the names
-/// inside the parens are still returned so we keep going.
+/// `mode_pre = AT kind:IDENT LPAREN m:IDENT (COMMA m:IDENT)* RPAREN` —
+/// the only annotation kind today is `@mode(...)`. Returns the listed
+/// mode names. Other annotation names are recorded as an error; the
+/// names inside the parens are still returned so we keep going.
 fn read_mode_pre<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>) -> Vec<String> {
     r.expect_enter(RuleKind::ModePre);
-    let _at = r.next_token();
     let name_tok = r.next_token();
-    let _lparen = r.next_token();
     let mut args: Vec<String> = Vec::new();
-    let first = r.next_token();
-    args.push(first.text.into_owned());
-    while r.eat_token(TokenKind::Comma).is_some() {
+    while r.peek_token_label("m") {
         let arg = r.next_token();
         args.push(arg.text.into_owned());
     }
-    let _rparen = r.next_token();
     r.expect_exit(RuleKind::ModePre);
 
     let kind = name_tok.text.as_ref();
@@ -219,8 +240,6 @@ fn read_decl<'a, I: Iterator<Item = Event<'a>>>(
     let initial = initial_letter(&name);
     let is_token = initial.map_or(false, |c| c.is_ascii_uppercase());
 
-    let _eq = r.next_token();
-
     let (expr, pattern) = if is_token {
         (None, Some(read_pattern_alt(r)))
     } else {
@@ -228,10 +247,10 @@ fn read_decl<'a, I: Iterator<Item = Event<'a>>>(
     };
 
     let actions_raw = read_actions(r);
-    let semi = r.next_token();
+    let exit_span = r.peek_span();
     r.expect_exit(RuleKind::Decl);
 
-    let decl_span = Span::join(name_tok.span, semi.span);
+    let decl_span = Span::join(name_tok.span, exit_span);
 
     // Resolve `-> ...` actions into `(skip, mode_actions)`. Mode actions
     // are kept as a sequence (in source order) so combinations like
@@ -246,10 +265,9 @@ fn read_decl<'a, I: Iterator<Item = Event<'a>>>(
     for raw in &actions_raw {
         match raw.name.as_str() {
             "skip" => {
-                if raw.arg.is_some() {
-                    r.issues.push(
-                        Error::new("`skip` action takes no argument").at(raw.span),
-                    );
+                if !raw.args.is_empty() {
+                    r.issues
+                        .push(Error::new("`skip` action takes no argument").at(raw.span));
                 }
                 if skip {
                     r.issues
@@ -259,21 +277,34 @@ fn read_decl<'a, I: Iterator<Item = Event<'a>>>(
                 skip_span.get_or_insert(raw.span);
             }
             "push" => {
-                let Some(arg) = raw.arg.clone() else {
-                    r.issues.push(
-                        Error::new("`push` action requires a mode name argument: `push(mode)`")
+                let arg = match raw.args.as_slice() {
+                    [a] => a.clone(),
+                    [] => {
+                        r.issues.push(
+                            Error::new("`push` action requires a mode name argument: `push(mode)`")
+                                .at(raw.span),
+                        );
+                        continue;
+                    }
+                    _ => {
+                        r.issues.push(
+                            Error::new(format!(
+                                "`push` action takes exactly one argument, got {}; \
+                                 to push multiple modes, use `push(a), push(b)`",
+                                raw.args.len()
+                            ))
                             .at(raw.span),
-                    );
-                    continue;
+                        );
+                        continue;
+                    }
                 };
                 mode_actions.push(ModeAction::Push(arg));
                 first_mode_action_span.get_or_insert(raw.span);
             }
             "pop" => {
-                if raw.arg.is_some() {
-                    r.issues.push(
-                        Error::new("`pop` action takes no argument").at(raw.span),
-                    );
+                if !raw.args.is_empty() {
+                    r.issues
+                        .push(Error::new("`pop` action takes no argument").at(raw.span));
                 }
                 mode_actions.push(ModeAction::Pop);
                 first_mode_action_span.get_or_insert(raw.span);
@@ -293,8 +324,7 @@ fn read_decl<'a, I: Iterator<Item = Event<'a>>>(
     if skip && !mode_actions.is_empty() {
         let span = first_mode_action_span.or(skip_span).unwrap_or(decl_span);
         r.issues.push(
-            Error::new("`skip` cannot be combined with `push` or `pop` on the same token")
-                .at(span),
+            Error::new("`skip` cannot be combined with `push` or `pop` on the same token").at(span),
         );
     }
 
@@ -374,11 +404,13 @@ fn read_decl<'a, I: Iterator<Item = Event<'a>>>(
     }
 }
 
-/// One raw `-> action` entry, before semantic resolution. The `arg`
-/// captures the optional `(name)` payload (e.g. `push(mode_name)`).
+/// One raw `-> action` entry, before semantic resolution. `args`
+/// captures the optional comma-separated payload (e.g.
+/// `push(mode_name)`). The grammar admits 0 or more args; each action
+/// then validates its own arity in `read_decl`.
 struct RawAction {
     name: String,
-    arg: Option<String>,
+    args: Vec<String>,
     span: Span,
 }
 
@@ -389,36 +421,35 @@ fn read_actions<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>) -> Vec
         return Vec::new();
     }
     r.expect_enter(RuleKind::Actions);
-    let _arrow = r.next_token();
     let mut out = Vec::new();
     while r.peek_enter() == Some(RuleKind::Action) {
         out.push(read_action(r));
-        if r.eat_token(TokenKind::Comma).is_none() {
-            break;
-        }
     }
     r.expect_exit(RuleKind::Actions);
     out
 }
 
-/// `action = IDENT action_arg?`, `action_arg = LPAREN IDENT RPAREN`.
+/// `action = name:IDENT action_arg?`,
+/// `action_arg = LPAREN arg:IDENT (COMMA arg:IDENT)* RPAREN`.
+///
+/// The grammar accepts any arity (0 args = no parens, ≥1 = parens). Per-action
+/// arity rules (e.g. `pop` takes none, `push` takes exactly one) are enforced
+/// later in [`read_decl`].
 fn read_action<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>) -> RawAction {
     r.expect_enter(RuleKind::Action);
     let name_tok = r.next_token();
-    let arg = if r.peek_enter() == Some(RuleKind::ActionArg) {
+    let mut args: Vec<String> = Vec::new();
+    if r.peek_enter() == Some(RuleKind::ActionArg) {
         r.expect_enter(RuleKind::ActionArg);
-        let _lparen = r.next_token();
-        let arg_tok = r.next_token();
-        let _rparen = r.next_token();
+        while r.peek_token_label("arg") {
+            args.push(r.next_token().text.into_owned());
+        }
         r.expect_exit(RuleKind::ActionArg);
-        Some(arg_tok.text.into_owned())
-    } else {
-        None
-    };
+    }
     r.expect_exit(RuleKind::Action);
     RawAction {
         name: name_tok.text.into_owned(),
-        arg,
+        args,
         span: name_tok.span,
     }
 }
@@ -429,8 +460,8 @@ fn initial_letter(name: &str) -> Option<char> {
 
 fn read_alt<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>) -> Expr {
     r.expect_enter(RuleKind::AltExpr);
-    let mut xs = vec![read_seq(r)];
-    while r.eat_token(TokenKind::Pipe).is_some() {
+    let mut xs = Vec::new();
+    while r.peek_enter() == Some(RuleKind::SeqExpr) {
         xs.push(read_seq(r));
     }
     r.expect_exit(RuleKind::AltExpr);
@@ -483,14 +514,8 @@ fn read_seq<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>) -> Expr {
 /// Peek for an optional `LABEL` token at the start of the next postfix.
 /// Consumes it (and strips the trailing `:`) on a hit; returns `None`
 /// otherwise.
-fn peek_label<'a, I: Iterator<Item = Event<'a>>>(
-    r: &mut Reader<'a, I>,
-) -> Option<(String, Span)> {
-    let is_label = matches!(
-        r.peek(),
-        Some(Event::Token(t)) if t.kind == Some(TokenKind::Label)
-    );
-    if !is_label {
+fn peek_label<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>) -> Option<(String, Span)> {
+    if !r.peek_token_label("lbl") {
         return None;
     }
     let tok = r.next_token();
@@ -538,15 +563,15 @@ fn read_primary_atom<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>) -
         }
         _ => {
             let tok = r.next_token();
-            match tok.kind {
-                k if k == Some(TokenKind::Ident) => {
+            match tok.label {
+                Some("ref") => {
                     if initial_letter(&tok.text).map_or(false, |c| c.is_ascii_uppercase()) {
                         Expr::Token(tok.text.into_owned())
                     } else {
                         Expr::Rule(tok.text.into_owned())
                     }
                 }
-                k if k == Some(TokenKind::String) => {
+                Some("string") => {
                     r.issues.push(
                         Error::new("string literal atoms are only valid inside token declarations")
                             .at(tok.span),
@@ -579,15 +604,12 @@ fn skip_until_exit<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>, kin
     }
 }
 
-
 /// Read the contents of a `(... )` group, leaving any trailing
 /// quantifiers for the caller to apply. Splitting it lets the caller
 /// wrap the bare group with a label before quantifying.
 fn read_group_inner<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>) -> Expr {
     r.expect_enter(RuleKind::Group);
-    let _lparen = r.next_token();
     let inner = read_alt(r);
-    let _rparen = r.next_token();
     r.expect_exit(RuleKind::Group);
     inner
 }
@@ -598,15 +620,15 @@ fn apply_quantifiers<'a, I: Iterator<Item = Event<'a>>>(
 ) -> Expr {
     loop {
         match r.peek() {
-            Some(Event::Token(t)) if t.kind == Some(TokenKind::Question) => {
+            Some(Event::Token(t)) if t.label == Some("q_opt") => {
                 r.advance();
                 x = Expr::Opt(Box::new(x));
             }
-            Some(Event::Token(t)) if t.kind == Some(TokenKind::Star) => {
+            Some(Event::Token(t)) if t.label == Some("q_star") => {
                 r.advance();
                 x = Expr::Star(Box::new(x));
             }
-            Some(Event::Token(t)) if t.kind == Some(TokenKind::Plus) => {
+            Some(Event::Token(t)) if t.label == Some("q_plus") => {
                 r.advance();
                 x = Expr::Plus(Box::new(x));
             }
@@ -618,8 +640,8 @@ fn apply_quantifiers<'a, I: Iterator<Item = Event<'a>>>(
 
 fn read_pattern_alt<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>) -> TokenPattern {
     r.expect_enter(RuleKind::AltExpr);
-    let mut xs = vec![read_pattern_seq(r)];
-    while r.eat_token(TokenKind::Pipe).is_some() {
+    let mut xs = Vec::new();
+    while r.peek_enter() == Some(RuleKind::SeqExpr) {
         xs.push(read_pattern_seq(r));
     }
     r.expect_exit(RuleKind::AltExpr);
@@ -649,9 +671,9 @@ fn read_pattern_primary<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>
 
         _ => {
             let tok = r.next_token();
-            match tok.kind {
-                k if k == Some(TokenKind::Ident) => TokenPattern::Ref(tok.text.into_owned()),
-                k if k == Some(TokenKind::String) => {
+            match tok.label {
+                Some("ref") => TokenPattern::Ref(tok.text.into_owned()),
+                Some("string") => {
                     TokenPattern::Literal(unquote_string(&tok.text, tok.span, &mut r.issues))
                 }
                 _ => {
@@ -670,51 +692,49 @@ fn read_pattern_primary<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>
 fn read_char_primary<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>) -> TokenPattern {
     r.expect_enter(RuleKind::CharPrimary);
     let first = r.next_token();
-    let p = if first.kind == Some(TokenKind::Dot) {
-        TokenPattern::Class(CharClass {
+    let p = match first.label {
+        Some("dot") => TokenPattern::Class(CharClass {
             negated: true,
             items: Vec::new(),
-        })
-    } else if first.kind == Some(TokenKind::Char) {
-        let lo = unquote_char(&first.text, first.span, &mut r.issues);
-        if r.eat_token(TokenKind::Dotdot).is_some() {
-            let hi_tok = r.next_token();
-            let hi = unquote_char(&hi_tok.text, hi_tok.span, &mut r.issues);
-            TokenPattern::Class(CharClass {
-                negated: false,
-                items: vec![ClassItem::Range(lo, hi)],
-            })
-        } else {
-            let ch = char::from_u32(lo).unwrap_or('\0');
-            let mut buf = String::new();
-            buf.push(ch);
-            TokenPattern::Literal(buf)
+        }),
+        Some("lo") => {
+            let lo = unquote_char(&first.text, first.span, &mut r.issues);
+            if r.peek_token_label("hi") {
+                let hi_tok = r.next_token();
+                let hi = unquote_char(&hi_tok.text, hi_tok.span, &mut r.issues);
+                TokenPattern::Class(CharClass {
+                    negated: false,
+                    items: vec![ClassItem::Range(lo, hi)],
+                })
+            } else {
+                let ch = char::from_u32(lo).unwrap_or('\0');
+                let mut buf = String::new();
+                buf.push(ch);
+                TokenPattern::Literal(buf)
+            }
         }
-    } else {
-        r.issues
-            .push(Error::new(format!("unexpected atom token `{}`", first.text)).at(first.span));
-        TokenPattern::Empty
+        _ => {
+            r.issues
+                .push(Error::new(format!("unexpected atom token `{}`", first.text)).at(first.span));
+            TokenPattern::Empty
+        }
     };
     r.expect_exit(RuleKind::CharPrimary);
     p
 }
 
 fn read_neg_class<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>) -> TokenPattern {
+    let neg_class_span = r.peek_span();
     r.expect_enter(RuleKind::NegClass);
-    let bang = r.next_token();
     let mut items: Vec<ClassItem> = Vec::new();
     let mut strings: Vec<String> = Vec::new();
 
-    if r.eat_token(TokenKind::Lparen).is_some() {
-        loop {
-            collect_neg_atom(r, &mut items, &mut strings, bang.span);
-            if r.eat_token(TokenKind::Pipe).is_none() {
-                break;
-            }
-        }
-        r.eat_token(TokenKind::Rparen);
-    } else {
-        collect_neg_atom(r, &mut items, &mut strings, bang.span);
+    // Both `!atom` and `!(atom | atom | ...)` flatten to the same
+    // `_neg_atom*` event sequence under `LabeledOnly` — we just keep
+    // collecting until the `Exit(NegClass)`. A `_neg_atom` is a fragment
+    // that surfaces either as `Enter(CharPrimary)` or as a `Token@string`.
+    while r.peek_enter() == Some(RuleKind::CharPrimary) || r.peek_token_label("string") {
+        collect_neg_atom(r, &mut items, &mut strings, neg_class_span);
     }
     r.expect_exit(RuleKind::NegClass);
     if strings.is_empty() {
@@ -727,16 +747,13 @@ fn read_neg_class<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>) -> T
         // handle ranges-on-each-position; ranges'd have to expand to
         // per-codepoint patterns, which can blow up. Single chars and
         // string literals are fine.
-        if items
-            .iter()
-            .any(|it| matches!(it, ClassItem::Range(_, _)))
-        {
+        if items.iter().any(|it| matches!(it, ClassItem::Range(_, _))) {
             r.issues.push(
                 Error::new(
                     "character ranges are not supported alongside string atoms inside `!(...)`; \
                      split the negation into a separate `!('a'..'z')` group",
                 )
-                .at(bang.span),
+                .at(neg_class_span),
             );
         }
         TokenPattern::NegLook {
@@ -759,9 +776,9 @@ fn collect_neg_atom<'a, I: Iterator<Item = Event<'a>>>(
     fallback_span: Span,
 ) {
     // `_neg_atom` is a fragment, so its events are inlined: we see
-    // either `Enter(CharPrimary)` ... or a bare `Token(STRING)` here.
+    // either `Enter(CharPrimary)` ... or a bare `Token@string` here.
     if let Some(Event::Token(t)) = r.peek() {
-        if t.kind == Some(TokenKind::String) {
+        if t.label == Some("string") {
             let tok = r.next_token();
             let text_owned = tok.text.clone().into_owned();
             let s = unquote_string(&text_owned, tok.span, &mut r.issues);
@@ -806,8 +823,9 @@ fn collect_neg_atom<'a, I: Iterator<Item = Event<'a>>>(
             }
         }
         _ => {
-            r.issues
-                .push(Error::new("expected a character primary or string in negation").at(fallback_span));
+            r.issues.push(
+                Error::new("expected a character primary or string in negation").at(fallback_span),
+            );
         }
     }
 }
@@ -897,9 +915,7 @@ fn parse_unicode_escape(
 
 fn read_pattern_group<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>) -> TokenPattern {
     r.expect_enter(RuleKind::Group);
-    let _lparen = r.next_token();
     let inner = read_pattern_alt(r);
-    let _rparen = r.next_token();
     r.expect_exit(RuleKind::Group);
     apply_pattern_quantifiers(r, inner)
 }
@@ -910,15 +926,15 @@ fn apply_pattern_quantifiers<'a, I: Iterator<Item = Event<'a>>>(
 ) -> TokenPattern {
     loop {
         match r.peek() {
-            Some(Event::Token(t)) if t.kind == Some(TokenKind::Question) => {
+            Some(Event::Token(t)) if t.label == Some("q_opt") => {
                 r.advance();
                 p = TokenPattern::Opt(Box::new(p));
             }
-            Some(Event::Token(t)) if t.kind == Some(TokenKind::Star) => {
+            Some(Event::Token(t)) if t.label == Some("q_star") => {
                 r.advance();
                 p = TokenPattern::Star(Box::new(p));
             }
-            Some(Event::Token(t)) if t.kind == Some(TokenKind::Plus) => {
+            Some(Event::Token(t)) if t.label == Some("q_plus") => {
                 r.advance();
                 p = TokenPattern::Plus(Box::new(p));
             }
@@ -1241,7 +1257,8 @@ mod tests {
             .err()
             .expect("err");
         assert!(
-            errs.iter().any(|e| e.message.contains("ranges are not supported")),
+            errs.iter()
+                .any(|e| e.message.contains("ranges are not supported")),
             "diagnostics: {:?}",
             errs.iter().map(|e| &e.message).collect::<Vec<_>>()
         );
@@ -1258,12 +1275,13 @@ mod tests {
 
     #[test]
     fn inline_mode_pre_tags_single_token() {
-        let g = parse_grammar(
-            "@mode(tag) NAME = \"x\"; OUTSIDE = \"y\"; main = NAME OUTSIDE;",
-        )
-        .expect("ok");
+        let g = parse_grammar("@mode(tag) NAME = \"x\"; OUTSIDE = \"y\"; main = NAME OUTSIDE;")
+            .expect("ok");
         assert_eq!(g.tokens.get("NAME").unwrap().modes, vec!["tag".to_string()]);
-        assert_eq!(g.tokens.get("OUTSIDE").unwrap().modes, vec!["default".to_string()]);
+        assert_eq!(
+            g.tokens.get("OUTSIDE").unwrap().modes,
+            vec!["default".to_string()]
+        );
     }
 
     // ----- Labels ------------------------------------------------------
@@ -1305,10 +1323,8 @@ mod tests {
 
     #[test]
     fn mode_pre_with_multiple_modes_records_each() {
-        let g = parse_grammar(
-            "@mode(a, b, c) X = \"x\"; @mode(a) Y = \"y\"; main = X Y;",
-        )
-        .expect("ok");
+        let g =
+            parse_grammar("@mode(a, b, c) X = \"x\"; @mode(a) Y = \"y\"; main = X Y;").expect("ok");
         assert_eq!(
             g.tokens.get("X").unwrap().modes,
             vec!["a".to_string(), "b".to_string(), "c".to_string()]
@@ -1329,15 +1345,16 @@ mod tests {
         let g = parse_grammar(src).expect("ok");
         assert_eq!(g.tokens.get("NAME").unwrap().modes, vec!["tag".to_string()]);
         assert_eq!(g.tokens.get("EQ_T").unwrap().modes, vec!["tag".to_string()]);
-        assert_eq!(g.tokens.get("OUTSIDE").unwrap().modes, vec!["default".to_string()]);
+        assert_eq!(
+            g.tokens.get("OUTSIDE").unwrap().modes,
+            vec!["default".to_string()]
+        );
     }
 
     #[test]
     fn push_action_records_mode_action() {
-        let g = parse_grammar(
-            "ENTER = \"enter\" -> push(tag); T = \"t\"; main = ENTER T;",
-        )
-        .expect("ok");
+        let g = parse_grammar("ENTER = \"enter\" -> push(tag); T = \"t\"; main = ENTER T;")
+            .expect("ok");
         let enter = g.tokens.get("ENTER").unwrap();
         assert_eq!(enter.mode_actions, vec![ModeAction::Push("tag".into())]);
         assert!(!enter.skip);
@@ -1345,10 +1362,8 @@ mod tests {
 
     #[test]
     fn pop_action_records_mode_action() {
-        let g = parse_grammar(
-            "@mode(tag) EXIT = \"exit\" -> pop; T = \"t\"; main = T;",
-        )
-        .expect("ok");
+        let g =
+            parse_grammar("@mode(tag) EXIT = \"exit\" -> pop; T = \"t\"; main = T;").expect("ok");
         let exit = g.tokens.get("EXIT").unwrap();
         assert_eq!(exit.mode_actions, vec![ModeAction::Pop]);
     }
@@ -1357,10 +1372,8 @@ mod tests {
     fn pop_then_push_is_a_swap_top() {
         // `-> pop, push(b)` replaces the top of the stack — both actions
         // are kept in source order so codegen can emit them as written.
-        let g = parse_grammar(
-            "@mode(a) SWAP = \"s\" -> pop, push(b); T = \"t\"; main = T;",
-        )
-        .expect("ok");
+        let g = parse_grammar("@mode(a) SWAP = \"s\" -> pop, push(b); T = \"t\"; main = T;")
+            .expect("ok");
         let swap = g.tokens.get("SWAP").unwrap();
         assert_eq!(
             swap.mode_actions,
@@ -1370,10 +1383,8 @@ mod tests {
 
     #[test]
     fn multiple_pushes_are_kept_in_order() {
-        let g = parse_grammar(
-            "DEEP = \"d\" -> push(a), push(b); T = \"t\"; main = T;",
-        )
-        .expect("ok");
+        let g =
+            parse_grammar("DEEP = \"d\" -> push(a), push(b); T = \"t\"; main = T;").expect("ok");
         let deep = g.tokens.get("DEEP").unwrap();
         assert_eq!(
             deep.mode_actions,
@@ -1383,11 +1394,9 @@ mod tests {
 
     #[test]
     fn skip_with_push_is_rejected() {
-        let errs = parse_grammar(
-            "BUTTS = \"butts\" -> skip, push(foo); T = \"t\"; main = T;",
-        )
-        .err()
-        .expect("err");
+        let errs = parse_grammar("BUTTS = \"butts\" -> skip, push(foo); T = \"t\"; main = T;")
+            .err()
+            .expect("err");
         assert!(errs
             .iter()
             .any(|e| e.message.contains("`skip` cannot be combined")));
@@ -1406,6 +1415,36 @@ mod tests {
     #[test]
     fn pop_with_arg_is_rejected() {
         let errs = parse_grammar("EXIT = \"e\" -> pop(foo); T = \"t\"; main = T;")
+            .err()
+            .expect("err");
+        assert!(errs
+            .iter()
+            .any(|e| e.message.contains("`pop` action takes no argument")));
+    }
+
+    #[test]
+    fn push_with_two_args_parses_but_arity_check_rejects_it() {
+        // The grammar now accepts `action(a, b, c)` syntax; `push` itself
+        // still requires exactly one mode name, so the multi-arg form is
+        // surfaced as an arity error, not a parse error.
+        let errs =
+            parse_grammar("@mode(default) ENTER = \"<\" -> push(a, b); T = \"t\"; main = T;")
+                .err()
+                .expect("err");
+        assert!(
+            errs.iter().any(|e| e
+                .message
+                .contains("`push` action takes exactly one argument")),
+            "expected arity error, got {:?}",
+            errs.iter().map(|e| &e.message).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn pop_with_two_args_is_rejected_with_existing_message() {
+        // Multi-arg `pop(a, b)` now parses; the arg-rejection error is the
+        // same one `pop(foo)` already produces.
+        let errs = parse_grammar("EXIT = \"e\" -> pop(a, b); T = \"t\"; main = T;")
             .err()
             .expect("err");
         assert!(errs
@@ -1470,14 +1509,48 @@ mod tests {
     }
 
     #[test]
+    fn parser_config_labeled_only_drops_punctuation_keeps_labeled_idents() {
+        use crate::grammar::generated;
+        use parsuna_rt::LabeledOnly;
+
+        // `decl = name:IDENT EQ alt_expr actions? SEMI;` and
+        // `atom = ref:IDENT | ...` — so for "x = y;" the labeled token
+        // events are exactly the two IDENTs (`name` for "x", `ref` for
+        // "y"); EQ and SEMI are unlabeled punctuation that LabeledOnly
+        // must drop.
+        let p = generated::parse_file_from_str_with::<LabeledOnly>("x = y;");
+        let tokens: Vec<_> = p
+            .into_iter()
+            .filter_map(|e| match e {
+                generated::Event::Token(t) => Some((t.kind, t.label, t.text.into_owned())),
+                _ => None,
+            })
+            .collect();
+        let expected: Vec<_> = vec![
+            (
+                Some(generated::TokenKind::Ident),
+                Some("name"),
+                "x".to_string(),
+            ),
+            (
+                Some(generated::TokenKind::Ident),
+                Some("ref"),
+                "y".to_string(),
+            ),
+        ];
+        assert_eq!(
+            tokens, expected,
+            "LabeledOnly should yield only labeled tokens",
+        );
+    }
+
+    #[test]
     fn mode_pre_on_fragment_is_metadata_only() {
         // A fragment with `@mode(foo)` carries the tag for completeness,
         // but since fragments are inlined at lex time the field is
         // effectively metadata.
-        let g = parse_grammar(
-            "@mode(tag) _NSTART = 'A'..'Z'; NAME = _NSTART; main = NAME;",
-        )
-        .expect("ok");
+        let g = parse_grammar("@mode(tag) _NSTART = 'A'..'Z'; NAME = _NSTART; main = NAME;")
+            .expect("ok");
         let frag = g.tokens.get("_NSTART").expect("_NSTART");
         assert!(frag.is_fragment);
         assert_eq!(frag.modes, vec!["tag".to_string()]);

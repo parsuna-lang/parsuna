@@ -505,13 +505,23 @@ fn emit_instr(s: &mut String, st: &StateTable, op: &Instr) {
             )
             .unwrap();
         }
-        Instr::Expect { kind, token_name, sync, .. } => {
+        Instr::Expect {
+            kind,
+            token_name,
+            sync,
+            label,
+        } => {
+            let label_arg = match label {
+                Some(name) => format!("{:?}", name),
+                None => "\"\"".to_string(),
+            };
             writeln!(
                 s,
-                "\t\tevent = p.TryConsume(uint16({}), sync_{}, {:?}); emitted = true",
+                "\t\tevent = p.TryConsumeLabeled(uint16({}), sync_{}, {:?}, {}); emitted = true",
                 token_const(st, *kind),
                 sync,
-                token_name
+                token_name,
+                label_arg,
             )
             .unwrap();
         }
@@ -651,7 +661,17 @@ fn emit_public_api(s: &mut String, st: &StateTable) {
         .unwrap();
         writeln!(
             s,
-            "// Use Parse{cap}WithOptions and rt.Options{{DropSkips: true}} to silently consume them."
+            "// Use Parse{cap}WithOptions and rt.Options{{DropSkips: true}} to silently consume them,"
+        )
+        .unwrap();
+        writeln!(
+            s,
+            "// or rt.Options{{DropUnlabeledTokens: true}} to drop every token that didn't"
+        )
+        .unwrap();
+        writeln!(
+            s,
+            "// match a name:NAME-labelled position — leaving only labelled tokens and structural events."
         )
         .unwrap();
         writeln!(s, "func Parse{cap}(r io.Reader) *rt.Parser {{").unwrap();

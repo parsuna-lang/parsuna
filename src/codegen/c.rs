@@ -831,11 +831,20 @@ fn emit_instr(c: &mut String, st: &StateTable, upper: &str, op: &Instr, ind: &st
             )
             .unwrap()
         }
-        Instr::Expect { kind, token_name, sync, .. } => {
+        Instr::Expect {
+            kind,
+            token_name,
+            sync,
+            label,
+        } => {
             let name = c_token_name(st, upper, *kind);
+            let label_arg = match label {
+                Some(s) => format!("\"{}\"", s),
+                None => "NULL".to_string(),
+            };
             writeln!(
                 c,
-                "{ind}*out = try_consume(p, {name}, SYNC_{sync}, \"{token_name}\"); emitted = 1;"
+                "{ind}*out = try_consume_labeled(p, {name}, SYNC_{sync}, \"{token_name}\", {label_arg}); emitted = 1;"
             )
             .unwrap()
         }

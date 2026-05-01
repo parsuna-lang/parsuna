@@ -111,8 +111,28 @@ public final class Cursor {
      * enough to inline at every call site.
      */
     public Event tryConsume(int kind, int[] sync, String name) {
+        return tryConsumeLabeled(kind, sync, name, null);
+    }
+
+    /**
+     * {@link #tryConsume} variant that stamps the supplied {@code label}
+     * on the consumed token's {@link Token#label()} on the success path.
+     * Used by generated dispatch for {@code name:NAME} positions in the
+     * grammar; the label travels through to the consumer's event stream
+     * so they can identify the position by name without tracking
+     * surrounding rule context. Pass {@code label = null} for unlabeled
+     * positions.
+     */
+    public Event tryConsumeLabeled(int kind, int[] sync, String name, String label) {
         Parser pp = p;
         if (pp.lookBuf[0].kind() == kind) {
+            // Stamp the label directly on the slot's token before
+            // consume rotates it out — keeps the unlabeled hot path
+            // branch-free (the field stays null from the lex-time
+            // reset in Token.set).
+            if (label != null) {
+                pp.lookBuf[0].label = label;
+            }
             return pp.consume();
         }
         return consumeMiss(pp, sync, kind, name);
