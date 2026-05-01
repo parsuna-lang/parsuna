@@ -8,6 +8,7 @@
 
 pub mod first_follow;
 mod lints;
+mod mode_check;
 mod shadow;
 mod validate;
 
@@ -97,6 +98,7 @@ fn analyze_inner(g: Grammar, diags: &mut Vec<Diagnostic>) -> Result<AnalyzedGram
 
     lints::run(&g, diags);
     shadow::run(&g, diags);
+    mode_check::run(&g, diags);
     bail_on_errors(diags)?;
 
     let (k, nullable, first) = first_follow::solve_lookahead(&g, diags)?;
