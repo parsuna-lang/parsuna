@@ -18,6 +18,7 @@ pub fn emit(st: &StateTable, _args: &Args) -> Vec<EmittedFile> {
     emit_prelude(&mut s, st);
     emit_token_kinds(&mut s, st);
     emit_rule_kinds(&mut s, st);
+    emit_label_kinds(&mut s, st);
     emit_reexports(&mut s);
     emit_compiled_dfa(&mut s, st);
     emit_tables(&mut s, st);
@@ -149,15 +150,79 @@ fn emit_rule_kinds(s: &mut String, st: &StateTable) {
     writeln!(s).unwrap();
 }
 
+fn emit_label_kinds(s: &mut String, st: &StateTable) {
+    writeln!(
+        s,
+        "/// One variant per distinct grammar label (`name:NAME` form)."
+    )
+    .unwrap();
+    writeln!(s, "///").unwrap();
+    writeln!(
+        s,
+        "/// `Token::label` is `Option<LabelKind>`; consumers compare with"
+    )
+    .unwrap();
+    writeln!(
+        s,
+        "/// `tok.label == Some(LabelKind::Foo)` to dispatch on the position"
+    )
+    .unwrap();
+    writeln!(s, "/// name without any string handling.").unwrap();
+    writeln!(s, "#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]").unwrap();
+    writeln!(s, "#[repr(u16)]").unwrap();
+    writeln!(s, "pub enum LabelKind {{").unwrap();
+    for (i, n) in st.labels.iter().enumerate() {
+        writeln!(s, "    {} = {},", pascal(n), i + 1).unwrap();
+    }
+    if st.labels.is_empty() {
+        // Empty enum is illegal in Rust; emit a stub variant nobody can
+        // construct. The grammar has no labels so no `expect_labeled`
+        // call site references it.
+        writeln!(s, "    #[doc(hidden)] _Empty = 0xFFFF,").unwrap();
+    }
+    writeln!(s, "}}").unwrap();
+    writeln!(s).unwrap();
+    writeln!(s, "impl LabelKind {{").unwrap();
+    writeln!(
+        s,
+        "    /// Numeric discriminant, equal to `self as u16`."
+    )
+    .unwrap();
+    writeln!(s, "    pub const fn id(self) -> u16 {{ self as u16 }}").unwrap();
+    writeln!(s, "}}").unwrap();
+    writeln!(s).unwrap();
+    writeln!(s, "impl parsuna_rt::LabelKindEnum for LabelKind {{").unwrap();
+    writeln!(s, "    fn name(self) -> &'static str {{").unwrap();
+    writeln!(s, "        match self {{").unwrap();
+    for n in &st.labels {
+        writeln!(
+            s,
+            "            LabelKind::{} => \"{}\",",
+            pascal(n),
+            n
+        )
+        .unwrap();
+    }
+    if st.labels.is_empty() {
+        writeln!(s, "            LabelKind::_Empty => \"\",").unwrap();
+    }
+    writeln!(s, "        }}").unwrap();
+    writeln!(s, "    }}").unwrap();
+    writeln!(s, "}}").unwrap();
+    writeln!(s).unwrap();
+}
+
 fn emit_reexports(s: &mut String) {
     s.push_str("\n\n");
 
     s.push_str("/// Re-exports of the runtime types used by this parser.\n");
     s.push_str("pub use parsuna_rt::{Span, Pos, Error};\n");
-    s.push_str("/// Parse event carrying this grammar's token and rule kinds.\n");
-    s.push_str("pub type Event<'a> = parsuna_rt::Event<'a, TokenKind, RuleKind>;\n");
-    s.push_str("/// A lexed token with this grammar's [`TokenKind`].\n");
-    s.push_str("pub type Token<'a> = parsuna_rt::Token<'a, TokenKind>;\n\n");
+    s.push_str("/// Parse event carrying this grammar's token, rule, and label kinds.\n");
+    s.push_str(
+        "pub type Event<'a> = parsuna_rt::Event<'a, TokenKind, RuleKind, LabelKind>;\n",
+    );
+    s.push_str("/// A lexed token with this grammar's [`TokenKind`] and [`LabelKind`].\n");
+    s.push_str("pub type Token<'a> = parsuna_rt::Token<'a, TokenKind, LabelKind>;\n\n");
 }
 
 fn emit_compiled_dfa(s: &mut String, st: &StateTable) {
@@ -482,7 +547,10 @@ fn emit_instr(s: &mut String, st: &StateTable, op: &Instr, ind: &str) {
             label,
         } => {
             let label_arg = match label {
-                Some(name) => format!("Some({:?})", name),
+                Some(id) => format!(
+                    "Some(LabelKind::{})",
+                    pascal(&st.labels[(*id as usize) - 1])
+                ),
                 None => "None".to_string(),
             };
             writeln!(
@@ -659,6 +727,7 @@ fn emit_step(s: &mut String, st: &StateTable) {
     writeln!(s, "impl parsuna_rt::Grammar<K> for Grammar {{").unwrap();
     writeln!(s, "    type TokenKind = TokenKind;").unwrap();
     writeln!(s, "    type RuleKind = RuleKind;").unwrap();
+    writeln!(s, "    type LabelKind = LabelKind;").unwrap();
     writeln!(s, "    const HAS_SKIPS: bool = {};", has_skips).unwrap();
     writeln!(s).unwrap();
     writeln!(s, "    #[inline(always)]").unwrap();
@@ -679,7 +748,7 @@ fn emit_step(s: &mut String, st: &StateTable) {
     writeln!(s, "    #[inline]").unwrap();
     writeln!(
         s,
-        "    fn step<'a, 'p, L: LexerBackend<'a, Self::TokenKind>, C: parsuna_rt::ParserConfig>(p: &mut parsuna_rt::Cursor<'p, 'a, L, K, Self, C>) -> Option<parsuna_rt::Event<'a, TokenKind, RuleKind>> {{"
+        "    fn step<'a, 'p, L: LexerBackend<'a, Self::TokenKind, Self::LabelKind>, C: parsuna_rt::ParserConfig>(p: &mut parsuna_rt::Cursor<'p, 'a, L, K, Self, C>) -> Option<parsuna_rt::Event<'a, TokenKind, RuleKind, LabelKind>> {{"
     )
     .unwrap();
     // One match arm per call. Each arm runs a state body's ops —
@@ -689,7 +758,7 @@ fn emit_step(s: &mut String, st: &StateTable) {
     writeln!(s, "        let mut cur = p.state();").unwrap();
     writeln!(
         s,
-        "        let mut event: Option<parsuna_rt::Event<'a, TokenKind, RuleKind>> = None;"
+        "        let mut event: Option<parsuna_rt::Event<'a, TokenKind, RuleKind, LabelKind>> = None;"
     )
     .unwrap();
     writeln!(s, "        match cur {{").unwrap();
@@ -722,7 +791,7 @@ fn emit_apply_actions(s: &mut String, st: &StateTable) {
     writeln!(s, "    #[inline]").unwrap();
     writeln!(
         s,
-        "    fn apply_actions<'a, L: parsuna_rt::LexerBackend<'a, Self::TokenKind>>(kind: Option<TokenKind>, lex: &mut L) {{"
+        "    fn apply_actions<'a, L: parsuna_rt::LexerBackend<'a, Self::TokenKind, Self::LabelKind>>(kind: Option<TokenKind>, lex: &mut L) {{"
     )
     .unwrap();
     if action_tokens.is_empty() {
@@ -765,7 +834,7 @@ fn emit_public_api(s: &mut String, st: &StateTable) {
             writeln!(s, "/// different [`parsuna_rt::ParserConfig`].").unwrap();
             writeln!(
                 s,
-                "pub fn parse_{name}_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>> {{",
+                "pub fn parse_{name}_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa, LabelKind>> {{",
             )
             .unwrap();
             writeln!(s, "    Parser::new(Scanner::new(src), ENTRY_{upper})").unwrap();
@@ -795,7 +864,7 @@ fn emit_public_api(s: &mut String, st: &StateTable) {
             .unwrap();
             writeln!(
                 s,
-                "pub fn parse_{name}_from_str_with<'a, C: parsuna_rt::ParserConfig>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>, C> {{",
+                "pub fn parse_{name}_from_str_with<'a, C: parsuna_rt::ParserConfig>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa, LabelKind>, C> {{",
             )
             .unwrap();
             writeln!(s, "    Parser::new(Scanner::new(src), ENTRY_{upper})").unwrap();
@@ -812,7 +881,7 @@ fn emit_public_api(s: &mut String, st: &StateTable) {
             writeln!(s, "/// input size. See [`parse_{name}_from_reader_with`] to pick a config.").unwrap();
             writeln!(
                 s,
-                "pub fn parse_{name}_from_reader<R: Read>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>> {{",
+                "pub fn parse_{name}_from_reader<R: Read>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa, LabelKind>> {{",
             )
             .unwrap();
             writeln!(s, "    Parser::new(StreamingLexer::new(reader), ENTRY_{upper})").unwrap();
@@ -832,7 +901,7 @@ fn emit_public_api(s: &mut String, st: &StateTable) {
             .unwrap();
             writeln!(
                 s,
-                "pub fn parse_{name}_from_reader_with<R: Read, C: parsuna_rt::ParserConfig>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>, C> {{",
+                "pub fn parse_{name}_from_reader_with<R: Read, C: parsuna_rt::ParserConfig>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa, LabelKind>, C> {{",
             )
             .unwrap();
             writeln!(s, "    Parser::new(StreamingLexer::new(reader), ENTRY_{upper})").unwrap();

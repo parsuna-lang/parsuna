@@ -120,14 +120,62 @@ impl parsuna_rt::RuleKindEnum for RuleKind {
     }
 }
 
+/// One variant per distinct grammar label (`name:NAME` form).
+///
+/// `Token::label` is `Option<LabelKind>`; consumers compare with
+/// `tok.label == Some(LabelKind::Foo)` to dispatch on the position
+/// name without any string handling.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[repr(u16)]
+pub enum LabelKind {
+    Kind = 1,
+    M = 2,
+    Name = 3,
+    Arg = 4,
+    Lbl = 5,
+    QOpt = 6,
+    QStar = 7,
+    QPlus = 8,
+    Ref = 9,
+    String = 10,
+    Lo = 11,
+    Hi = 12,
+    Dot = 13,
+}
+
+impl LabelKind {
+    /// Numeric discriminant, equal to `self as u16`.
+    pub const fn id(self) -> u16 { self as u16 }
+}
+
+impl parsuna_rt::LabelKindEnum for LabelKind {
+    fn name(self) -> &'static str {
+        match self {
+            LabelKind::Kind => "kind",
+            LabelKind::M => "m",
+            LabelKind::Name => "name",
+            LabelKind::Arg => "arg",
+            LabelKind::Lbl => "lbl",
+            LabelKind::QOpt => "q_opt",
+            LabelKind::QStar => "q_star",
+            LabelKind::QPlus => "q_plus",
+            LabelKind::Ref => "ref",
+            LabelKind::String => "string",
+            LabelKind::Lo => "lo",
+            LabelKind::Hi => "hi",
+            LabelKind::Dot => "dot",
+        }
+    }
+}
+
 
 
 /// Re-exports of the runtime types used by this parser.
 pub use parsuna_rt::{Span, Pos, Error};
-/// Parse event carrying this grammar's token and rule kinds.
-pub type Event<'a> = parsuna_rt::Event<'a, TokenKind, RuleKind>;
-/// A lexed token with this grammar's [`TokenKind`].
-pub type Token<'a> = parsuna_rt::Token<'a, TokenKind>;
+/// Parse event carrying this grammar's token, rule, and label kinds.
+pub type Event<'a> = parsuna_rt::Event<'a, TokenKind, RuleKind, LabelKind>;
+/// A lexed token with this grammar's [`TokenKind`] and [`LabelKind`].
+pub type Token<'a> = parsuna_rt::Token<'a, TokenKind, LabelKind>;
 
 
 /// Compiled lexer DFA for this grammar.
@@ -462,6 +510,7 @@ pub type Parser<'a, L, C = parsuna_rt::EmitSkips> = parsuna_rt::Parser<'a, L, K,
 impl parsuna_rt::Grammar<K> for Grammar {
     type TokenKind = TokenKind;
     type RuleKind = RuleKind;
+    type LabelKind = LabelKind;
     const HAS_SKIPS: bool = true;
 
     #[inline(always)]
@@ -470,9 +519,9 @@ impl parsuna_rt::Grammar<K> for Grammar {
     }
 
     #[inline]
-    fn step<'a, 'p, L: LexerBackend<'a, Self::TokenKind>, C: parsuna_rt::ParserConfig>(p: &mut parsuna_rt::Cursor<'p, 'a, L, K, Self, C>) -> Option<parsuna_rt::Event<'a, TokenKind, RuleKind>> {
+    fn step<'a, 'p, L: LexerBackend<'a, Self::TokenKind, Self::LabelKind>, C: parsuna_rt::ParserConfig>(p: &mut parsuna_rt::Cursor<'p, 'a, L, K, Self, C>) -> Option<parsuna_rt::Event<'a, TokenKind, RuleKind, LabelKind>> {
         let mut cur = p.state();
-        let mut event: Option<parsuna_rt::Event<'a, TokenKind, RuleKind>> = None;
+        let mut event: Option<parsuna_rt::Event<'a, TokenKind, RuleKind, LabelKind>> = None;
         match cur {
             1 => { // file:enter
                 event = Some(p.enter(RuleKind::File));
@@ -547,7 +596,7 @@ impl parsuna_rt::Grammar<K> for Grammar {
                 cur = 11;
             }
             11 => { // mode_pre:expect:IDENT@kind
-                event = Some(p.expect_labeled(TokenKind::Ident, SYNC_1, "expected IDENT", Some("kind")));
+                event = Some(p.expect_labeled(TokenKind::Ident, SYNC_1, "expected IDENT", Some(LabelKind::Kind)));
                 cur = 12;
             }
             12 => { // mode_pre:expect:LPAREN
@@ -555,7 +604,7 @@ impl parsuna_rt::Grammar<K> for Grammar {
                 cur = 13;
             }
             13 => { // mode_pre:expect:IDENT@m
-                event = Some(p.expect_labeled(TokenKind::Ident, SYNC_1, "expected IDENT", Some("m")));
+                event = Some(p.expect_labeled(TokenKind::Ident, SYNC_1, "expected IDENT", Some(LabelKind::M)));
                 cur = 14;
             }
             14 => { // mode_pre:star
@@ -579,7 +628,7 @@ impl parsuna_rt::Grammar<K> for Grammar {
                 cur = p.ret();
             }
             17 => { // mode_pre:star-body:expect:IDENT@m
-                event = Some(p.expect_labeled(TokenKind::Ident, SYNC_1, "expected IDENT", Some("m")));
+                event = Some(p.expect_labeled(TokenKind::Ident, SYNC_1, "expected IDENT", Some(LabelKind::M)));
                 cur = p.ret();
             }
             18 => { // decl:enter
@@ -587,7 +636,7 @@ impl parsuna_rt::Grammar<K> for Grammar {
                 cur = 19;
             }
             19 => { // decl:expect:IDENT@name
-                event = Some(p.expect_labeled(TokenKind::Ident, SYNC_1, "expected IDENT", Some("name")));
+                event = Some(p.expect_labeled(TokenKind::Ident, SYNC_1, "expected IDENT", Some(LabelKind::Name)));
                 cur = 20;
             }
             20 => { // decl:expect:EQ
@@ -645,7 +694,7 @@ impl parsuna_rt::Grammar<K> for Grammar {
                 cur = 29;
             }
             29 => { // action:expect:IDENT@name
-                event = Some(p.expect_labeled(TokenKind::Ident, SYNC_2, "expected IDENT", Some("name")));
+                event = Some(p.expect_labeled(TokenKind::Ident, SYNC_2, "expected IDENT", Some(LabelKind::Name)));
                 cur = 30;
             }
             30 => { // action:opt
@@ -673,7 +722,7 @@ impl parsuna_rt::Grammar<K> for Grammar {
                 cur = 34;
             }
             34 => { // action_arg:expect:IDENT@arg
-                event = Some(p.expect_labeled(TokenKind::Ident, SYNC_2, "expected IDENT", Some("arg")));
+                event = Some(p.expect_labeled(TokenKind::Ident, SYNC_2, "expected IDENT", Some(LabelKind::Arg)));
                 cur = 35;
             }
             35 => { // action_arg:star
@@ -697,7 +746,7 @@ impl parsuna_rt::Grammar<K> for Grammar {
                 cur = p.ret();
             }
             38 => { // action_arg:star-body:expect:IDENT@arg
-                event = Some(p.expect_labeled(TokenKind::Ident, SYNC_2, "expected IDENT", Some("arg")));
+                event = Some(p.expect_labeled(TokenKind::Ident, SYNC_2, "expected IDENT", Some(LabelKind::Arg)));
                 cur = p.ret();
             }
             39 => { // alt_expr:enter
@@ -740,7 +789,7 @@ impl parsuna_rt::Grammar<K> for Grammar {
                         match p.look(0).kind {
                             Some(TokenKind::Label) => {
                                 p.push_ret(46);
-                                event = Some(p.expect_labeled(TokenKind::Label, SYNC_3, "expected LABEL", Some("lbl")));
+                                event = Some(p.expect_labeled(TokenKind::Label, SYNC_3, "expected LABEL", Some(LabelKind::Lbl)));
                                 cur = p.ret();
                             }
                             _ => {
@@ -761,7 +810,7 @@ impl parsuna_rt::Grammar<K> for Grammar {
                 match p.look(0).kind {
                     Some(TokenKind::Label) => {
                         p.push_ret(46);
-                        event = Some(p.expect_labeled(TokenKind::Label, SYNC_3, "expected LABEL", Some("lbl")));
+                        event = Some(p.expect_labeled(TokenKind::Label, SYNC_3, "expected LABEL", Some(LabelKind::Lbl)));
                         cur = p.ret();
                     }
                     _ => {
@@ -809,15 +858,15 @@ impl parsuna_rt::Grammar<K> for Grammar {
                         p.push_ret(47);
                         match p.look(0).kind {
                             Some(TokenKind::Question) => {
-                                event = Some(p.expect_labeled(TokenKind::Question, SYNC_3, "expected QUESTION", Some("q_opt")));
+                                event = Some(p.expect_labeled(TokenKind::Question, SYNC_3, "expected QUESTION", Some(LabelKind::QOpt)));
                                 cur = p.ret();
                             }
                             Some(TokenKind::Star) => {
-                                event = Some(p.expect_labeled(TokenKind::Star, SYNC_3, "expected STAR", Some("q_star")));
+                                event = Some(p.expect_labeled(TokenKind::Star, SYNC_3, "expected STAR", Some(LabelKind::QStar)));
                                 cur = p.ret();
                             }
                             Some(TokenKind::Plus) => {
-                                event = Some(p.expect_labeled(TokenKind::Plus, SYNC_3, "expected PLUS", Some("q_plus")));
+                                event = Some(p.expect_labeled(TokenKind::Plus, SYNC_3, "expected PLUS", Some(LabelKind::QPlus)));
                                 cur = p.ret();
                             }
                             _ => {
@@ -867,7 +916,7 @@ impl parsuna_rt::Grammar<K> for Grammar {
                     }
                     Some(TokenKind::String) => {
                         p.push_ret(54);
-                        event = Some(p.expect_labeled(TokenKind::String, SYNC_3, "expected STRING", Some("string")));
+                        event = Some(p.expect_labeled(TokenKind::String, SYNC_3, "expected STRING", Some(LabelKind::String)));
                         cur = p.ret();
                     }
                     Some(TokenKind::Char) => {
@@ -877,7 +926,7 @@ impl parsuna_rt::Grammar<K> for Grammar {
                     }
                     Some(TokenKind::Ident) => {
                         p.push_ret(54);
-                        event = Some(p.expect_labeled(TokenKind::Ident, SYNC_3, "expected IDENT", Some("ref")));
+                        event = Some(p.expect_labeled(TokenKind::Ident, SYNC_3, "expected IDENT", Some(LabelKind::Ref)));
                         cur = p.ret();
                     }
                     _ => {
@@ -899,12 +948,12 @@ impl parsuna_rt::Grammar<K> for Grammar {
                 match p.look(0).kind {
                     Some(TokenKind::Dot) => {
                         p.push_ret(57);
-                        event = Some(p.expect_labeled(TokenKind::Dot, SYNC_3, "expected DOT", Some("dot")));
+                        event = Some(p.expect_labeled(TokenKind::Dot, SYNC_3, "expected DOT", Some(LabelKind::Dot)));
                         cur = p.ret();
                     }
                     Some(TokenKind::Char) => {
                         p.push_ret(57);
-                        event = Some(p.expect_labeled(TokenKind::Char, SYNC_3, "expected CHAR", Some("lo")));
+                        event = Some(p.expect_labeled(TokenKind::Char, SYNC_3, "expected CHAR", Some(LabelKind::Lo)));
                         cur = 58;
                     }
                     _ => {
@@ -930,7 +979,7 @@ impl parsuna_rt::Grammar<K> for Grammar {
                 }
             }
             59 => { // char_primary:alt0:opt-body:expect:CHAR@hi
-                event = Some(p.expect_labeled(TokenKind::Char, SYNC_3, "expected CHAR", Some("hi")));
+                event = Some(p.expect_labeled(TokenKind::Char, SYNC_3, "expected CHAR", Some(LabelKind::Hi)));
                 cur = p.ret();
             }
             60 => { // neg_class:enter
@@ -957,7 +1006,7 @@ impl parsuna_rt::Grammar<K> for Grammar {
                                 cur = 56;
                             }
                             Some(TokenKind::String) => {
-                                event = Some(p.expect_labeled(TokenKind::String, SYNC_3, "expected STRING", Some("string")));
+                                event = Some(p.expect_labeled(TokenKind::String, SYNC_3, "expected STRING", Some(LabelKind::String)));
                                 cur = p.ret();
                             }
                             Some(TokenKind::Char) => {
@@ -979,7 +1028,7 @@ impl parsuna_rt::Grammar<K> for Grammar {
                                 cur = 56;
                             }
                             Some(TokenKind::String) => {
-                                event = Some(p.expect_labeled(TokenKind::String, SYNC_3, "expected STRING", Some("string")));
+                                event = Some(p.expect_labeled(TokenKind::String, SYNC_3, "expected STRING", Some(LabelKind::String)));
                                 cur = p.ret();
                             }
                             Some(TokenKind::Char) => {
@@ -1001,7 +1050,7 @@ impl parsuna_rt::Grammar<K> for Grammar {
                                 cur = 56;
                             }
                             Some(TokenKind::String) => {
-                                event = Some(p.expect_labeled(TokenKind::String, SYNC_3, "expected STRING", Some("string")));
+                                event = Some(p.expect_labeled(TokenKind::String, SYNC_3, "expected STRING", Some(LabelKind::String)));
                                 cur = p.ret();
                             }
                             Some(TokenKind::Char) => {
@@ -1049,7 +1098,7 @@ impl parsuna_rt::Grammar<K> for Grammar {
                         cur = 56;
                     }
                     Some(TokenKind::String) => {
-                        event = Some(p.expect_labeled(TokenKind::String, SYNC_3, "expected STRING", Some("string")));
+                        event = Some(p.expect_labeled(TokenKind::String, SYNC_3, "expected STRING", Some(LabelKind::String)));
                         cur = p.ret();
                     }
                     Some(TokenKind::Char) => {
@@ -1070,7 +1119,7 @@ impl parsuna_rt::Grammar<K> for Grammar {
     }
 
     #[inline]
-    fn apply_actions<'a, L: parsuna_rt::LexerBackend<'a, Self::TokenKind>>(kind: Option<TokenKind>, lex: &mut L) {
+    fn apply_actions<'a, L: parsuna_rt::LexerBackend<'a, Self::TokenKind, Self::LabelKind>>(kind: Option<TokenKind>, lex: &mut L) {
         let _ = (kind, lex);
     }
 }
@@ -1083,7 +1132,7 @@ impl parsuna_rt::Grammar<K> for Grammar {
 /// Skip tokens (whitespace, comments) are surfaced as
 /// `Event::Token`. Use [`parse_file_from_str_with`] to pick a
 /// different [`parsuna_rt::ParserConfig`].
-pub fn parse_file_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>> {
+pub fn parse_file_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa, LabelKind>> {
     Parser::new(Scanner::new(src), ENTRY_FILE)
 }
 
@@ -1092,7 +1141,7 @@ pub fn parse_file_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind
 /// Pin the config via turbofish: `parse_file_from_str_with::<_, parsuna_rt::DropSkips>(src)`
 /// to silently consume skip tokens. Monomorphization removes the skip-emit
 /// branch for any config whose `EMIT_SKIPS` is `false`.
-pub fn parse_file_from_str_with<'a, C: parsuna_rt::ParserConfig>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>, C> {
+pub fn parse_file_from_str_with<'a, C: parsuna_rt::ParserConfig>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa, LabelKind>, C> {
     Parser::new(Scanner::new(src), ENTRY_FILE)
 }
 
@@ -1100,14 +1149,14 @@ pub fn parse_file_from_str_with<'a, C: parsuna_rt::ParserConfig>(src: &'a str) -
 ///
 /// Streaming: tokens own their text; memory use stays bounded regardless of
 /// input size. See [`parse_file_from_reader_with`] to pick a config.
-pub fn parse_file_from_reader<R: Read>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>> {
+pub fn parse_file_from_reader<R: Read>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa, LabelKind>> {
     Parser::new(StreamingLexer::new(reader), ENTRY_FILE)
 }
 
 /// Parse the `file` rule from any [`Read`] source with a caller-chosen config.
 ///
 /// See [`parse_file_from_str_with`] for how to pick a [`parsuna_rt::ParserConfig`].
-pub fn parse_file_from_reader_with<R: Read, C: parsuna_rt::ParserConfig>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>, C> {
+pub fn parse_file_from_reader_with<R: Read, C: parsuna_rt::ParserConfig>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa, LabelKind>, C> {
     Parser::new(StreamingLexer::new(reader), ENTRY_FILE)
 }
 
@@ -1117,7 +1166,7 @@ pub fn parse_file_from_reader_with<R: Read, C: parsuna_rt::ParserConfig>(reader:
 /// Skip tokens (whitespace, comments) are surfaced as
 /// `Event::Token`. Use [`parse_item_from_str_with`] to pick a
 /// different [`parsuna_rt::ParserConfig`].
-pub fn parse_item_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>> {
+pub fn parse_item_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa, LabelKind>> {
     Parser::new(Scanner::new(src), ENTRY_ITEM)
 }
 
@@ -1126,7 +1175,7 @@ pub fn parse_item_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind
 /// Pin the config via turbofish: `parse_item_from_str_with::<_, parsuna_rt::DropSkips>(src)`
 /// to silently consume skip tokens. Monomorphization removes the skip-emit
 /// branch for any config whose `EMIT_SKIPS` is `false`.
-pub fn parse_item_from_str_with<'a, C: parsuna_rt::ParserConfig>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>, C> {
+pub fn parse_item_from_str_with<'a, C: parsuna_rt::ParserConfig>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa, LabelKind>, C> {
     Parser::new(Scanner::new(src), ENTRY_ITEM)
 }
 
@@ -1134,14 +1183,14 @@ pub fn parse_item_from_str_with<'a, C: parsuna_rt::ParserConfig>(src: &'a str) -
 ///
 /// Streaming: tokens own their text; memory use stays bounded regardless of
 /// input size. See [`parse_item_from_reader_with`] to pick a config.
-pub fn parse_item_from_reader<R: Read>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>> {
+pub fn parse_item_from_reader<R: Read>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa, LabelKind>> {
     Parser::new(StreamingLexer::new(reader), ENTRY_ITEM)
 }
 
 /// Parse the `item` rule from any [`Read`] source with a caller-chosen config.
 ///
 /// See [`parse_item_from_str_with`] for how to pick a [`parsuna_rt::ParserConfig`].
-pub fn parse_item_from_reader_with<R: Read, C: parsuna_rt::ParserConfig>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>, C> {
+pub fn parse_item_from_reader_with<R: Read, C: parsuna_rt::ParserConfig>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa, LabelKind>, C> {
     Parser::new(StreamingLexer::new(reader), ENTRY_ITEM)
 }
 
@@ -1151,7 +1200,7 @@ pub fn parse_item_from_reader_with<R: Read, C: parsuna_rt::ParserConfig>(reader:
 /// Skip tokens (whitespace, comments) are surfaced as
 /// `Event::Token`. Use [`parse_mode_pre_from_str_with`] to pick a
 /// different [`parsuna_rt::ParserConfig`].
-pub fn parse_mode_pre_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>> {
+pub fn parse_mode_pre_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa, LabelKind>> {
     Parser::new(Scanner::new(src), ENTRY_MODE_PRE)
 }
 
@@ -1160,7 +1209,7 @@ pub fn parse_mode_pre_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, Token
 /// Pin the config via turbofish: `parse_mode_pre_from_str_with::<_, parsuna_rt::DropSkips>(src)`
 /// to silently consume skip tokens. Monomorphization removes the skip-emit
 /// branch for any config whose `EMIT_SKIPS` is `false`.
-pub fn parse_mode_pre_from_str_with<'a, C: parsuna_rt::ParserConfig>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>, C> {
+pub fn parse_mode_pre_from_str_with<'a, C: parsuna_rt::ParserConfig>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa, LabelKind>, C> {
     Parser::new(Scanner::new(src), ENTRY_MODE_PRE)
 }
 
@@ -1168,14 +1217,14 @@ pub fn parse_mode_pre_from_str_with<'a, C: parsuna_rt::ParserConfig>(src: &'a st
 ///
 /// Streaming: tokens own their text; memory use stays bounded regardless of
 /// input size. See [`parse_mode_pre_from_reader_with`] to pick a config.
-pub fn parse_mode_pre_from_reader<R: Read>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>> {
+pub fn parse_mode_pre_from_reader<R: Read>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa, LabelKind>> {
     Parser::new(StreamingLexer::new(reader), ENTRY_MODE_PRE)
 }
 
 /// Parse the `mode_pre` rule from any [`Read`] source with a caller-chosen config.
 ///
 /// See [`parse_mode_pre_from_str_with`] for how to pick a [`parsuna_rt::ParserConfig`].
-pub fn parse_mode_pre_from_reader_with<R: Read, C: parsuna_rt::ParserConfig>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>, C> {
+pub fn parse_mode_pre_from_reader_with<R: Read, C: parsuna_rt::ParserConfig>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa, LabelKind>, C> {
     Parser::new(StreamingLexer::new(reader), ENTRY_MODE_PRE)
 }
 
@@ -1185,7 +1234,7 @@ pub fn parse_mode_pre_from_reader_with<R: Read, C: parsuna_rt::ParserConfig>(rea
 /// Skip tokens (whitespace, comments) are surfaced as
 /// `Event::Token`. Use [`parse_decl_from_str_with`] to pick a
 /// different [`parsuna_rt::ParserConfig`].
-pub fn parse_decl_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>> {
+pub fn parse_decl_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa, LabelKind>> {
     Parser::new(Scanner::new(src), ENTRY_DECL)
 }
 
@@ -1194,7 +1243,7 @@ pub fn parse_decl_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind
 /// Pin the config via turbofish: `parse_decl_from_str_with::<_, parsuna_rt::DropSkips>(src)`
 /// to silently consume skip tokens. Monomorphization removes the skip-emit
 /// branch for any config whose `EMIT_SKIPS` is `false`.
-pub fn parse_decl_from_str_with<'a, C: parsuna_rt::ParserConfig>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>, C> {
+pub fn parse_decl_from_str_with<'a, C: parsuna_rt::ParserConfig>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa, LabelKind>, C> {
     Parser::new(Scanner::new(src), ENTRY_DECL)
 }
 
@@ -1202,14 +1251,14 @@ pub fn parse_decl_from_str_with<'a, C: parsuna_rt::ParserConfig>(src: &'a str) -
 ///
 /// Streaming: tokens own their text; memory use stays bounded regardless of
 /// input size. See [`parse_decl_from_reader_with`] to pick a config.
-pub fn parse_decl_from_reader<R: Read>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>> {
+pub fn parse_decl_from_reader<R: Read>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa, LabelKind>> {
     Parser::new(StreamingLexer::new(reader), ENTRY_DECL)
 }
 
 /// Parse the `decl` rule from any [`Read`] source with a caller-chosen config.
 ///
 /// See [`parse_decl_from_str_with`] for how to pick a [`parsuna_rt::ParserConfig`].
-pub fn parse_decl_from_reader_with<R: Read, C: parsuna_rt::ParserConfig>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>, C> {
+pub fn parse_decl_from_reader_with<R: Read, C: parsuna_rt::ParserConfig>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa, LabelKind>, C> {
     Parser::new(StreamingLexer::new(reader), ENTRY_DECL)
 }
 
@@ -1219,7 +1268,7 @@ pub fn parse_decl_from_reader_with<R: Read, C: parsuna_rt::ParserConfig>(reader:
 /// Skip tokens (whitespace, comments) are surfaced as
 /// `Event::Token`. Use [`parse_actions_from_str_with`] to pick a
 /// different [`parsuna_rt::ParserConfig`].
-pub fn parse_actions_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>> {
+pub fn parse_actions_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa, LabelKind>> {
     Parser::new(Scanner::new(src), ENTRY_ACTIONS)
 }
 
@@ -1228,7 +1277,7 @@ pub fn parse_actions_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, TokenK
 /// Pin the config via turbofish: `parse_actions_from_str_with::<_, parsuna_rt::DropSkips>(src)`
 /// to silently consume skip tokens. Monomorphization removes the skip-emit
 /// branch for any config whose `EMIT_SKIPS` is `false`.
-pub fn parse_actions_from_str_with<'a, C: parsuna_rt::ParserConfig>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>, C> {
+pub fn parse_actions_from_str_with<'a, C: parsuna_rt::ParserConfig>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa, LabelKind>, C> {
     Parser::new(Scanner::new(src), ENTRY_ACTIONS)
 }
 
@@ -1236,14 +1285,14 @@ pub fn parse_actions_from_str_with<'a, C: parsuna_rt::ParserConfig>(src: &'a str
 ///
 /// Streaming: tokens own their text; memory use stays bounded regardless of
 /// input size. See [`parse_actions_from_reader_with`] to pick a config.
-pub fn parse_actions_from_reader<R: Read>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>> {
+pub fn parse_actions_from_reader<R: Read>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa, LabelKind>> {
     Parser::new(StreamingLexer::new(reader), ENTRY_ACTIONS)
 }
 
 /// Parse the `actions` rule from any [`Read`] source with a caller-chosen config.
 ///
 /// See [`parse_actions_from_str_with`] for how to pick a [`parsuna_rt::ParserConfig`].
-pub fn parse_actions_from_reader_with<R: Read, C: parsuna_rt::ParserConfig>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>, C> {
+pub fn parse_actions_from_reader_with<R: Read, C: parsuna_rt::ParserConfig>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa, LabelKind>, C> {
     Parser::new(StreamingLexer::new(reader), ENTRY_ACTIONS)
 }
 
@@ -1253,7 +1302,7 @@ pub fn parse_actions_from_reader_with<R: Read, C: parsuna_rt::ParserConfig>(read
 /// Skip tokens (whitespace, comments) are surfaced as
 /// `Event::Token`. Use [`parse_action_from_str_with`] to pick a
 /// different [`parsuna_rt::ParserConfig`].
-pub fn parse_action_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>> {
+pub fn parse_action_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa, LabelKind>> {
     Parser::new(Scanner::new(src), ENTRY_ACTION)
 }
 
@@ -1262,7 +1311,7 @@ pub fn parse_action_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKi
 /// Pin the config via turbofish: `parse_action_from_str_with::<_, parsuna_rt::DropSkips>(src)`
 /// to silently consume skip tokens. Monomorphization removes the skip-emit
 /// branch for any config whose `EMIT_SKIPS` is `false`.
-pub fn parse_action_from_str_with<'a, C: parsuna_rt::ParserConfig>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>, C> {
+pub fn parse_action_from_str_with<'a, C: parsuna_rt::ParserConfig>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa, LabelKind>, C> {
     Parser::new(Scanner::new(src), ENTRY_ACTION)
 }
 
@@ -1270,14 +1319,14 @@ pub fn parse_action_from_str_with<'a, C: parsuna_rt::ParserConfig>(src: &'a str)
 ///
 /// Streaming: tokens own their text; memory use stays bounded regardless of
 /// input size. See [`parse_action_from_reader_with`] to pick a config.
-pub fn parse_action_from_reader<R: Read>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>> {
+pub fn parse_action_from_reader<R: Read>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa, LabelKind>> {
     Parser::new(StreamingLexer::new(reader), ENTRY_ACTION)
 }
 
 /// Parse the `action` rule from any [`Read`] source with a caller-chosen config.
 ///
 /// See [`parse_action_from_str_with`] for how to pick a [`parsuna_rt::ParserConfig`].
-pub fn parse_action_from_reader_with<R: Read, C: parsuna_rt::ParserConfig>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>, C> {
+pub fn parse_action_from_reader_with<R: Read, C: parsuna_rt::ParserConfig>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa, LabelKind>, C> {
     Parser::new(StreamingLexer::new(reader), ENTRY_ACTION)
 }
 
@@ -1287,7 +1336,7 @@ pub fn parse_action_from_reader_with<R: Read, C: parsuna_rt::ParserConfig>(reade
 /// Skip tokens (whitespace, comments) are surfaced as
 /// `Event::Token`. Use [`parse_action_arg_from_str_with`] to pick a
 /// different [`parsuna_rt::ParserConfig`].
-pub fn parse_action_arg_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>> {
+pub fn parse_action_arg_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa, LabelKind>> {
     Parser::new(Scanner::new(src), ENTRY_ACTION_ARG)
 }
 
@@ -1296,7 +1345,7 @@ pub fn parse_action_arg_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, Tok
 /// Pin the config via turbofish: `parse_action_arg_from_str_with::<_, parsuna_rt::DropSkips>(src)`
 /// to silently consume skip tokens. Monomorphization removes the skip-emit
 /// branch for any config whose `EMIT_SKIPS` is `false`.
-pub fn parse_action_arg_from_str_with<'a, C: parsuna_rt::ParserConfig>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>, C> {
+pub fn parse_action_arg_from_str_with<'a, C: parsuna_rt::ParserConfig>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa, LabelKind>, C> {
     Parser::new(Scanner::new(src), ENTRY_ACTION_ARG)
 }
 
@@ -1304,14 +1353,14 @@ pub fn parse_action_arg_from_str_with<'a, C: parsuna_rt::ParserConfig>(src: &'a 
 ///
 /// Streaming: tokens own their text; memory use stays bounded regardless of
 /// input size. See [`parse_action_arg_from_reader_with`] to pick a config.
-pub fn parse_action_arg_from_reader<R: Read>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>> {
+pub fn parse_action_arg_from_reader<R: Read>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa, LabelKind>> {
     Parser::new(StreamingLexer::new(reader), ENTRY_ACTION_ARG)
 }
 
 /// Parse the `action_arg` rule from any [`Read`] source with a caller-chosen config.
 ///
 /// See [`parse_action_arg_from_str_with`] for how to pick a [`parsuna_rt::ParserConfig`].
-pub fn parse_action_arg_from_reader_with<R: Read, C: parsuna_rt::ParserConfig>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>, C> {
+pub fn parse_action_arg_from_reader_with<R: Read, C: parsuna_rt::ParserConfig>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa, LabelKind>, C> {
     Parser::new(StreamingLexer::new(reader), ENTRY_ACTION_ARG)
 }
 
@@ -1321,7 +1370,7 @@ pub fn parse_action_arg_from_reader_with<R: Read, C: parsuna_rt::ParserConfig>(r
 /// Skip tokens (whitespace, comments) are surfaced as
 /// `Event::Token`. Use [`parse_alt_expr_from_str_with`] to pick a
 /// different [`parsuna_rt::ParserConfig`].
-pub fn parse_alt_expr_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>> {
+pub fn parse_alt_expr_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa, LabelKind>> {
     Parser::new(Scanner::new(src), ENTRY_ALT_EXPR)
 }
 
@@ -1330,7 +1379,7 @@ pub fn parse_alt_expr_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, Token
 /// Pin the config via turbofish: `parse_alt_expr_from_str_with::<_, parsuna_rt::DropSkips>(src)`
 /// to silently consume skip tokens. Monomorphization removes the skip-emit
 /// branch for any config whose `EMIT_SKIPS` is `false`.
-pub fn parse_alt_expr_from_str_with<'a, C: parsuna_rt::ParserConfig>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>, C> {
+pub fn parse_alt_expr_from_str_with<'a, C: parsuna_rt::ParserConfig>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa, LabelKind>, C> {
     Parser::new(Scanner::new(src), ENTRY_ALT_EXPR)
 }
 
@@ -1338,14 +1387,14 @@ pub fn parse_alt_expr_from_str_with<'a, C: parsuna_rt::ParserConfig>(src: &'a st
 ///
 /// Streaming: tokens own their text; memory use stays bounded regardless of
 /// input size. See [`parse_alt_expr_from_reader_with`] to pick a config.
-pub fn parse_alt_expr_from_reader<R: Read>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>> {
+pub fn parse_alt_expr_from_reader<R: Read>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa, LabelKind>> {
     Parser::new(StreamingLexer::new(reader), ENTRY_ALT_EXPR)
 }
 
 /// Parse the `alt_expr` rule from any [`Read`] source with a caller-chosen config.
 ///
 /// See [`parse_alt_expr_from_str_with`] for how to pick a [`parsuna_rt::ParserConfig`].
-pub fn parse_alt_expr_from_reader_with<R: Read, C: parsuna_rt::ParserConfig>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>, C> {
+pub fn parse_alt_expr_from_reader_with<R: Read, C: parsuna_rt::ParserConfig>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa, LabelKind>, C> {
     Parser::new(StreamingLexer::new(reader), ENTRY_ALT_EXPR)
 }
 
@@ -1355,7 +1404,7 @@ pub fn parse_alt_expr_from_reader_with<R: Read, C: parsuna_rt::ParserConfig>(rea
 /// Skip tokens (whitespace, comments) are surfaced as
 /// `Event::Token`. Use [`parse_seq_expr_from_str_with`] to pick a
 /// different [`parsuna_rt::ParserConfig`].
-pub fn parse_seq_expr_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>> {
+pub fn parse_seq_expr_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa, LabelKind>> {
     Parser::new(Scanner::new(src), ENTRY_SEQ_EXPR)
 }
 
@@ -1364,7 +1413,7 @@ pub fn parse_seq_expr_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, Token
 /// Pin the config via turbofish: `parse_seq_expr_from_str_with::<_, parsuna_rt::DropSkips>(src)`
 /// to silently consume skip tokens. Monomorphization removes the skip-emit
 /// branch for any config whose `EMIT_SKIPS` is `false`.
-pub fn parse_seq_expr_from_str_with<'a, C: parsuna_rt::ParserConfig>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>, C> {
+pub fn parse_seq_expr_from_str_with<'a, C: parsuna_rt::ParserConfig>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa, LabelKind>, C> {
     Parser::new(Scanner::new(src), ENTRY_SEQ_EXPR)
 }
 
@@ -1372,14 +1421,14 @@ pub fn parse_seq_expr_from_str_with<'a, C: parsuna_rt::ParserConfig>(src: &'a st
 ///
 /// Streaming: tokens own their text; memory use stays bounded regardless of
 /// input size. See [`parse_seq_expr_from_reader_with`] to pick a config.
-pub fn parse_seq_expr_from_reader<R: Read>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>> {
+pub fn parse_seq_expr_from_reader<R: Read>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa, LabelKind>> {
     Parser::new(StreamingLexer::new(reader), ENTRY_SEQ_EXPR)
 }
 
 /// Parse the `seq_expr` rule from any [`Read`] source with a caller-chosen config.
 ///
 /// See [`parse_seq_expr_from_str_with`] for how to pick a [`parsuna_rt::ParserConfig`].
-pub fn parse_seq_expr_from_reader_with<R: Read, C: parsuna_rt::ParserConfig>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>, C> {
+pub fn parse_seq_expr_from_reader_with<R: Read, C: parsuna_rt::ParserConfig>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa, LabelKind>, C> {
     Parser::new(StreamingLexer::new(reader), ENTRY_SEQ_EXPR)
 }
 
@@ -1389,7 +1438,7 @@ pub fn parse_seq_expr_from_reader_with<R: Read, C: parsuna_rt::ParserConfig>(rea
 /// Skip tokens (whitespace, comments) are surfaced as
 /// `Event::Token`. Use [`parse_group_from_str_with`] to pick a
 /// different [`parsuna_rt::ParserConfig`].
-pub fn parse_group_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>> {
+pub fn parse_group_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa, LabelKind>> {
     Parser::new(Scanner::new(src), ENTRY_GROUP)
 }
 
@@ -1398,7 +1447,7 @@ pub fn parse_group_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKin
 /// Pin the config via turbofish: `parse_group_from_str_with::<_, parsuna_rt::DropSkips>(src)`
 /// to silently consume skip tokens. Monomorphization removes the skip-emit
 /// branch for any config whose `EMIT_SKIPS` is `false`.
-pub fn parse_group_from_str_with<'a, C: parsuna_rt::ParserConfig>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>, C> {
+pub fn parse_group_from_str_with<'a, C: parsuna_rt::ParserConfig>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa, LabelKind>, C> {
     Parser::new(Scanner::new(src), ENTRY_GROUP)
 }
 
@@ -1406,14 +1455,14 @@ pub fn parse_group_from_str_with<'a, C: parsuna_rt::ParserConfig>(src: &'a str) 
 ///
 /// Streaming: tokens own their text; memory use stays bounded regardless of
 /// input size. See [`parse_group_from_reader_with`] to pick a config.
-pub fn parse_group_from_reader<R: Read>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>> {
+pub fn parse_group_from_reader<R: Read>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa, LabelKind>> {
     Parser::new(StreamingLexer::new(reader), ENTRY_GROUP)
 }
 
 /// Parse the `group` rule from any [`Read`] source with a caller-chosen config.
 ///
 /// See [`parse_group_from_str_with`] for how to pick a [`parsuna_rt::ParserConfig`].
-pub fn parse_group_from_reader_with<R: Read, C: parsuna_rt::ParserConfig>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>, C> {
+pub fn parse_group_from_reader_with<R: Read, C: parsuna_rt::ParserConfig>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa, LabelKind>, C> {
     Parser::new(StreamingLexer::new(reader), ENTRY_GROUP)
 }
 
@@ -1423,7 +1472,7 @@ pub fn parse_group_from_reader_with<R: Read, C: parsuna_rt::ParserConfig>(reader
 /// Skip tokens (whitespace, comments) are surfaced as
 /// `Event::Token`. Use [`parse_atom_from_str_with`] to pick a
 /// different [`parsuna_rt::ParserConfig`].
-pub fn parse_atom_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>> {
+pub fn parse_atom_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa, LabelKind>> {
     Parser::new(Scanner::new(src), ENTRY_ATOM)
 }
 
@@ -1432,7 +1481,7 @@ pub fn parse_atom_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind
 /// Pin the config via turbofish: `parse_atom_from_str_with::<_, parsuna_rt::DropSkips>(src)`
 /// to silently consume skip tokens. Monomorphization removes the skip-emit
 /// branch for any config whose `EMIT_SKIPS` is `false`.
-pub fn parse_atom_from_str_with<'a, C: parsuna_rt::ParserConfig>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>, C> {
+pub fn parse_atom_from_str_with<'a, C: parsuna_rt::ParserConfig>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa, LabelKind>, C> {
     Parser::new(Scanner::new(src), ENTRY_ATOM)
 }
 
@@ -1440,14 +1489,14 @@ pub fn parse_atom_from_str_with<'a, C: parsuna_rt::ParserConfig>(src: &'a str) -
 ///
 /// Streaming: tokens own their text; memory use stays bounded regardless of
 /// input size. See [`parse_atom_from_reader_with`] to pick a config.
-pub fn parse_atom_from_reader<R: Read>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>> {
+pub fn parse_atom_from_reader<R: Read>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa, LabelKind>> {
     Parser::new(StreamingLexer::new(reader), ENTRY_ATOM)
 }
 
 /// Parse the `atom` rule from any [`Read`] source with a caller-chosen config.
 ///
 /// See [`parse_atom_from_str_with`] for how to pick a [`parsuna_rt::ParserConfig`].
-pub fn parse_atom_from_reader_with<R: Read, C: parsuna_rt::ParserConfig>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>, C> {
+pub fn parse_atom_from_reader_with<R: Read, C: parsuna_rt::ParserConfig>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa, LabelKind>, C> {
     Parser::new(StreamingLexer::new(reader), ENTRY_ATOM)
 }
 
@@ -1457,7 +1506,7 @@ pub fn parse_atom_from_reader_with<R: Read, C: parsuna_rt::ParserConfig>(reader:
 /// Skip tokens (whitespace, comments) are surfaced as
 /// `Event::Token`. Use [`parse_char_primary_from_str_with`] to pick a
 /// different [`parsuna_rt::ParserConfig`].
-pub fn parse_char_primary_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>> {
+pub fn parse_char_primary_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa, LabelKind>> {
     Parser::new(Scanner::new(src), ENTRY_CHAR_PRIMARY)
 }
 
@@ -1466,7 +1515,7 @@ pub fn parse_char_primary_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, T
 /// Pin the config via turbofish: `parse_char_primary_from_str_with::<_, parsuna_rt::DropSkips>(src)`
 /// to silently consume skip tokens. Monomorphization removes the skip-emit
 /// branch for any config whose `EMIT_SKIPS` is `false`.
-pub fn parse_char_primary_from_str_with<'a, C: parsuna_rt::ParserConfig>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>, C> {
+pub fn parse_char_primary_from_str_with<'a, C: parsuna_rt::ParserConfig>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa, LabelKind>, C> {
     Parser::new(Scanner::new(src), ENTRY_CHAR_PRIMARY)
 }
 
@@ -1474,14 +1523,14 @@ pub fn parse_char_primary_from_str_with<'a, C: parsuna_rt::ParserConfig>(src: &'
 ///
 /// Streaming: tokens own their text; memory use stays bounded regardless of
 /// input size. See [`parse_char_primary_from_reader_with`] to pick a config.
-pub fn parse_char_primary_from_reader<R: Read>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>> {
+pub fn parse_char_primary_from_reader<R: Read>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa, LabelKind>> {
     Parser::new(StreamingLexer::new(reader), ENTRY_CHAR_PRIMARY)
 }
 
 /// Parse the `char_primary` rule from any [`Read`] source with a caller-chosen config.
 ///
 /// See [`parse_char_primary_from_str_with`] for how to pick a [`parsuna_rt::ParserConfig`].
-pub fn parse_char_primary_from_reader_with<R: Read, C: parsuna_rt::ParserConfig>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>, C> {
+pub fn parse_char_primary_from_reader_with<R: Read, C: parsuna_rt::ParserConfig>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa, LabelKind>, C> {
     Parser::new(StreamingLexer::new(reader), ENTRY_CHAR_PRIMARY)
 }
 
@@ -1491,7 +1540,7 @@ pub fn parse_char_primary_from_reader_with<R: Read, C: parsuna_rt::ParserConfig>
 /// Skip tokens (whitespace, comments) are surfaced as
 /// `Event::Token`. Use [`parse_neg_class_from_str_with`] to pick a
 /// different [`parsuna_rt::ParserConfig`].
-pub fn parse_neg_class_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>> {
+pub fn parse_neg_class_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa, LabelKind>> {
     Parser::new(Scanner::new(src), ENTRY_NEG_CLASS)
 }
 
@@ -1500,7 +1549,7 @@ pub fn parse_neg_class_from_str<'a>(src: &'a str) -> Parser<'a, Scanner<'a, Toke
 /// Pin the config via turbofish: `parse_neg_class_from_str_with::<_, parsuna_rt::DropSkips>(src)`
 /// to silently consume skip tokens. Monomorphization removes the skip-emit
 /// branch for any config whose `EMIT_SKIPS` is `false`.
-pub fn parse_neg_class_from_str_with<'a, C: parsuna_rt::ParserConfig>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa>, C> {
+pub fn parse_neg_class_from_str_with<'a, C: parsuna_rt::ParserConfig>(src: &'a str) -> Parser<'a, Scanner<'a, TokenKind, LexerDfa, LabelKind>, C> {
     Parser::new(Scanner::new(src), ENTRY_NEG_CLASS)
 }
 
@@ -1508,14 +1557,14 @@ pub fn parse_neg_class_from_str_with<'a, C: parsuna_rt::ParserConfig>(src: &'a s
 ///
 /// Streaming: tokens own their text; memory use stays bounded regardless of
 /// input size. See [`parse_neg_class_from_reader_with`] to pick a config.
-pub fn parse_neg_class_from_reader<R: Read>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>> {
+pub fn parse_neg_class_from_reader<R: Read>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa, LabelKind>> {
     Parser::new(StreamingLexer::new(reader), ENTRY_NEG_CLASS)
 }
 
 /// Parse the `neg_class` rule from any [`Read`] source with a caller-chosen config.
 ///
 /// See [`parse_neg_class_from_str_with`] for how to pick a [`parsuna_rt::ParserConfig`].
-pub fn parse_neg_class_from_reader_with<R: Read, C: parsuna_rt::ParserConfig>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa>, C> {
+pub fn parse_neg_class_from_reader_with<R: Read, C: parsuna_rt::ParserConfig>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa, LabelKind>, C> {
     Parser::new(StreamingLexer::new(reader), ENTRY_NEG_CLASS)
 }
 

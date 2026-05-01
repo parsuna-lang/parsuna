@@ -137,6 +137,16 @@ fn token_name_for_kind(st: &StateTable, kind: u16) -> &str {
         .unwrap_or("?")
 }
 
+fn label_name(st: &StateTable, id: u16) -> String {
+    if id == 0 {
+        return "?".to_string();
+    }
+    st.labels
+        .get((id - 1) as usize)
+        .cloned()
+        .unwrap_or_else(|| format!("?{}", id))
+}
+
 fn token_name_for_kind_fallback<'a>(st: &'a StateTable, kind: u16, fallback: &'a str) -> &'a str {
     if kind == 0 {
         return fallback;
@@ -189,8 +199,7 @@ fn format_instr(op: &Instr, st: &StateTable) -> Vec<String> {
             token_name_for_kind_fallback(st, *kind, token_name),
             format_sync_set(st, *sync),
             label
-                .as_deref()
-                .map(|n| format!(" label={}", n))
+                .map(|id| format!(" label={}", label_name(st, id)))
                 .unwrap_or_default()
         )],
         Instr::PushRet(r) => vec![format!("PushRet {}", state_ref(st, *r))],

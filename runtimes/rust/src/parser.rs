@@ -1,6 +1,6 @@
 use std::marker::PhantomData;
 
-use crate::events::{Error, Event, RuleKindEnum, Token, TokenKindEnum};
+use crate::events::{Error, Event, LabelKindEnum, RuleKindEnum, Token, TokenKindEnum};
 use crate::lexer::LexerBackend;
 use crate::span::Pos;
 
@@ -77,6 +77,7 @@ impl ParserConfig for LabeledOnly {
 pub trait Grammar<const K: usize>: Sized {
     type TokenKind: TokenKindEnum;
     type RuleKind: RuleKindEnum;
+    type LabelKind: LabelKindEnum;
     /// True iff the grammar declares any tokens with a `-> skip` action.
     /// Lets the runtime skip the per-pump skip check when no skips exist.
     const HAS_SKIPS: bool;
@@ -100,9 +101,9 @@ pub trait Grammar<const K: usize>: Sized {
     /// recovery). External callers can't construct one, so the parser's
     /// internal state stays sealed: the only way to drive a parse is
     /// through [`Iterator::next`].
-    fn step<'a, 'p, L: LexerBackend<'a, Self::TokenKind>, C: ParserConfig>(
+    fn step<'a, 'p, L: LexerBackend<'a, Self::TokenKind, Self::LabelKind>, C: ParserConfig>(
         p: &mut Cursor<'p, 'a, L, K, Self, C>,
-    ) -> Option<Event<'a, Self::TokenKind, Self::RuleKind>>;
+    ) -> Option<Event<'a, Self::TokenKind, Self::RuleKind, Self::LabelKind>>;
 
     /// Apply the mode-stack actions declared on `kind` to `lex`.
     ///
@@ -115,7 +116,7 @@ pub trait Grammar<const K: usize>: Sized {
     ///
     /// Default impl is a no-op for grammars that declare no modes.
     #[inline]
-    fn apply_actions<'a, L: LexerBackend<'a, Self::TokenKind>>(
+    fn apply_actions<'a, L: LexerBackend<'a, Self::TokenKind, Self::LabelKind>>(
         kind: Option<Self::TokenKind>,
         lex: &mut L,
     ) {
@@ -174,7 +175,7 @@ struct Recovery<TK: 'static> {
 /// internals out of band.
 pub struct Parser<
     'a,
-    L: LexerBackend<'a, G::TokenKind>,
+    L: LexerBackend<'a, G::TokenKind, G::LabelKind>,
     const K: usize,
     G: Grammar<K>,
     C: ParserConfig = EmitSkips,
@@ -187,7 +188,7 @@ pub struct Parser<
     /// failures (`Token { kind: None, .. }`) are surfaced via the
     /// pump-time absorb below and never enter the buffer, so once a slot
     /// is filled its `kind` is always `Some(_)`.
-    look: [Option<Token<'a, G::TokenKind>>; K],
+    look: [Option<Token<'a, G::TokenKind, G::LabelKind>>; K],
     prev_end: Pos,
     state: u32,
     /// Return stack. Each entry pairs the state to resume at with the
@@ -205,11 +206,11 @@ pub struct Parser<
     /// matching [`Event::Garbage`]. Lex-failure tokens never enter
     /// `look`, so dispatch can read `look[i].kind.unwrap()` without
     /// caring about the no-pattern-matched path.
-    pending_lex_garbage: Option<Token<'a, G::TokenKind>>,
+    pending_lex_garbage: Option<Token<'a, G::TokenKind, G::LabelKind>>,
     _config: PhantomData<C>,
 }
 
-impl<'a, L: LexerBackend<'a, G::TokenKind>, const K: usize, G: Grammar<K>, C: ParserConfig>
+impl<'a, L: LexerBackend<'a, G::TokenKind, G::LabelKind>, const K: usize, G: Grammar<K>, C: ParserConfig>
     Parser<'a, L, K, G, C>
 {
     /// Build a parser over `lex`, starting at `entry` (the state id of the
@@ -240,7 +241,7 @@ impl<'a, L: LexerBackend<'a, G::TokenKind>, const K: usize, G: Grammar<K>, C: Pa
     /// Internal — callers wrap the result in the appropriate `Event`
     /// variant.
     #[inline]
-    fn take_token(&mut self) -> Token<'a, G::TokenKind> {
+    fn take_token(&mut self) -> Token<'a, G::TokenKind, G::LabelKind> {
         let t = self.look[0]
             .take()
             .expect("take_token called with empty lookahead");
@@ -254,14 +255,14 @@ impl<'a, L: LexerBackend<'a, G::TokenKind>, const K: usize, G: Grammar<K>, C: Pa
     }
 
     #[inline]
-    fn consume(&mut self) -> Event<'a, G::TokenKind, G::RuleKind> {
+    fn consume(&mut self) -> Event<'a, G::TokenKind, G::RuleKind, G::LabelKind> {
         Event::Token(self.take_token())
     }
 
     fn error_here(
         &mut self,
         msg: impl Into<std::borrow::Cow<'static, str>>,
-    ) -> Event<'a, G::TokenKind, G::RuleKind> {
+    ) -> Event<'a, G::TokenKind, G::RuleKind, G::LabelKind> {
         let span = self.look[0]
             .as_ref()
             .expect("error_here called with empty lookahead")
@@ -303,7 +304,7 @@ impl<'a, L: LexerBackend<'a, G::TokenKind>, const K: usize, G: Grammar<K>, C: Pa
 pub struct Cursor<
     'p,
     'a,
-    L: LexerBackend<'a, G::TokenKind>,
+    L: LexerBackend<'a, G::TokenKind, G::LabelKind>,
     const K: usize,
     G: Grammar<K>,
     C: ParserConfig,
@@ -314,7 +315,7 @@ pub struct Cursor<
 impl<
         'p,
         'a,
-        L: LexerBackend<'a, G::TokenKind>,
+        L: LexerBackend<'a, G::TokenKind, G::LabelKind>,
         const K: usize,
         G: Grammar<K>,
         C: ParserConfig,
@@ -362,7 +363,7 @@ impl<
     /// Generated `step()` only runs after Skip mode's pump has filled
     /// every slot, so the unwrap here is unconditional.
     #[inline]
-    pub fn look(&self, i: usize) -> &Token<'a, G::TokenKind> {
+    pub fn look(&self, i: usize) -> &Token<'a, G::TokenKind, G::LabelKind> {
         self.p.look[i]
             .as_ref()
             .expect("look slot empty inside step() — pump did not refill before dispatch")
@@ -391,7 +392,7 @@ impl<
     /// position so a later `Exit` without any intervening tokens still
     /// produces a zero-width span at the expected place.
     #[inline(always)]
-    pub fn enter(&mut self, rule: G::RuleKind) -> Event<'a, G::TokenKind, G::RuleKind> {
+    pub fn enter(&mut self, rule: G::RuleKind) -> Event<'a, G::TokenKind, G::RuleKind, G::LabelKind> {
         let pos = self.look(0).span.start;
         self.p.prev_end = pos;
         Event::Enter { rule, pos }
@@ -400,7 +401,7 @@ impl<
     /// Build an `Exit` event for `rule`, positioned at the end of the
     /// last consumed token (or the rule's start for empty rules).
     #[inline(always)]
-    pub fn exit(&mut self, rule: G::RuleKind) -> Event<'a, G::TokenKind, G::RuleKind> {
+    pub fn exit(&mut self, rule: G::RuleKind) -> Event<'a, G::TokenKind, G::RuleKind, G::LabelKind> {
         Event::Exit {
             rule,
             pos: self.p.prev_end,
@@ -411,7 +412,7 @@ impl<
     pub fn error_here(
         &mut self,
         msg: impl Into<std::borrow::Cow<'static, str>>,
-    ) -> Event<'a, G::TokenKind, G::RuleKind> {
+    ) -> Event<'a, G::TokenKind, G::RuleKind, G::LabelKind> {
         self.p.error_here(msg)
     }
 
@@ -428,31 +429,34 @@ impl<
         kind: G::TokenKind,
         sync: &'static [G::TokenKind],
         expected_msg: &'static str,
-    ) -> Event<'a, G::TokenKind, G::RuleKind> {
+    ) -> Event<'a, G::TokenKind, G::RuleKind, G::LabelKind> {
         self.expect_labeled(kind, sync, expected_msg, None)
     }
 
     /// Same as [`Cursor::expect`] but stamps `label` on the consumed
     /// token's `Token::label` field on the success path. Used by
     /// generated dispatch code for `name:NAME`-form positions in the
-    /// grammar; the label travels through to the consumer's `Event`
-    /// stream so they can identify the position by name without
-    /// tracking surrounding rule context.
+    /// grammar; the label id (the codegen's `LabelKind` discriminant)
+    /// travels through to the consumer's `Event` stream so they can
+    /// identify the position via that enum without tracking surrounding
+    /// rule context.
     #[inline(always)]
     pub fn expect_labeled(
         &mut self,
         kind: G::TokenKind,
         sync: &'static [G::TokenKind],
         expected_msg: &'static str,
-        label: Option<&'static str>,
-    ) -> Event<'a, G::TokenKind, G::RuleKind> {
+        label: Option<G::LabelKind>,
+    ) -> Event<'a, G::TokenKind, G::RuleKind, G::LabelKind> {
         if self.look(0).kind == Some(kind) {
             // Stamp the label directly on the slot's token before
             // `consume` rotates it out — saves a per-token branch in
-            // the unlabeled case (label stays `None` from
-            // construction).
-            if let Some(t) = self.p.look[0].as_mut() {
-                t.label = label;
+            // the unlabeled case (label stays `None` from the
+            // lex-time construction).
+            if label.is_some() {
+                if let Some(t) = self.p.look[0].as_mut() {
+                    t.label = label;
+                }
             }
             return self.consume();
         }
@@ -466,7 +470,7 @@ impl<
     /// recovery's "synced to the kind we were expecting" path — both
     /// yield legitimate parse data.
     #[inline]
-    pub fn consume(&mut self) -> Event<'a, G::TokenKind, G::RuleKind> {
+    pub fn consume(&mut self) -> Event<'a, G::TokenKind, G::RuleKind, G::LabelKind> {
         self.p.consume()
     }
 
@@ -479,10 +483,10 @@ impl<
     }
 }
 
-impl<'a, L: LexerBackend<'a, G::TokenKind>, const K: usize, G: Grammar<K>, C: ParserConfig>
+impl<'a, L: LexerBackend<'a, G::TokenKind, G::LabelKind>, const K: usize, G: Grammar<K>, C: ParserConfig>
     Iterator for Parser<'a, L, K, G, C>
 {
-    type Item = Event<'a, G::TokenKind, G::RuleKind>;
+    type Item = Event<'a, G::TokenKind, G::RuleKind, G::LabelKind>;
 
     /// Produce the next event from the parse, or `None` once the entire
     /// input has been consumed.

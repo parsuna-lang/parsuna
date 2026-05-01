@@ -150,6 +150,48 @@ fn emit_constants(s: &mut String, st: &StateTable) {
     writeln!(s, "  }}").unwrap();
     writeln!(s, "}}").unwrap();
     writeln!(s).unwrap();
+
+    // ---- LabelKind ------------------------------------------------------
+    writeln!(s, "/**").unwrap();
+    writeln!(s, " * One variant per distinct grammar label (`name:NAME` form).").unwrap();
+    writeln!(s, " *").unwrap();
+    writeln!(
+        s,
+        " * `Token.label` is `LabelKind | null`. Compare against named values:"
+    )
+    .unwrap();
+    writeln!(
+        s,
+        " * `tok.label === LabelKind.Foo` — no string handling required."
+    )
+    .unwrap();
+    writeln!(s, " */").unwrap();
+    writeln!(s, "export enum LabelKind {{").unwrap();
+    for (i, n) in st.labels.iter().enumerate() {
+        writeln!(s, "  {} = {},", pascal(n), i + 1).unwrap();
+    }
+    if st.labels.is_empty() {
+        writeln!(s, "  _Empty = 0xFFFF,").unwrap();
+    }
+    writeln!(s, "}}").unwrap();
+    writeln!(s).unwrap();
+    writeln!(
+        s,
+        "/** Human-readable name for a label kind, for diagnostics. */"
+    )
+    .unwrap();
+    writeln!(s, "export function labelKindName(k: LabelKind): string {{").unwrap();
+    writeln!(s, "  switch (k) {{").unwrap();
+    for n in &st.labels {
+        writeln!(s, "    case LabelKind.{}: return \"{}\";", pascal(n), n).unwrap();
+    }
+    if st.labels.is_empty() {
+        writeln!(s, "    case LabelKind._Empty: return \"\";").unwrap();
+    }
+    writeln!(s, "    default: return \"?\";").unwrap();
+    writeln!(s, "  }}").unwrap();
+    writeln!(s, "}}").unwrap();
+    writeln!(s).unwrap();
 }
 
 fn token_variant(st: &StateTable, kind: u16) -> String {
@@ -529,7 +571,10 @@ fn emit_instr(s: &mut String, st: &StateTable, op: &Instr) {
             label,
         } => {
             let label_arg = match label {
-                Some(name) => format!("\"{}\"", name),
+                Some(id) => format!(
+                    "LabelKind.{}",
+                    pascal(&st.labels[(*id as usize) - 1])
+                ),
                 None => "null".to_string(),
             };
             writeln!(
@@ -676,7 +721,7 @@ fn emit_apply_actions(s: &mut String, st: &StateTable) {
     writeln!(s, " */").unwrap();
     writeln!(
         s,
-        "function applyActions(kind: TokenKind | null, lex: Lexer<TokenKind>): void {{"
+        "function applyActions(kind: TokenKind | null, lex: Lexer<TokenKind, LabelKind>): void {{"
     )
     .unwrap();
     if action_tokens.is_empty() {
@@ -724,17 +769,17 @@ fn emit_public_api(s: &mut String, st: &StateTable) {
         .unwrap();
         writeln!(
             s,
-            "export function parse{pascal_name}(src: string, options?: {{ emitSkips?: boolean; emitUnlabeledTokens?: boolean }}): Parser<TokenKind, RuleKind> {{"
+            "export function parse{pascal_name}(src: string, options?: {{ emitSkips?: boolean; emitUnlabeledTokens?: boolean }}): Parser<TokenKind, RuleKind, LabelKind> {{"
         )
         .unwrap();
         writeln!(
             s,
-            "  const lex = new Lexer<TokenKind>(src, longestMatch, TokenKind.Eof);"
+            "  const lex = new Lexer<TokenKind, LabelKind>(src, longestMatch, TokenKind.Eof);"
         )
         .unwrap();
         writeln!(
             s,
-            "  return new Parser<TokenKind, RuleKind>(lex, ENTRY_{upper}, PARSER_CONFIG, options);"
+            "  return new Parser<TokenKind, RuleKind, LabelKind>(lex, ENTRY_{upper}, PARSER_CONFIG, options);"
         )
         .unwrap();
         writeln!(s, "}}").unwrap();

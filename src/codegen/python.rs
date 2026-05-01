@@ -25,7 +25,7 @@ pub fn emit(st: &StateTable, _args: &Args) -> Vec<EmittedFile> {
 
     let tokens: Vec<String> = st.tokens.iter().map(|t| t.name.clone()).collect();
     let rules: Vec<String> = st.entry_states.iter().map(|(n, _)| n.clone()).collect();
-    let lib = build_lib_rs(&rust_file, &name, &st.rule_kinds, &tokens, &rules);
+    let lib = build_lib_rs(&rust_file, &name, &st.rule_kinds, &tokens, &rules, &st.labels);
     let cargo = build_cargo_toml(&name);
     let pyproject = build_pyproject(&name);
     vec![
@@ -50,6 +50,7 @@ fn build_lib_rs(
     rule_kinds: &[String],
     tokens: &[String],
     rules: &[String],
+    labels: &[String],
 ) -> String {
     let mut out = String::new();
 
@@ -141,6 +142,37 @@ fn build_lib_rs(
     writeln!(&mut out, "}}").unwrap();
     writeln!(&mut out).unwrap();
 
+    // ---- LabelKind ------------------------------------------------------
+    writeln!(
+        &mut out,
+        "#[pyo3::pyclass(frozen, module = \"{}\", name = \"LabelKind\")]",
+        name
+    )
+    .unwrap();
+    writeln!(&mut out, "struct PyLabelKind;").unwrap();
+    writeln!(&mut out, "#[pyo3::pymethods]").unwrap();
+    writeln!(&mut out, "impl PyLabelKind {{").unwrap();
+    for n in labels {
+        let p = crate::codegen::common::pascal(n);
+        writeln!(
+            &mut out,
+            "    #[classattr] pub const {}: u16 = LabelKind::{}.id();",
+            p, p
+        )
+        .unwrap();
+    }
+    writeln!(&mut out, "    #[staticmethod]").unwrap();
+    writeln!(&mut out, "    fn name(label: u16) -> &'static str {{").unwrap();
+    writeln!(&mut out, "        match label {{").unwrap();
+    for (i, n) in labels.iter().enumerate() {
+        writeln!(&mut out, "            {} => \"{}\",", i + 1, n).unwrap();
+    }
+    writeln!(&mut out, "            _ => \"?\",").unwrap();
+    writeln!(&mut out, "        }}").unwrap();
+    writeln!(&mut out, "    }}").unwrap();
+    writeln!(&mut out, "}}").unwrap();
+    writeln!(&mut out).unwrap();
+
     for r in rules {
         let upper = r.to_uppercase();
         writeln!(
@@ -228,6 +260,7 @@ fn build_lib_rs(
     writeln!(&mut out, "    m.add_class::<PyParser>()?;").unwrap();
     writeln!(&mut out, "    m.add_class::<PyRuleKind>()?;").unwrap();
     writeln!(&mut out, "    m.add_class::<PyTokenKind>()?;").unwrap();
+    writeln!(&mut out, "    m.add_class::<PyLabelKind>()?;").unwrap();
     for r in rules {
         writeln!(
             &mut out,
@@ -324,10 +357,10 @@ impl PyError {
 /// A single pull-parser event. `tag` is one of "enter", "exit", "token",
 /// "garbage", or "error"; the populated payload field depends on the tag.
 ///
-/// `label` is set on token events whose grammar position used the
-/// `name:NAME` form (parsuna's labeled-position syntax) — it's the
-/// position name. `None` for unlabeled positions and for non-token
-/// events.
+/// `label` is the codegen's `LabelKind` discriminant for tokens whose
+/// grammar position used the `name:NAME` form, or `None` for unlabeled
+/// positions / non-token events. Compare against `LabelKind` constants
+/// (also exported from this module) — no string handling.
 #[pyclass(frozen, get_all, name = "Event")]
 #[derive(Clone, Debug)]
 struct PyEvent {
@@ -335,7 +368,7 @@ struct PyEvent {
     span: PySpan,
     kind: Option<i32>,
     text: Option<String>,
-    label: Option<String>,
+    label: Option<i32>,
     error: Option<PyError>,
 }
 
@@ -394,7 +427,7 @@ fn to_py_event(ev: Event) -> PyEvent {
                 span,
                 kind: t.kind.map(|k| k as i32),
                 text: Some(t.text.into_owned()),
-                label: t.label.map(|s| s.to_string()),
+                label: t.label.map(|lk| lk.id() as i32),
                 error: None,
             }
         }
@@ -405,7 +438,7 @@ fn to_py_event(ev: Event) -> PyEvent {
                 span,
                 kind: t.kind.map(|k| k as i32),
                 text: Some(t.text.into_owned()),
-                label: t.label.map(|s| s.to_string()),
+                label: t.label.map(|lk| lk.id() as i32),
                 error: None,
             }
         }

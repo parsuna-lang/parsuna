@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 use std::io::Read;
 
-use crate::events::{Token, TokenKindEnum};
+use crate::events::{LabelKindEnum, Token, TokenKindEnum};
 use crate::span::{Pos, Span};
 
 /// Number of bytes in the UTF-8 sequence that starts with `b`.
@@ -60,12 +60,16 @@ pub trait DfaMatcher<TK: TokenKindEnum> {
 /// time. Implemented by the two lexers in this crate; generated code is
 /// generic over any type that implements it, so callers can plug in a
 /// custom lexer if the DFA-based one is insufficient.
-pub trait LexerBackend<'a, TK: TokenKindEnum> {
+pub trait LexerBackend<'a, TK: TokenKindEnum, LK: LabelKindEnum> {
     /// Produce the next token. Must return [`Token`] with kind `TK::EOF`
     /// once the input is exhausted (and every subsequent call). The
     /// matcher used is determined by the mode currently on top of the
     /// lexer's mode stack.
-    fn next_token(&mut self) -> Token<'a, TK>;
+    ///
+    /// `LK` is the codegen's `LabelKind`; the lexer never sets a label
+    /// (that's the parser's job at `name:NAME` positions), so it always
+    /// constructs tokens with `label: None`.
+    fn next_token(&mut self) -> Token<'a, TK, LK>;
     /// Push `mode` onto the mode stack. Subsequent [`Self::next_token`]
     /// calls scan with that mode's DFA until a matching [`Self::pop_mode`].
     /// Default mode (id 0) is what the lexer starts in; calling
@@ -96,7 +100,7 @@ pub trait LexerBackend<'a, TK: TokenKindEnum> {
 /// allocations happen per-token. Use this when you already have the whole
 /// input in memory. `D` is the grammar-specific compiled matcher that
 /// generated code supplies.
-pub struct Scanner<'a, TK: TokenKindEnum, D: DfaMatcher<TK>> {
+pub struct Scanner<'a, TK: TokenKindEnum, D: DfaMatcher<TK>, LK: LabelKindEnum> {
     src: &'a str,
     buf: &'a [u8],
     pos: usize,
@@ -109,9 +113,10 @@ pub struct Scanner<'a, TK: TokenKindEnum, D: DfaMatcher<TK>> {
     modes: Vec<u32>,
     _tk: std::marker::PhantomData<fn() -> TK>,
     _dfa: std::marker::PhantomData<fn() -> D>,
+    _lk: std::marker::PhantomData<fn() -> LK>,
 }
 
-impl<'a, TK: TokenKindEnum, D: DfaMatcher<TK>> Scanner<'a, TK, D> {
+impl<'a, TK: TokenKindEnum, D: DfaMatcher<TK>, LK: LabelKindEnum> Scanner<'a, TK, D, LK> {
     /// Build a scanner over `src`. The scanner starts at the beginning of
     /// the string at line 1, column 1, with the default lexer mode (id 0)
     /// on the mode stack.
@@ -125,6 +130,7 @@ impl<'a, TK: TokenKindEnum, D: DfaMatcher<TK>> Scanner<'a, TK, D> {
             modes: vec![0],
             _tk: std::marker::PhantomData,
             _dfa: std::marker::PhantomData,
+            _lk: std::marker::PhantomData,
         }
     }
 
@@ -170,7 +176,9 @@ impl<'a, TK: TokenKindEnum, D: DfaMatcher<TK>> Scanner<'a, TK, D> {
     }
 }
 
-impl<'a, TK: TokenKindEnum, D: DfaMatcher<TK>> LexerBackend<'a, TK> for Scanner<'a, TK, D> {
+impl<'a, TK: TokenKindEnum, D: DfaMatcher<TK>, LK: LabelKindEnum> LexerBackend<'a, TK, LK>
+    for Scanner<'a, TK, D, LK>
+{
     /// Produce the next token, advancing the scanner.
     ///
     /// Behaviour at the boundary: if no token pattern matches at the
@@ -186,7 +194,7 @@ impl<'a, TK: TokenKindEnum, D: DfaMatcher<TK>> LexerBackend<'a, TK> for Scanner<
     /// recover the structural state. On exhaustion it emits repeated
     /// `Some(TK::EOF)` tokens.
     #[inline]
-    fn next_token(&mut self) -> Token<'a, TK> {
+    fn next_token(&mut self) -> Token<'a, TK, LK> {
         if self.pos >= self.buf.len() {
             let pos = self.cur_pos();
             return Token {
@@ -262,7 +270,7 @@ const STREAM_CHUNK: usize = 16 * 1024;
 ///
 /// Internally the buffer is compacted once consumed bytes exceed 64 KiB,
 /// which bounds memory use to roughly that plus one chunk.
-pub struct StreamingLexer<R: Read, TK: TokenKindEnum, D: DfaMatcher<TK>> {
+pub struct StreamingLexer<R: Read, TK: TokenKindEnum, D: DfaMatcher<TK>, LK: LabelKindEnum> {
     reader: R,
     buf: Vec<u8>,
     buf_pos: usize,
@@ -274,9 +282,10 @@ pub struct StreamingLexer<R: Read, TK: TokenKindEnum, D: DfaMatcher<TK>> {
     modes: Vec<u32>,
     _tk: std::marker::PhantomData<fn() -> TK>,
     _dfa: std::marker::PhantomData<fn() -> D>,
+    _lk: std::marker::PhantomData<fn() -> LK>,
 }
 
-impl<R: Read, TK: TokenKindEnum, D: DfaMatcher<TK>> StreamingLexer<R, TK, D> {
+impl<R: Read, TK: TokenKindEnum, D: DfaMatcher<TK>, LK: LabelKindEnum> StreamingLexer<R, TK, D, LK> {
     /// Build a streaming lexer that pulls from `reader`.
     pub fn new(reader: R) -> Self {
         Self {
@@ -290,6 +299,7 @@ impl<R: Read, TK: TokenKindEnum, D: DfaMatcher<TK>> StreamingLexer<R, TK, D> {
             modes: vec![0],
             _tk: std::marker::PhantomData,
             _dfa: std::marker::PhantomData,
+            _lk: std::marker::PhantomData,
         }
     }
 
@@ -371,8 +381,8 @@ impl<R: Read, TK: TokenKindEnum, D: DfaMatcher<TK>> StreamingLexer<R, TK, D> {
     }
 }
 
-impl<R: Read, TK: TokenKindEnum, D: DfaMatcher<TK>> LexerBackend<'static, TK>
-    for StreamingLexer<R, TK, D>
+impl<R: Read, TK: TokenKindEnum, D: DfaMatcher<TK>, LK: LabelKindEnum> LexerBackend<'static, TK, LK>
+    for StreamingLexer<R, TK, D, LK>
 {
     /// Produce the next token from the stream. See [`Scanner::next_token`]
     /// for the overall contract; the only difference is that `text` is
@@ -383,7 +393,7 @@ impl<R: Read, TK: TokenKindEnum, D: DfaMatcher<TK>> LexerBackend<'static, TK>
     /// match saturated the view without hitting EOF. This can re-scan the
     /// same token prefix but keeps the compiled DFA a pure slice function
     /// rather than one entangled with the reader.
-    fn next_token(&mut self) -> Token<'static, TK> {
+    fn next_token(&mut self) -> Token<'static, TK, LK> {
         self.ensure_bytes(STREAM_CHUNK);
         if self.view().is_empty() {
             let p = self.pos();

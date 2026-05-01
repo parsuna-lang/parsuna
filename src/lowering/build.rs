@@ -66,8 +66,11 @@ pub enum Op {
         token_name: String,
         /// SYNC-set id to recover to on mismatch.
         sync: SyncSetId,
-        /// Optional label from a `name:NAME` grammar form.
-        label: Option<String>,
+        /// Optional label-id from a `name:NAME` grammar form. `Some(i)`
+        /// indexes into [`Program::labels`]; `None` means the position
+        /// was unlabeled. The codegen turns this id into a runtime
+        /// `LabelKind` enum value.
+        label: Option<u16>,
     },
     /// Recursive call into another rule or block.
     Call {
@@ -141,6 +144,11 @@ pub struct Program {
     /// Names of the public (non-fragment) rules. A rule's `RuleKind` id
     /// is its index here.
     pub rules: Vec<String>,
+    /// Distinct grammar labels (`name:NAME` position names) in source
+    /// order. The id of `labels[i]` is `i + 1` at the codegen / runtime
+    /// boundary; id `0` is reserved as the "no label" sentinel so all
+    /// backends can treat label storage as a single integer field.
+    pub labels: Vec<String>,
     /// Interned FIRST-set pool. Each entry is a `FirstSet` — a list of
     /// `LookaheadSeq`s (i.e. `Vec<Vec<u16>>`). Index by [`FirstSetId`].
     pub first_sets: FirstSetPool,
@@ -167,6 +175,10 @@ struct Builder<'a> {
     first_intern: HashMap<Vec<LookaheadSeq>, FirstSetId>,
     sync_sets: SyncSetPool,
     sync_intern: HashMap<Vec<u16>, SyncSetId>,
+    /// Distinct labels in first-occurrence order. Mirrors
+    /// [`Program::labels`]; the id of `labels[i]` is `i + 1`.
+    labels: Vec<String>,
+    label_intern: HashMap<String, u16>,
     current_sync: SyncSetId,
     current_symbol: String,
 }
@@ -231,6 +243,8 @@ pub fn build(ag: &AnalyzedGrammar) -> Program {
         first_intern: HashMap::new(),
         sync_sets: Vec::new(),
         sync_intern: HashMap::new(),
+        labels: Vec::new(),
+        label_intern: HashMap::new(),
         current_sync: 0,
         current_symbol: String::new(),
     };
@@ -275,6 +289,7 @@ pub fn build(ag: &AnalyzedGrammar) -> Program {
         blocks,
         first_sets,
         sync_sets,
+        labels,
         ..
     } = b;
     let mut mode_names: Vec<String> = vec!["default".to_string(); mode_ids.len()];
@@ -288,6 +303,7 @@ pub fn build(ag: &AnalyzedGrammar) -> Program {
         public_rule_names,
         tokens,
         rules,
+        labels,
         first_sets,
         sync_sets,
         mode_names,
@@ -363,6 +379,20 @@ impl Builder<'_> {
             seqs,
             has_references: false,
         });
+        id
+    }
+
+    /// Intern a label name and return its 1-based id (so id `0` stays
+    /// available as the runtime "no label" sentinel). First-seen order
+    /// drives the id, which keeps debug dumps and emitted enum variants
+    /// stable across runs.
+    fn intern_label(&mut self, name: &str) -> u16 {
+        if let Some(id) = self.label_intern.get(name) {
+            return *id;
+        }
+        let id = (self.labels.len() as u16) + 1;
+        self.labels.push(name.to_string());
+        self.label_intern.insert(name.to_string(), id);
         id
     }
 
@@ -573,13 +603,14 @@ impl Builder<'_> {
                         "{}:expect:{}@{}",
                         self.current_symbol, tok_name, name
                     );
+                    let label_id = self.intern_label(name);
                     self.push_op(
                         cur,
                         Op::Expect {
                             kind,
                             token_name: tok_name.clone(),
                             sync: self.current_sync,
-                            label: Some(name.clone()),
+                            label: Some(label_id),
                         },
                         dbg_label,
                     );

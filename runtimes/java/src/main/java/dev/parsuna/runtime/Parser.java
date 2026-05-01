@@ -272,7 +272,7 @@ public final class Parser implements Iterator<Event> {
                         // symmetry with the drive-mode emit).
                         Event ev = consume();
                         if (opts.dropUnlabeledTokens
-                                && ((Event.Token) ev).token.label == null) {
+                                && ((Event.Token) ev).token.label == 0) {
                             continue;
                         }
                         return ev;
@@ -302,7 +302,7 @@ public final class Parser implements Iterator<Event> {
             Event ev = cfg.step.step(cursor);
             if (ev != null) {
                 if (opts.dropUnlabeledTokens && ev instanceof Event.Token
-                        && ((Event.Token) ev).token.label == null) {
+                        && ((Event.Token) ev).token.label == 0) {
                     continue;
                 }
                 return ev;

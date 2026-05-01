@@ -145,6 +145,50 @@ fn emit_constants(s: &mut String, st: &StateTable) {
     writeln!(s, "\treturn \"?\"").unwrap();
     writeln!(s, "}}").unwrap();
     writeln!(s).unwrap();
+
+    // ---- LabelKind ------------------------------------------------------
+    writeln!(
+        s,
+        "// LabelKind enumerates the distinct grammar labels (`name:NAME` form)."
+    )
+    .unwrap();
+    writeln!(
+        s,
+        "// `Token.Label` stores the matching constant's value (or 0 for unlabeled"
+    )
+    .unwrap();
+    writeln!(
+        s,
+        "// positions); compare with `tok.Label == LkFoo` to dispatch on the"
+    )
+    .unwrap();
+    writeln!(s, "// position name without strings.").unwrap();
+    writeln!(s, "type LabelKind uint16").unwrap();
+    writeln!(s, "const (").unwrap();
+    if st.labels.is_empty() {
+        writeln!(s, "\tLkNone LabelKind = 0").unwrap();
+    } else {
+        for (i, n) in st.labels.iter().enumerate() {
+            writeln!(s, "\tLk{} LabelKind = {}", pascal(n), i + 1).unwrap();
+        }
+    }
+    writeln!(s, ")").unwrap();
+    writeln!(s).unwrap();
+    writeln!(
+        s,
+        "// LabelKindName returns the grammar-declared name of a label kind,"
+    )
+    .unwrap();
+    writeln!(s, "// or \"?\" if the kind is not recognised.").unwrap();
+    writeln!(s, "func LabelKindName(k LabelKind) string {{").unwrap();
+    writeln!(s, "\tswitch k {{").unwrap();
+    for n in &st.labels {
+        writeln!(s, "\tcase Lk{}: return \"{}\"", pascal(n), n).unwrap();
+    }
+    writeln!(s, "\t}}").unwrap();
+    writeln!(s, "\treturn \"?\"").unwrap();
+    writeln!(s, "}}").unwrap();
+    writeln!(s).unwrap();
 }
 
 fn token_const(st: &StateTable, kind: u16) -> String {
@@ -512,8 +556,11 @@ fn emit_instr(s: &mut String, st: &StateTable, op: &Instr) {
             label,
         } => {
             let label_arg = match label {
-                Some(name) => format!("{:?}", name),
-                None => "\"\"".to_string(),
+                Some(id) => format!(
+                    "uint16(Lk{})",
+                    pascal(&st.labels[(*id as usize) - 1])
+                ),
+                None => "0".to_string(),
             };
             writeln!(
                 s,

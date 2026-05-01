@@ -42,12 +42,11 @@ typedef struct { Pos start, end; } Span;
  * In *string* mode (parser_init_from_string) `text` points directly into
  * the caller's source buffer — zero-copy and NOT NUL-terminated; read
  * exactly `text_len` bytes. Use `text_len` in both modes. */
-/* `label` is the grammar-position name from a `name:NAME` form, or NULL
- * for unlabeled positions. Set by the dispatch's labeled `try_consume`
- * on the success path; points at a static literal baked into the
- * generated parser source, so it has program lifetime and the runtime
- * never owns or frees it. */
-typedef struct { uint16_t kind; Span span; char *text; size_t text_len; const char *label; } Token;
+/* `label` is the grammar-position id from a `name:NAME` form, or `0`
+ * for unlabeled positions. Non-zero values map to the codegen-emitted
+ * `LabelKind` enum; consumers compare via `tok.label == LK_FOO`.
+ * Set by the dispatch's labeled `try_consume` on the success path. */
+typedef struct { uint16_t kind; Span span; char *text; size_t text_len; uint16_t label; } Token;
 
 /* A recoverable parse or lex error. `message` is owned by the parser
  * until the next call to parser_next. */
@@ -215,7 +214,7 @@ typedef struct Parser {
      * parser_next loop never returns them. Default 0, matching the
      * historic behaviour. */
     int drop_skips;
-    /* When non-zero, every EV_TOKEN whose `Token.label` is NULL (i.e.
+    /* When non-zero, every EV_TOKEN whose `Token.label` is `0` (i.e.
      * that didn't match a `name:NAME` position in the grammar) is
      * silently consumed. Structural events (ENTER/EXIT/ERROR) and
      * GARBAGE still flow through. The "give me an AST shape, drop the
@@ -514,13 +513,13 @@ static inline Event ev_error_here(Parser *p, const char *msg) {
  * `sync` is typically the caller rule's FOLLOW set: recovery skips
  * unexpected tokens until the lookahead lands on one of these, which
  * gives the surrounding rule a reasonable place to resume. */
-static inline Event try_consume_labeled(Parser *p, uint16_t kind, const uint16_t *sync, const char *name, const char *label) {
+static inline Event try_consume_labeled(Parser *p, uint16_t kind, const uint16_t *sync, const char *name, uint16_t label) {
     if (p->look_buf[0].kind == kind) {
         /* Stamp the label directly on the slot's token before
          * ev_consume rotates it out — keeps the unlabeled hot path
          * branch-free (the field stays NULL from the lex-time
          * initialisation). */
-        if (label != NULL) p->look_buf[0].label = label;
+        if (label != 0) p->look_buf[0].label = label;
         return ev_consume(p);
     }
     size_t nlen = strlen(name) + 16;
@@ -540,7 +539,7 @@ static inline Event try_consume_labeled(Parser *p, uint16_t kind, const uint16_t
 }
 
 static inline Event try_consume(Parser *p, uint16_t kind, const uint16_t *sync, const char *name) {
-    return try_consume_labeled(p, kind, sync, name, NULL);
+    return try_consume_labeled(p, kind, sync, name, 0);
 }
 
 /* Arm recovery-mode without an expected kind. Called from a dispatch
@@ -728,7 +727,7 @@ static inline int parser_next(Parser *p, Event *out) {
                      * label; the gate is here for symmetry with
                      * drive-mode emit). */
                     Event ev = ev_consume(p);
-                    if (p->drop_unlabeled_tokens && ev.token.label == NULL) {
+                    if (p->drop_unlabeled_tokens && ev.token.label == 0) {
                         if (!p->borrow_buf) free(ev.token.text);
                         continue;
                     }
@@ -760,7 +759,7 @@ static inline int parser_next(Parser *p, Event *out) {
         }
         Event e;
         if (step(p, &e)) {
-            if (p->drop_unlabeled_tokens && e.tag == EV_TOKEN && e.token.label == NULL) {
+            if (p->drop_unlabeled_tokens && e.tag == EV_TOKEN && e.token.label == 0) {
                 if (!p->borrow_buf) free(e.token.text);
                 continue;
             }

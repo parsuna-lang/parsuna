@@ -170,6 +170,48 @@ fn emit_constants(s: &mut String, st: &StateTable) {
     writeln!(s, "    }};").unwrap();
     writeln!(s, "}}").unwrap();
     writeln!(s).unwrap();
+
+    // ---- LabelKind ------------------------------------------------------
+    writeln!(
+        s,
+        "/// <summary>One variant per distinct grammar label (<c>name:NAME</c> form)."
+    )
+    .unwrap();
+    writeln!(s, "/// <c>Token.Label</c> stores the matching variant's underlying").unwrap();
+    writeln!(
+        s,
+        "/// <c>ushort</c> id (or <c>0</c> for unlabeled positions); compare with"
+    )
+    .unwrap();
+    writeln!(
+        s,
+        "/// <c>tok.Label == (ushort)LabelKind.Foo</c> to dispatch on the position"
+    )
+    .unwrap();
+    writeln!(s, "/// name without strings.</summary>").unwrap();
+    writeln!(s, "public enum LabelKind : ushort {{").unwrap();
+    if st.labels.is_empty() {
+        writeln!(s, "    None = 0,").unwrap();
+    } else {
+        for (i, n) in st.labels.iter().enumerate() {
+            writeln!(s, "    {} = {},", pascal_case(n), i + 1).unwrap();
+        }
+    }
+    writeln!(s, "}}").unwrap();
+    writeln!(s).unwrap();
+    writeln!(s, "public static class LabelKindEx {{").unwrap();
+    writeln!(
+        s,
+        "    public static string DisplayName(this LabelKind k) => k switch {{"
+    )
+    .unwrap();
+    for n in &st.labels {
+        writeln!(s, "        LabelKind.{} => \"{}\",", pascal_case(n), n).unwrap();
+    }
+    writeln!(s, "        _ => \"?\",").unwrap();
+    writeln!(s, "    }};").unwrap();
+    writeln!(s, "}}").unwrap();
+    writeln!(s).unwrap();
 }
 
 fn token_ushort(st: &StateTable, kind: u16) -> String {
@@ -568,8 +610,11 @@ fn emit_instr(s: &mut String, st: &StateTable, op: &Instr, ind: &str) {
             label,
         } => {
             let label_arg = match label {
-                Some(name) => format!("\"{}\"", name),
-                None => "null".to_string(),
+                Some(id) => format!(
+                    "(ushort)LabelKind.{}",
+                    pascal_case(&st.labels[(*id as usize) - 1])
+                ),
+                None => "0".to_string(),
             };
             writeln!(
                 s,

@@ -296,6 +296,39 @@ fn emit_header(h: &mut String, st: &StateTable, stem: &str, upper: &str) {
 
     writeln!(
         h,
+        "/* Distinct grammar labels (`name:NAME` form). `Token.label` stores"
+    )
+    .unwrap();
+    writeln!(
+        h,
+        " * the matching constant's value (or `0` for unlabeled positions);"
+    )
+    .unwrap();
+    writeln!(
+        h,
+        " * compare via `tok.label == {upper}_LK_FOO` to dispatch on the"
+    )
+    .unwrap();
+    writeln!(h, " * position name without strings. */").unwrap();
+    writeln!(h, "typedef enum {{").unwrap();
+    if st.labels.is_empty() {
+        writeln!(h, "  {upper}_LK__none = 0").unwrap();
+    } else {
+        for (i, n) in st.labels.iter().enumerate() {
+            writeln!(
+                h,
+                "  {upper}_LK_{} = {},",
+                screaming_snake(n),
+                i + 1
+            )
+            .unwrap();
+        }
+    }
+    writeln!(h, "}} {stem}_LabelKind;").unwrap();
+    writeln!(h).unwrap();
+
+    writeln!(
+        h,
         "/* Grammar-declared name for a token kind (or \"?\" if unknown). */"
     )
     .unwrap();
@@ -880,8 +913,11 @@ fn emit_instr(c: &mut String, st: &StateTable, upper: &str, op: &Instr, ind: &st
         } => {
             let name = c_token_name(st, upper, *kind);
             let label_arg = match label {
-                Some(s) => format!("\"{}\"", s),
-                None => "NULL".to_string(),
+                Some(id) => format!(
+                    "{upper}_LK_{}",
+                    screaming_snake(&st.labels[(*id as usize) - 1])
+                ),
+                None => "0".to_string(),
             };
             writeln!(
                 c,

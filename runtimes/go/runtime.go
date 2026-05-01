@@ -42,13 +42,13 @@ type Token struct {
 	Kind uint16
 	Span Span
 	Text string
-	// Label is the grammar-position name from a `name:NAME` form,
-	// or "" if the position wasn't labeled. Set by the dispatch's
-	// labeled TryConsume on the success path; the empty string is
-	// the sentinel "no label". Generated parsers never write a
-	// labeled token with an empty label, so `tok.Label != ""` is a
-	// reliable "this position is labeled" check.
-	Label string
+	// Label is the grammar-position id from a `name:NAME` form, or
+	// `0` for unlabeled positions. Non-zero values map to the
+	// codegen's `LabelKind` constants; consumers compare with
+	// `tok.Label == LabelKindFoo` — pure integer compares, no
+	// string handling. Set by the dispatch's labeled TryConsume on
+	// the success path.
+	Label uint16
 }
 
 // EofKind is the token-kind id reserved for end-of-input. Always 0.
@@ -331,7 +331,7 @@ type Options struct {
 	// as EvToken events, matching the historic behaviour).
 	DropSkips bool
 	// DropUnlabeledTokens suppresses every Token event whose
-	// `Token.Label` is empty (i.e. that didn't match a `name:NAME`
+	// `Token.Label` is `0` (i.e. that didn't match a `name:NAME`
 	// position in the grammar). Structural events (Enter/Exit/Error)
 	// and Garbage events still flow through. The "give me an AST
 	// shape, drop the punctuation" mode for tree-building consumers.
@@ -559,7 +559,7 @@ func (c *Cursor) Consume() Event { return (*Parser)(c).consume() }
 // the lookahead lands on `sync` (when it does, the matching token
 // comes through as a normal Token event).
 func (c *Cursor) TryConsume(kind uint16, sync []uint16, name string) Event {
-	return c.TryConsumeLabeled(kind, sync, name, "")
+	return c.TryConsumeLabeled(kind, sync, name, 0)
 }
 
 // TryConsumeLabeled is TryConsume with a `name:NAME` grammar label
@@ -568,14 +568,14 @@ func (c *Cursor) TryConsume(kind uint16, sync []uint16, name string) Event {
 // travels through to the consumer's event stream so they can identify
 // the position by name without tracking surrounding rule context.
 // Pass label = "" for unlabeled positions.
-func (c *Cursor) TryConsumeLabeled(kind uint16, sync []uint16, name, label string) Event {
+func (c *Cursor) TryConsumeLabeled(kind uint16, sync []uint16, name string, label uint16) Event {
 	p := (*Parser)(c)
 	if c.look[0].Kind == kind {
 		// Stamp the label directly on the slot's token before
 		// consume rotates it out — keeps the unlabeled hot path
 		// branch-free (the zero-value empty string from the
 		// lex-time construction is left in place).
-		if label != "" {
+		if label != 0 {
 			p.look[0].Label = label
 		}
 		return p.consume()
@@ -669,7 +669,7 @@ func (p *Parser) Next() (Event, bool) {
 					// token has no label; the gate is here for
 					// symmetry with the drive-mode emit).
 					ev := p.consume()
-					if p.opts.DropUnlabeledTokens && ev.Token.Label == "" {
+					if p.opts.DropUnlabeledTokens && ev.Token.Label == 0 {
 						continue
 					}
 					return ev, true
@@ -701,7 +701,7 @@ func (p *Parser) Next() (Event, bool) {
 		// cast — Cursor is `type Cursor Parser` so the layouts are
 		// identical.
 		if ev, ok := p.cfg.Step((*Cursor)(p)); ok {
-			if p.opts.DropUnlabeledTokens && ev.Tag == EvToken && ev.Token.Label == "" {
+			if p.opts.DropUnlabeledTokens && ev.Tag == EvToken && ev.Token.Label == 0 {
 				continue
 			}
 			return ev, true

@@ -4,7 +4,7 @@ use crate::grammar::ir::*;
 use crate::Span;
 use parsuna_rt::Error;
 
-use super::generated::{self, Event, RuleKind, Token, TokenKind};
+use super::generated::{self, Event, LabelKind, RuleKind, Token, TokenKind};
 
 fn event_span(e: &Event<'_>) -> Span {
     match e {
@@ -82,10 +82,10 @@ impl<'a, I: Iterator<Item = Event<'a>>> Reader<'a, I> {
         }
     }
 
-    /// True iff the next event is a labeled token whose `label` equals
+    /// True iff the next event is a labeled token whose label matches
     /// `want`. Used as the `LabeledOnly` substitute for the previous
     /// "is the next event a Token of kind X" branch checks.
-    fn peek_token_label(&self, want: &str) -> bool {
+    fn peek_token_label(&self, want: LabelKind) -> bool {
         matches!(
             self.peek(),
             Some(Event::Token(t)) if t.label == Some(want)
@@ -205,7 +205,7 @@ fn read_mode_pre<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>) -> Ve
     r.expect_enter(RuleKind::ModePre);
     let name_tok = r.next_token();
     let mut args: Vec<String> = Vec::new();
-    while r.peek_token_label("m") {
+    while r.peek_token_label(LabelKind::M) {
         let arg = r.next_token();
         args.push(arg.text.into_owned());
     }
@@ -441,7 +441,7 @@ fn read_action<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>) -> RawA
     let mut args: Vec<String> = Vec::new();
     if r.peek_enter() == Some(RuleKind::ActionArg) {
         r.expect_enter(RuleKind::ActionArg);
-        while r.peek_token_label("arg") {
+        while r.peek_token_label(LabelKind::Arg) {
             args.push(r.next_token().text.into_owned());
         }
         r.expect_exit(RuleKind::ActionArg);
@@ -515,7 +515,7 @@ fn read_seq<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>) -> Expr {
 /// Consumes it (and strips the trailing `:`) on a hit; returns `None`
 /// otherwise.
 fn peek_label<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>) -> Option<(String, Span)> {
-    if !r.peek_token_label("lbl") {
+    if !r.peek_token_label(LabelKind::Lbl) {
         return None;
     }
     let tok = r.next_token();
@@ -564,14 +564,14 @@ fn read_primary_atom<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>) -
         _ => {
             let tok = r.next_token();
             match tok.label {
-                Some("ref") => {
+                Some(LabelKind::Ref) => {
                     if initial_letter(&tok.text).map_or(false, |c| c.is_ascii_uppercase()) {
                         Expr::Token(tok.text.into_owned())
                     } else {
                         Expr::Rule(tok.text.into_owned())
                     }
                 }
-                Some("string") => {
+                Some(LabelKind::String) => {
                     r.issues.push(
                         Error::new("string literal atoms are only valid inside token declarations")
                             .at(tok.span),
@@ -620,15 +620,15 @@ fn apply_quantifiers<'a, I: Iterator<Item = Event<'a>>>(
 ) -> Expr {
     loop {
         match r.peek() {
-            Some(Event::Token(t)) if t.label == Some("q_opt") => {
+            Some(Event::Token(t)) if t.label == Some(LabelKind::QOpt) => {
                 r.advance();
                 x = Expr::Opt(Box::new(x));
             }
-            Some(Event::Token(t)) if t.label == Some("q_star") => {
+            Some(Event::Token(t)) if t.label == Some(LabelKind::QStar) => {
                 r.advance();
                 x = Expr::Star(Box::new(x));
             }
-            Some(Event::Token(t)) if t.label == Some("q_plus") => {
+            Some(Event::Token(t)) if t.label == Some(LabelKind::QPlus) => {
                 r.advance();
                 x = Expr::Plus(Box::new(x));
             }
@@ -672,8 +672,8 @@ fn read_pattern_primary<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>
         _ => {
             let tok = r.next_token();
             match tok.label {
-                Some("ref") => TokenPattern::Ref(tok.text.into_owned()),
-                Some("string") => {
+                Some(LabelKind::Ref) => TokenPattern::Ref(tok.text.into_owned()),
+                Some(LabelKind::String) => {
                     TokenPattern::Literal(unquote_string(&tok.text, tok.span, &mut r.issues))
                 }
                 _ => {
@@ -693,13 +693,13 @@ fn read_char_primary<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>) -
     r.expect_enter(RuleKind::CharPrimary);
     let first = r.next_token();
     let p = match first.label {
-        Some("dot") => TokenPattern::Class(CharClass {
+        Some(LabelKind::Dot) => TokenPattern::Class(CharClass {
             negated: true,
             items: Vec::new(),
         }),
-        Some("lo") => {
+        Some(LabelKind::Lo) => {
             let lo = unquote_char(&first.text, first.span, &mut r.issues);
-            if r.peek_token_label("hi") {
+            if r.peek_token_label(LabelKind::Hi) {
                 let hi_tok = r.next_token();
                 let hi = unquote_char(&hi_tok.text, hi_tok.span, &mut r.issues);
                 TokenPattern::Class(CharClass {
@@ -733,7 +733,7 @@ fn read_neg_class<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>) -> T
     // `_neg_atom*` event sequence under `LabeledOnly` — we just keep
     // collecting until the `Exit(NegClass)`. A `_neg_atom` is a fragment
     // that surfaces either as `Enter(CharPrimary)` or as a `Token@string`.
-    while r.peek_enter() == Some(RuleKind::CharPrimary) || r.peek_token_label("string") {
+    while r.peek_enter() == Some(RuleKind::CharPrimary) || r.peek_token_label(LabelKind::String) {
         collect_neg_atom(r, &mut items, &mut strings, neg_class_span);
     }
     r.expect_exit(RuleKind::NegClass);
@@ -778,7 +778,7 @@ fn collect_neg_atom<'a, I: Iterator<Item = Event<'a>>>(
     // `_neg_atom` is a fragment, so its events are inlined: we see
     // either `Enter(CharPrimary)` ... or a bare `Token@string` here.
     if let Some(Event::Token(t)) = r.peek() {
-        if t.label == Some("string") {
+        if t.label == Some(LabelKind::String) {
             let tok = r.next_token();
             let text_owned = tok.text.clone().into_owned();
             let s = unquote_string(&text_owned, tok.span, &mut r.issues);
@@ -926,15 +926,15 @@ fn apply_pattern_quantifiers<'a, I: Iterator<Item = Event<'a>>>(
 ) -> TokenPattern {
     loop {
         match r.peek() {
-            Some(Event::Token(t)) if t.label == Some("q_opt") => {
+            Some(Event::Token(t)) if t.label == Some(LabelKind::QOpt) => {
                 r.advance();
                 p = TokenPattern::Opt(Box::new(p));
             }
-            Some(Event::Token(t)) if t.label == Some("q_star") => {
+            Some(Event::Token(t)) if t.label == Some(LabelKind::QStar) => {
                 r.advance();
                 p = TokenPattern::Star(Box::new(p));
             }
-            Some(Event::Token(t)) if t.label == Some("q_plus") => {
+            Some(Event::Token(t)) if t.label == Some(LabelKind::QPlus) => {
                 r.advance();
                 p = TokenPattern::Plus(Box::new(p));
             }
@@ -1529,12 +1529,12 @@ mod tests {
         let expected: Vec<_> = vec![
             (
                 Some(generated::TokenKind::Ident),
-                Some("name"),
+                Some(generated::LabelKind::Name),
                 "x".to_string(),
             ),
             (
                 Some(generated::TokenKind::Ident),
-                Some("ref"),
+                Some(generated::LabelKind::Ref),
                 "y".to_string(),
             ),
         ];

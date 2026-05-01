@@ -619,7 +619,7 @@ fn format_instr(op: &parsuna::lowering::Instr, st: &StateTable) -> Vec<String> {
             "Expect {} sync={}{}",
             token_name_for_kind_fallback(st, *kind, token_name),
             format_sync_set(st, *sync),
-            label.as_deref().map(|n| format!(" label={}", n)).unwrap_or_default()
+            label.map(|id| format!(" label={}", label_name(st, id))).unwrap_or_default()
         )],
         Instr::PushRet(r) => vec![format!("PushRet {}", state_ref(st, *r))],
     }
@@ -833,6 +833,16 @@ fn mode_actions_suffix(st: &StateTable, kind: u16) -> String {
         })
         .collect();
     format!(" → {}", parts.join(", "))
+}
+
+fn label_name(st: &StateTable, id: u16) -> String {
+    if id == 0 {
+        return "?".to_string();
+    }
+    st.labels
+        .get((id - 1) as usize)
+        .cloned()
+        .unwrap_or_else(|| format!("?{}", id))
 }
 
 fn token_name_for_kind(st: &StateTable, kind: u16) -> &str {

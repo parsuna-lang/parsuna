@@ -180,6 +180,57 @@ fn emit_constants(s: &mut String, st: &StateTable) {
     writeln!(s, "        }}").unwrap();
     writeln!(s, "    }}").unwrap();
     writeln!(s).unwrap();
+
+    // ---- LabelKind ------------------------------------------------------
+    writeln!(s, "    /**").unwrap();
+    writeln!(
+        s,
+        "     * One variant per distinct grammar label (`name:NAME` form)."
+    )
+    .unwrap();
+    writeln!(s, "     *").unwrap();
+    writeln!(
+        s,
+        "     * `Token.label()` returns the matching variant's `id` (or `0` for"
+    )
+    .unwrap();
+    writeln!(
+        s,
+        "     * unlabeled positions); compare via `tok.label() == LabelKind.NAME.id`"
+    )
+    .unwrap();
+    writeln!(s, "     * to dispatch on the position name without strings.").unwrap();
+    writeln!(s, "     */").unwrap();
+    writeln!(s, "    public static enum LabelKind {{").unwrap();
+    if st.labels.is_empty() {
+        writeln!(s, "        ;").unwrap();
+    } else {
+        for (i, n) in st.labels.iter().enumerate() {
+            if i > 0 {
+                writeln!(s, ",").unwrap();
+            }
+            write!(s, "        {}({})", screaming_snake(n), i + 1).unwrap();
+        }
+        writeln!(s, ";").unwrap();
+    }
+    writeln!(s, "        public final int id;").unwrap();
+    writeln!(s, "        LabelKind(int id) {{ this.id = id; }}").unwrap();
+    writeln!(s, "        public String displayName() {{").unwrap();
+    writeln!(s, "            switch (this) {{").unwrap();
+    for n in &st.labels {
+        writeln!(
+            s,
+            "                case {}: return \"{}\";",
+            screaming_snake(n),
+            n
+        )
+        .unwrap();
+    }
+    writeln!(s, "                default: return name();").unwrap();
+    writeln!(s, "            }}").unwrap();
+    writeln!(s, "        }}").unwrap();
+    writeln!(s, "    }}").unwrap();
+    writeln!(s).unwrap();
 }
 
 fn token_id(st: &StateTable, kind: u16) -> String {
@@ -682,8 +733,11 @@ fn emit_instr(s: &mut String, st: &StateTable, op: &Instr, ind: &str) {
             label,
         } => {
             let label_arg = match label {
-                Some(name) => format!("\"{}\"", name),
-                None => "null".to_string(),
+                Some(id) => format!(
+                    "LabelKind.{}.id",
+                    screaming_snake(&st.labels[(*id as usize) - 1])
+                ),
+                None => "0".to_string(),
             };
             writeln!(
                 s,

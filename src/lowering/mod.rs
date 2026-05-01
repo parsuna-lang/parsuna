@@ -101,6 +101,11 @@ pub struct StateTable {
     /// Names of the non-fragment rules in declaration order. A rule's
     /// `RuleKind` id is its index here.
     pub rule_kinds: Vec<String>,
+    /// Distinct grammar labels (`name:NAME` position names) in
+    /// first-occurrence order. The runtime label id of `labels[i]` is
+    /// `i + 1`; id `0` is reserved as the "no label" sentinel so every
+    /// backend can store a Token's label as a single integer field.
+    pub labels: Vec<String>,
     /// Interned FIRST-set pool. Each entry is a `FirstSet` — a list of
     /// `LookaheadSeq`s (i.e. `Vec<Vec<u16>>`). Index by [`FirstSetId`].
     pub first_sets: FirstSetPool,
@@ -213,8 +218,12 @@ pub enum Instr {
         token_name: String,
         /// SYNC set to recover to on mismatch.
         sync: SyncSetId,
-        /// Optional grammar label from `name:NAME` syntax.
-        label: Option<String>,
+        /// Optional grammar label from `name:NAME` syntax. `Some(i)`
+        /// is a 1-based label id (matching the codegen's `LabelKind`
+        /// enum value); the corresponding name is
+        /// `StateTable::labels[i - 1]`. `None` means the position
+        /// was unlabeled.
+        label: Option<u16>,
     },
     /// Push a return state. Pairs with a future `Tail::Ret`; the callee's
     /// `Ret` pops this to resume the caller's flow.

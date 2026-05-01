@@ -488,6 +488,7 @@ mod tests {
             grammar_name: "x".into(),
             tokens: vec![],
             rule_kinds: vec![],
+            labels: vec![],
             first_sets: vec![],
             sync_sets: vec![],
             states,

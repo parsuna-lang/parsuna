@@ -34,13 +34,14 @@ public readonly record struct Span(Pos Start, Pos End)
 /// +<see cref="GarbageEvent"/> sequence at pump time and never lets
 /// them reach generated dispatch.</para>
 ///
-/// <para><c>Label</c> is the grammar-position name from a
-/// <c>name:NAME</c> form, or <c>null</c> for unlabeled positions. Set by
-/// the dispatch's labeled <see cref="Cursor.TryConsumeLabeled"/> on the
-/// success path, so consumers can identify a token by its position name
-/// without walking surrounding rule context.</para>
+/// <para><c>Label</c> is the grammar-position id from a <c>name:NAME</c>
+/// form (the codegen's <c>LabelKind</c> ordinal, 1-based), or <c>0</c>
+/// for unlabeled positions. Set by the dispatch's labeled
+/// <see cref="Cursor.TryConsumeLabeled"/> on the success path. Consumers
+/// dispatch via <c>tok.Label == (ushort)LabelKind.Foo</c> — pure integer
+/// compares, no string handling.</para>
 /// </remarks>
-public sealed record Token(ushort Kind, Span Span, string Text, string? Label = null);
+public sealed record Token(ushort Kind, Span Span, string Text, ushort Label = 0);
 
 /// <summary>A recoverable parse or lex error with its source span.</summary>
 public sealed record ParseError(string Message, Span Span)
@@ -551,7 +552,7 @@ public sealed class Parser : IEnumerable<Event>, IEnumerator<Event>
                         // token has no label; the gate is here for
                         // symmetry with drive-mode emit).
                         var ev = (TokenEvent)Consume();
-                        if (_opts.DropUnlabeledTokens && ev.Token.Label is null)
+                        if (_opts.DropUnlabeledTokens && ev.Token.Label == 0)
                             continue;
                         _current = ev;
                         return true;
@@ -582,7 +583,7 @@ public sealed class Parser : IEnumerable<Event>, IEnumerator<Event>
             {
                 if (_opts.DropUnlabeledTokens
                     && stepEv is TokenEvent t2
-                    && t2.Token.Label is null)
+                    && t2.Token.Label == 0)
                 {
                     continue;
                 }
@@ -693,7 +694,7 @@ public sealed class Cursor
     /// (when it does, the matching token comes through as a normal
     /// <see cref="TokenEvent"/>).</summary>
     public Event TryConsume(ushort kind, ushort[] sync, string name) =>
-        TryConsumeLabeled(kind, sync, name, null);
+        TryConsumeLabeled(kind, sync, name, 0);
 
     /// <summary><see cref="TryConsume"/> with a <paramref name="label"/>
     /// stamped on the consumed token's <see cref="Token.Label"/> on the
@@ -702,14 +703,14 @@ public sealed class Cursor
     /// stream so they can identify the position by name without
     /// tracking surrounding rule context. Pass <c>null</c> for
     /// unlabeled positions.</summary>
-    public Event TryConsumeLabeled(ushort kind, ushort[] sync, string name, string? label)
+    public Event TryConsumeLabeled(ushort kind, ushort[] sync, string name, ushort label)
     {
         if (_p._look[0]!.Kind == kind)
         {
             // `Token` is an immutable record — use `with` to stamp the
             // label and write it back into the lookahead slot before
             // Consume rotates it out.
-            if (label is not null)
+            if (label != 0)
             {
                 _p._look[0] = _p._look[0]! with { Label = label };
             }

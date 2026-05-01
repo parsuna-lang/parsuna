@@ -16,7 +16,7 @@ pub mod lexer;
 pub mod parser;
 pub mod span;
 
-pub use events::{Error, Event, RuleKindEnum, Token, TokenKindEnum, TOKEN_EOF};
+pub use events::{Error, Event, LabelKindEnum, RuleKindEnum, Token, TokenKindEnum, TOKEN_EOF};
 pub use lexer::{utf8_char_len, DfaMatch, DfaMatcher, LexerBackend, Scanner, StreamingLexer};
 pub use parser::{
     Cursor, DropSkips, EmitSkips, Grammar, LabeledOnly, Parser, ParserConfig, TERMINATED,

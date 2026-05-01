@@ -30,6 +30,33 @@ pub trait RuleKindEnum: Copy + 'static {
     fn name(self) -> &'static str;
 }
 
+/// The label-kind enumeration produced by the code generator.
+///
+/// One variant per distinct grammar label (`name:NAME` form). Attached
+/// to [`Token::label`] (as `Option<LK>`) so consumers can dispatch on
+/// position name without doing string compares: `tok.label ==
+/// Some(LabelKind::Name)`.
+///
+/// `from_id` lets callers convert a raw `u16` discriminant back to the
+/// enum (e.g. when reading labels out of a serialised event). The
+/// codegen also emits an empty enum variant marker for grammars that
+/// declare no labels — see the per-backend `LabelKind` codegen.
+pub trait LabelKindEnum: Copy + 'static {
+    /// The grammar-declared name of this label (e.g. `"name"`).
+    fn name(self) -> &'static str;
+}
+
+/// Trivial `LabelKindEnum` impl for `()`, used as the default
+/// type-parameter value in [`Event`] and [`Token`] so the bare type
+/// can be named without a codegen-emitted `LabelKind`. Grammars
+/// always go through the codegen path; `()` is for the non-generated
+/// naming case (tests, helper types, etc.).
+impl LabelKindEnum for () {
+    fn name(self) -> &'static str {
+        ""
+    }
+}
+
 /// A single event in the pull-based parse stream.
 ///
 /// A parse is a flat sequence of `Enter`/`Exit` markers (delimiting the
@@ -38,11 +65,14 @@ pub trait RuleKindEnum: Copy + 'static {
 /// order reconstructs the parse tree without the parser ever materialising
 /// one.
 ///
-/// The defaults `TK = u16, RK = u16` exist so the type can name itself
-/// without depending on the generated enums; generated code substitutes its
-/// own kind enums.
+/// `TK` / `RK` / `LK` are the codegen-emitted kind/label enums;
+/// generated code names this with concrete types via a `pub type Event`
+/// alias. The `u16` defaults on `TK` / `RK` keep the type nameable
+/// without the generated enums for the rare unparameterised use; `LK`
+/// has no default because it's bounded by [`LabelKindEnum`] (and the
+/// non-generated `u16` doesn't satisfy it).
 #[derive(Clone, Debug)]
-pub enum Event<'a, TK = u16, RK = u16> {
+pub enum Event<'a, TK = (), RK = (), LK = ()> {
     /// Opens the subtree for a rule. `pos` is the start of the first child.
     Enter {
         /// Which rule's subtree is opening.
@@ -64,14 +94,14 @@ pub enum Event<'a, TK = u16, RK = u16> {
     /// "synced-to-expected" token (e.g. when `expect` mismatches and
     /// the sync set lands on the kind it was expecting) also comes
     /// through as `Token` because it's legitimate parse data.
-    Token(Token<'a, TK>),
+    Token(Token<'a, TK, LK>),
     /// A token consumed by error-recovery. Emitted between a preceding
     /// [`Event::Error`] and the recovery's sync point: each unexpected
     /// token the runtime had to skip past appears here. Distinct from
     /// [`Event::Token`] so consumers (AST builders, syntax
     /// highlighters) can either drop it from the tree or render it
     /// as an error span without tracking recovery state externally.
-    Garbage(Token<'a, TK>),
+    Garbage(Token<'a, TK, LK>),
     /// A recoverable parse error. The parser may continue emitting events
     /// after an error so downstream tools still see a usable event stream.
     /// Followed by zero or more `Garbage` events (the unexpected
@@ -92,7 +122,7 @@ pub enum Event<'a, TK = u16, RK = u16> {
 /// and owns an independent string when that is not possible
 /// ([`StreamingLexer`](crate::lexer::StreamingLexer)).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Token<'a, TK = u16> {
+pub struct Token<'a, TK = (), LK = ()> {
     /// Classification given to this token by the lexer's DFA, or `None` if
     /// no token pattern matched.
     pub kind: Option<TK>,
@@ -101,34 +131,15 @@ pub struct Token<'a, TK = u16> {
     /// The matched source text — borrowed from the input where possible
     /// and owned when the lexer cannot keep a stable reference.
     pub text: Cow<'a, str>,
-    /// Grammar-position label from a `name:NAME` form, or `None` if the
-    /// position wasn't labeled. Set by the dispatch's labeled `expect`
+    /// Grammar-position label from a `name:NAME` form, or `None` for
+    /// unlabeled positions. Set by the dispatch's labeled `expect`
     /// path; left as `None` for skip tokens, garbage, and the
     /// synced-to-expected token after a recovery.
-    pub label: Option<&'static str>,
-}
-
-impl<'a> Token<'a, u16> {
-    /// Build a token with the raw numeric kind id. Mostly used by tests and
-    /// by the default-kind specialisation; generated code constructs tokens
-    /// with its own enum variants.
-    pub fn new(kind: u16, span: Span, text: impl Into<Cow<'a, str>>) -> Self {
-        Self {
-            kind: Some(kind),
-            span,
-            text: text.into(),
-            label: None,
-        }
-    }
-    /// Build an EOF token at `span`. Always has empty text.
-    pub fn eof(span: Span) -> Self {
-        Self {
-            kind: Some(TOKEN_EOF),
-            span,
-            text: Cow::Borrowed(""),
-            label: None,
-        }
-    }
+    ///
+    /// Consumers compare against the codegen's `LabelKind` enum
+    /// directly: `tok.label == Some(LabelKind::Name)`. No string
+    /// handling, no integer conversion.
+    pub label: Option<LK>,
 }
 
 /// Reserved kind id for end-of-input. Never collides with a grammar token

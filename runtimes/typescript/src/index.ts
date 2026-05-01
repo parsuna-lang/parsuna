@@ -34,17 +34,20 @@ export function pointSpan(p: Pos): Span {
  * pump time and never lets the token reach dispatch. EOF is its own
  * kind value.
  */
-export interface Token<TK = number> {
+export interface Token<TK = number, LK = number> {
   kind: TK | null;
   span: Span;
   text: string;
   /**
-   * Grammar-position label from a `name:NAME` form, or `null` if the
-   * position wasn't labeled. Set by the dispatch's labeled `tryConsume`
+   * Grammar-position label from a `name:NAME` form, or `null` for
+   * unlabeled positions. Set by the dispatch's labeled `tryConsume`
    * path; left as `null` for skip tokens, garbage, and the
    * synced-to-expected token after a recovery.
+   *
+   * Consumers compare against the codegen's `LabelKind` enum directly
+   * (`tok.label === LabelKind.Name`) — no string handling.
    */
-  label: string | null;
+  label: LK | null;
 }
 
 /** A recoverable parse or lex error. */
@@ -75,11 +78,11 @@ export function errorToString(d: ParseError): string {
  * through tagged `garbage` so consumers can drop it from the AST or
  * render it as an error span without tracking recovery state.
  */
-export type Event<TK = number, RK = number> =
+export type Event<TK = number, RK = number, LK = number> =
   | { tag: "enter"; rule: RK; pos: Pos }
   | { tag: "exit"; rule: RK; pos: Pos }
-  | { tag: "token"; token: Token<TK> }
-  | { tag: "garbage"; token: Token<TK> }
+  | { tag: "token"; token: Token<TK, LK> }
+  | { tag: "garbage"; token: Token<TK, LK> }
   | { tag: "error"; error: ParseError };
 
 /**
@@ -157,7 +160,7 @@ function bytesToByteString(bytes: Uint8Array): string {
  *   strings. Built by hand because `TextDecoder("latin1")` is actually
  *   windows-1252 and remaps 0x80–0x9F.
  */
-export class Lexer<TK extends number> {
+export class Lexer<TK extends number, LK extends number> {
   private bytes: Uint8Array;
   private buf: string;
   private i = 0;
@@ -266,7 +269,7 @@ export class Lexer<TK extends number> {
    * single-codepoint `kind: null` token so the parser can surface an
    * error and recover.
    */
-  nextToken(): Token<TK> {
+  nextToken(): Token<TK, LK> {
     if (this.i >= this.bytes.length) {
       const p = this.pos();
       return { kind: this.eofKind, span: pointSpan(p), text: "", label: null };
@@ -312,13 +315,13 @@ export const TERMINATED = -1;
  * The runtime's [`Parser`] satisfies this interface, but the public
  * `Parser` type only exposes `nextEvent` and the iterator surface, so
  * external consumers can't call these methods. Generated code asks for
- * `Cursor<TK, RK>` and pays no allocation or indirection — the cursor
+ * `Cursor<TK, RK, LK>` and pays no allocation or indirection — the cursor
  * is the parser instance, just narrowed to the dispatch surface at the
  * type level.
  */
-export interface Cursor<TK extends number, RK extends number> {
+export interface Cursor<TK extends number, RK extends number, LK extends number> {
   /** Peek at the i-th lookahead token. */
-  look(i: number): Token<TK>;
+  look(i: number): Token<TK, LK>;
   /** Current state id. */
   getState(): number;
   /** Overwrite the current state. */
@@ -330,11 +333,11 @@ export interface Cursor<TK extends number, RK extends number> {
   /** True iff the lookahead matches any of the given prefixes. */
   matchesFirst(set: readonly (readonly TK[])[]): boolean;
   /** Build an Enter event for `rule`. */
-  enter(rule: RK): Event<TK, RK>;
+  enter(rule: RK): Event<TK, RK, LK>;
   /** Build an Exit event for `rule`. */
-  exit(rule: RK): Event<TK, RK>;
+  exit(rule: RK): Event<TK, RK, LK>;
   /** Consume the lookahead as a `token` event. */
-  consume(): Event<TK, RK>;
+  consume(): Event<TK, RK, LK>;
   /**
    * Try to consume `kind`; on miss arm recovery and return an error.
    * `label`, if non-null, is stamped on the produced Token's
@@ -344,12 +347,12 @@ export interface Cursor<TK extends number, RK extends number> {
     kind: TK,
     sync: readonly TK[],
     expectedMsg: string,
-    label?: string | null,
-  ): Event<TK, RK>;
+    label?: LK | null,
+  ): Event<TK, RK, LK>;
   /** Arm recovery without an expected kind. */
   recoverTo(sync: readonly TK[]): void;
   /** Build a recoverable error event at the lookahead. */
-  errorHere(msg: string): Event<TK, RK>;
+  errorHere(msg: string): Event<TK, RK, LK>;
 }
 
 /**
@@ -360,7 +363,7 @@ export interface Cursor<TK extends number, RK extends number> {
  * returns whatever event that body's path produced (or `undefined`
  * if the body was a pure transition step).
  */
-export interface ParserConfig<TK extends number, RK extends number> {
+export interface ParserConfig<TK extends number, RK extends number, LK extends number> {
   /** Lookahead required by the grammar (LL(k)). */
   k: number;
   /** EOF kind sentinel (matches the one passed to the `Lexer`). */
@@ -372,14 +375,14 @@ export interface ParserConfig<TK extends number, RK extends number> {
    * that body produced, or `undefined` if it was a pure transition
    * (the runtime's `nextEvent` loop calls `step` again).
    */
-  step: (c: Cursor<TK, RK>) => Event<TK, RK> | undefined;
+  step: (c: Cursor<TK, RK, LK>) => Event<TK, RK, LK> | undefined;
   /**
    * Per-token mode-stack callback. Called once per lex token before
    * the skip / lookahead decision; calls `lex.pushMode(...)` /
    * `lex.popMode()` based on the token's `-> push(name)` / `-> pop`
    * annotations. Optional: grammars that declare no modes omit it.
    */
-  applyActions?: (kind: TK | null, lex: Lexer<TK>) => void;
+  applyActions?: (kind: TK | null, lex: Lexer<TK, LK>) => void;
 }
 
 /**
@@ -422,7 +425,8 @@ interface Recovery<TK> {
 export class Parser<
   TK extends number,
   RK extends number,
-> implements IterableIterator<Event<TK, RK>>, Cursor<TK, RK> {
+  LK extends number,
+> implements IterableIterator<Event<TK, RK, LK>>, Cursor<TK, RK, LK> {
   /**
    * Lookahead ring. `null` slots are awaiting refill — pump-mode in
    * [`nextEvent`] pulls lex tokens one-at-a-time until every slot
@@ -433,7 +437,7 @@ export class Parser<
    * one and parks the new `null` at index `k-1`, and `pumpOne`
    * always fills the leftmost empty slot.
    */
-  private lookBuf: (Token<TK> | null)[];
+  private lookBuf: (Token<TK, LK> | null)[];
   private prevEnd: Pos;
   private state: number;
   /**
@@ -467,16 +471,16 @@ export class Parser<
   // matching `garbage` event. Lex-failure tokens never enter
   // [`lookBuf`], so dispatch can read `look(i).kind` as a real `TK`
   // without a null-guard.
-  private pendingLexGarbage: Token<TK> | null = null;
+  private pendingLexGarbage: Token<TK, LK> | null = null;
 
   constructor(
-    private readonly lex: Lexer<TK>,
+    private readonly lex: Lexer<TK, LK>,
     entry: number,
     private readonly cfg: ParserConfig<TK, RK>,
     options?: { emitSkips?: boolean; emitUnlabeledTokens?: boolean },
   ) {
     this.state = entry;
-    this.lookBuf = new Array<Token<TK> | null>(cfg.k).fill(null);
+    this.lookBuf = new Array<Token<TK, LK> | null>(cfg.k).fill(null);
     // `prevEnd` is overwritten on the first `enter()`/`consume()`. Until
     // then it just needs to be a valid Pos; pin it at the source origin.
     this.prevEnd = { offset: 0, line: 1, column: 1 };
@@ -487,11 +491,11 @@ export class Parser<
   // -------------------------------------------------------------------
   // Cursor implementation. These are public at the runtime/JS level
   // (TypeScript's `private` keyword is type-only) so generated code in
-  // user packages can call them via the `Cursor<TK, RK>` view.
+  // user packages can call them via the `Cursor<TK, RK, LK>` view.
   // -------------------------------------------------------------------
 
   /** @internal */
-  look(i: number): Token<TK> {
+  look(i: number): Token<TK, LK> {
     const t = this.lookBuf[i];
     if (t === null) {
       throw new Error("look slot empty inside step() — pump did not refill before dispatch");
@@ -534,14 +538,14 @@ export class Parser<
   }
 
   /** @internal */
-  enter(rule: RK): Event<TK, RK> {
+  enter(rule: RK): Event<TK, RK, LK> {
     const pos = this.look(0).span.start;
     this.prevEnd = pos;
     return { tag: "enter", rule, pos };
   }
 
   /** @internal */
-  exit(rule: RK): Event<TK, RK> {
+  exit(rule: RK): Event<TK, RK, LK> {
     return { tag: "exit", rule, pos: this.prevEnd };
   }
 
@@ -550,7 +554,7 @@ export class Parser<
    * Slot `k-1` is left null so pump-mode can refill it before the
    * next `step()` reads lookahead.
    */
-  private takeToken(): Token<TK> {
+  private takeToken(): Token<TK, LK> {
     const t = this.lookBuf[0];
     if (t === null) {
       throw new Error("takeToken called with empty lookahead");
@@ -567,7 +571,7 @@ export class Parser<
   }
 
   /** @internal */
-  consume(): Event<TK, RK> {
+  consume(): Event<TK, RK, LK> {
     return { tag: "token", token: this.takeToken() };
   }
 
@@ -576,8 +580,8 @@ export class Parser<
     kind: TK,
     sync: readonly TK[],
     expectedMsg: string,
-    label: string | null = null,
-  ): Event<TK, RK> {
+    label: LK | null = null,
+  ): Event<TK, RK, LK> {
     const t0 = this.lookBuf[0];
     if (t0 !== null && t0.kind === kind) {
       // Stamp the label on the slot's token before consume rotates
@@ -616,7 +620,7 @@ export class Parser<
   }
 
   /** @internal */
-  errorHere(msg: string): Event<TK, RK> {
+  errorHere(msg: string): Event<TK, RK, LK> {
     return { tag: "error", error: { message: msg, span: this.look(0).span } };
   }
 
@@ -635,7 +639,7 @@ export class Parser<
    * again. Drive's `step` may return `undefined` for pure-transition
    * state bodies; the runtime simply loops drive again.
    */
-  next(): IteratorResult<Event<TK, RK>> {
+  next(): IteratorResult<Event<TK, RK, LK>> {
     for (;;) {
       // Pump-time-deferred `garbage` half of a lex-failure pair: the
       // previous call returned the paired `error` event; this call
@@ -729,7 +733,7 @@ export class Parser<
       // subsequent visits just signal done.
       if (this.state === TERMINATED) {
         if (this.lookBuf[0]?.kind === this.cfg.eofKind) {
-          return { done: true, value: undefined as unknown as Event<TK, RK> };
+          return { done: true, value: undefined as unknown as Event<TK, RK, LK> };
         }
         const event = this.errorHere("expected end of input");
         this.armRecovery([], null);
@@ -755,7 +759,7 @@ export class Parser<
     }
   }
 
-  [Symbol.iterator](): IterableIterator<Event<TK, RK>> {
+  [Symbol.iterator](): IterableIterator<Event<TK, RK, LK>> {
     return this;
   }
 }

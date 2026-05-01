@@ -35,12 +35,13 @@ public final class Token {
     int byteLen;
     private final Span span = new Span();
     private String textCache;
-    /** Grammar-position label from a {@code name:NAME} form, or
-     *  {@code null} if the position wasn't labeled. Set by the
-     *  dispatch's labeled {@code tryConsume} on the success path; the
+    /** Grammar-position label id from a {@code name:NAME} form, or
+     *  {@code 0} for unlabeled positions. Non-zero values map to the
+     *  codegen's {@code LabelKind} enum's {@code id()}; consumers
+     *  compare with {@code tok.label() == LabelKind.Name.id()}. The
      *  runtime clears it on every lex-time {@link #set} so the field
-     *  defaults to {@code null} until a labeled-expect re-stamps it. */
-    String label;
+     *  defaults to {@code 0} until a labeled-expect stamps a real id. */
+    int label;
 
     public Token() {
         this.data = EMPTY;
@@ -70,9 +71,9 @@ public final class Token {
      *  next {@link Parser#next()} call. */
     public Span span() { return span; }
 
-    /** Grammar label (e.g. {@code "name"} for a {@code name:IDENT}
-     *  position), or {@code null} for unlabeled positions. */
-    public String label() { return label; }
+    /** Grammar label id (the codegen's {@code LabelKind} ordinal, 1-based),
+     *  or {@code 0} if the position wasn't labeled. */
+    public int label() { return label; }
 
     /** Decoded UTF-8 text. Cached on first call; the cache is cleared
      *  the next time the runtime rewrites this token. */
@@ -122,7 +123,7 @@ public final class Token {
         this.textCache = null;
         // Reset on every fresh lex hit; the labeled-expect path
         // re-stamps it on the success branch.
-        this.label = null;
+        this.label = 0;
     }
 
     private static final byte[] EMPTY = new byte[0];

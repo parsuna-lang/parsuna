@@ -146,6 +146,7 @@ pub fn layout(prog: Program, ag: &AnalyzedGrammar, dopts: DfaOpts) -> StateTable
         grammar_name: ag.grammar.name.clone(),
         tokens: prog.tokens,
         rule_kinds: prog.rules,
+        labels: prog.labels,
         first_sets: prog.first_sets,
         sync_sets: prog.sync_sets,
         states,
