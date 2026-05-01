@@ -155,7 +155,9 @@ fn collect_expr_refs(e: &Expr, tok: &mut Vec<String>, rule: &mut Vec<String>) {
         Expr::Token(n) => tok.push(n.clone()),
         Expr::Rule(n) => rule.push(n.clone()),
         Expr::Seq(xs) | Expr::Alt(xs) => xs.iter().for_each(|x| collect_expr_refs(x, tok, rule)),
-        Expr::Opt(x) | Expr::Star(x) | Expr::Plus(x) => collect_expr_refs(x, tok, rule),
+        Expr::Opt(x) | Expr::Star(x) | Expr::Plus(x) | Expr::Label(_, x) => {
+            collect_expr_refs(x, tok, rule)
+        }
     }
 }
 
@@ -201,7 +203,7 @@ fn expr_productive(e: &Expr, productive: &BTreeSet<String>) -> bool {
         Expr::Seq(xs) => xs.iter().all(|x| expr_productive(x, productive)),
         Expr::Alt(xs) => xs.iter().any(|x| expr_productive(x, productive)),
         Expr::Opt(_) | Expr::Star(_) => true,
-        Expr::Plus(x) => expr_productive(x, productive),
+        Expr::Plus(x) | Expr::Label(_, x) => expr_productive(x, productive),
     }
 }
 
@@ -215,7 +217,7 @@ mod tests {
             pattern: pat,
             skip: false,
             is_fragment: false,
-            mode: None,
+            modes: vec!["default".to_string()],
             mode_actions: Vec::new(),
             span: Default::default(),
         }

@@ -33,9 +33,10 @@ pub enum TokenKind {
     Arrow = 14,
     String = 15,
     Char = 16,
-    Ident = 17,
-    Ws = 18,
-    Comment = 19,
+    Label = 17,
+    Ident = 18,
+    Ws = 19,
+    Comment = 20,
 }
 
 impl TokenKind {
@@ -63,6 +64,7 @@ impl parsuna_rt::TokenKindEnum for TokenKind {
             TokenKind::Arrow => "ARROW",
             TokenKind::String => "STRING",
             TokenKind::Char => "CHAR",
+            TokenKind::Label => "LABEL",
             TokenKind::Ident => "IDENT",
             TokenKind::Ws => "WS",
             TokenKind::Comment => "COMMENT",
@@ -170,8 +172,8 @@ fn longest_match_mode_0(buf: &[u8], start: usize) -> DfaMatch<TokenKind> {
                 Some(&b'.') => { pos += 1; state = 46; best_len = pos - start; best_kind = Some(TokenKind::Dot); }
                 Some(&b'!') => { pos += 1; state = 47; best_len = pos - start; best_kind = Some(TokenKind::Bang); }
                 Some(&b'@') => { pos += 1; state = 48; best_len = pos - start; best_kind = Some(TokenKind::At); }
-                Some(&(b'A'..=b'Z' | b'_' | b'a'..=b'z')) => { pos += 1; state = 52; best_len = pos - start; best_kind = Some(TokenKind::Ident); }
-                Some(&(b'\t'..=b'\n' | b'\r' | b' ')) => { pos += 1; state = 53; best_len = pos - start; best_kind = Some(TokenKind::Ws); }
+                Some(&(b'A'..=b'Z' | b'_' | b'a'..=b'z')) => { pos += 1; state = 53; best_len = pos - start; best_kind = Some(TokenKind::Ident); }
+                Some(&(b'\t'..=b'\n' | b'\r' | b' ')) => { pos += 1; state = 54; best_len = pos - start; best_kind = Some(TokenKind::Ws); }
                 _ => break,
             },
             2 => match buf.get(pos) {
@@ -220,7 +222,7 @@ fn longest_match_mode_0(buf: &[u8], start: usize) -> DfaMatch<TokenKind> {
                 _ => break,
             },
             7 => match buf.get(pos) {
-                Some(&b'/') => { pos += 1; state = 54; best_len = pos - start; best_kind = Some(TokenKind::Comment); }
+                Some(&b'/') => { pos += 1; state = 55; best_len = pos - start; best_kind = Some(TokenKind::Comment); }
                 _ => break,
             },
             8 => {
@@ -322,7 +324,7 @@ fn longest_match_mode_0(buf: &[u8], start: usize) -> DfaMatch<TokenKind> {
                 _ => break,
             },
             29 => match buf.get(pos) {
-                Some(&(0x80..=0xbf)) => { pos += 1; state = 54; best_len = pos - start; best_kind = Some(TokenKind::Comment); }
+                Some(&(0x80..=0xbf)) => { pos += 1; state = 55; best_len = pos - start; best_kind = Some(TokenKind::Comment); }
                 _ => break,
             },
             30 => match buf.get(pos) {
@@ -368,7 +370,8 @@ fn longest_match_mode_0(buf: &[u8], start: usize) -> DfaMatch<TokenKind> {
             49 => break,
             50 => break,
             51 => break,
-            52 => {
+            52 => break,
+            53 => {
                 while let Some(&b) = buf.get(pos) {
                     if !matches!(b, b'0'..=b'9' | b'A'..=b'Z' | b'_' | b'a'..=b'z') { break; }
                     pos += 1;
@@ -376,11 +379,12 @@ fn longest_match_mode_0(buf: &[u8], start: usize) -> DfaMatch<TokenKind> {
                 best_len = pos - start;
                 best_kind = Some(TokenKind::Ident);
                 match buf.get(pos) {
-                    Some(&(b'0'..=b'9' | b'A'..=b'Z' | b'_' | b'a'..=b'z')) => { pos += 1; state = 52; best_len = pos - start; best_kind = Some(TokenKind::Ident); }
+                    Some(&b':') => { pos += 1; state = 52; best_len = pos - start; best_kind = Some(TokenKind::Label); }
+                    Some(&(b'0'..=b'9' | b'A'..=b'Z' | b'_' | b'a'..=b'z')) => { pos += 1; state = 53; best_len = pos - start; best_kind = Some(TokenKind::Ident); }
                     _ => break,
                 }
             },
-            53 => {
+            54 => {
                 while let Some(&b) = buf.get(pos) {
                     if !matches!(b, b'\t'..=b'\n' | b'\r' | b' ') { break; }
                     pos += 1;
@@ -388,11 +392,11 @@ fn longest_match_mode_0(buf: &[u8], start: usize) -> DfaMatch<TokenKind> {
                 best_len = pos - start;
                 best_kind = Some(TokenKind::Ws);
                 match buf.get(pos) {
-                    Some(&(b'\t'..=b'\n' | b'\r' | b' ')) => { pos += 1; state = 53; best_len = pos - start; best_kind = Some(TokenKind::Ws); }
+                    Some(&(b'\t'..=b'\n' | b'\r' | b' ')) => { pos += 1; state = 54; best_len = pos - start; best_kind = Some(TokenKind::Ws); }
                     _ => break,
                 }
             },
-            54 => {
+            55 => {
                 while let Some(&b) = buf.get(pos) {
                     if !matches!(b, 0x00..=b'\t' | 0x0b..=0x7f) { break; }
                     pos += 1;
@@ -407,7 +411,7 @@ fn longest_match_mode_0(buf: &[u8], start: usize) -> DfaMatch<TokenKind> {
                     Some(&(0xc2..=0xdf)) => { pos += 1; state = 29; }
                     Some(&0xf0) => { pos += 1; state = 32; }
                     Some(&0xe0) => { pos += 1; state = 35; }
-                    Some(&(0x00..=b'\t' | 0x0b..=0x7f)) => { pos += 1; state = 54; best_len = pos - start; best_kind = Some(TokenKind::Comment); }
+                    Some(&(0x00..=b'\t' | 0x0b..=0x7f)) => { pos += 1; state = 55; best_len = pos - start; best_kind = Some(TokenKind::Comment); }
                     _ => break,
                 }
             },
@@ -423,22 +427,22 @@ pub const K: usize = 1;
 const ENTRY_FILE: u32 = 1;
 const ENTRY_ITEM: u32 = 5;
 const ENTRY_MODE_PRE: u32 = 9;
-const ENTRY_DECL: u32 = 16;
-const ENTRY_ACTIONS: u32 = 22;
-const ENTRY_ACTION: u32 = 26;
-const ENTRY_ACTION_ARG: u32 = 30;
-const ENTRY_ALT_EXPR: u32 = 35;
-const ENTRY_SEQ_EXPR: u32 = 38;
-const ENTRY_GROUP: u32 = 43;
-const ENTRY_ATOM: u32 = 47;
-const ENTRY_CHAR_PRIMARY: u32 = 50;
-const ENTRY_NEG_CLASS: u32 = 55;
+const ENTRY_DECL: u32 = 18;
+const ENTRY_ACTIONS: u32 = 24;
+const ENTRY_ACTION: u32 = 28;
+const ENTRY_ACTION_ARG: u32 = 32;
+const ENTRY_ALT_EXPR: u32 = 37;
+const ENTRY_SEQ_EXPR: u32 = 40;
+const ENTRY_GROUP: u32 = 46;
+const ENTRY_ATOM: u32 = 50;
+const ENTRY_CHAR_PRIMARY: u32 = 53;
+const ENTRY_NEG_CLASS: u32 = 58;
 
 
 static SYNC_0: &[TokenKind] = &[TokenKind::Eof];
 static SYNC_1: &[TokenKind] = &[TokenKind::Eof, TokenKind::At, TokenKind::Ident];
 static SYNC_2: &[TokenKind] = &[TokenKind::Eof, TokenKind::Comma, TokenKind::At, TokenKind::Ident];
-static SYNC_3: &[TokenKind] = &[TokenKind::Eof, TokenKind::Lparen, TokenKind::Rparen, TokenKind::Semi, TokenKind::Pipe, TokenKind::Question, TokenKind::Star, TokenKind::Plus, TokenKind::Dot, TokenKind::Bang, TokenKind::At, TokenKind::Arrow, TokenKind::String, TokenKind::Char, TokenKind::Ident];
+static SYNC_3: &[TokenKind] = &[TokenKind::Eof, TokenKind::Lparen, TokenKind::Rparen, TokenKind::Semi, TokenKind::Pipe, TokenKind::Question, TokenKind::Star, TokenKind::Plus, TokenKind::Dot, TokenKind::Bang, TokenKind::At, TokenKind::Arrow, TokenKind::String, TokenKind::Char, TokenKind::Label, TokenKind::Ident];
 
 
 /// Zero-sized marker type that carries the generated dispatch logic via
@@ -524,7 +528,7 @@ impl parsuna_rt::Grammar<K> for Grammar {
             6 => { // item:call:decl
                 p.push_ret(7);
                 event = Some(p.enter(RuleKind::Decl));
-                cur = 17;
+                cur = 19;
             }
             7 => { // item:exit
                 event = Some(p.exit(RuleKind::Item));
@@ -554,221 +558,227 @@ impl parsuna_rt::Grammar<K> for Grammar {
                 event = Some(p.expect(TokenKind::Ident, SYNC_1, "expected IDENT"));
                 cur = 14;
             }
-            14 => { // mode_pre:expect:RPAREN
-                event = Some(p.expect(TokenKind::Rparen, SYNC_1, "expected RPAREN"));
-                cur = 15;
+            14 => { // mode_pre:star
+                match p.look(0).kind {
+                    Some(TokenKind::Comma) => {
+                        p.push_ret(14);
+                        event = Some(p.expect(TokenKind::Comma, SYNC_1, "expected COMMA"));
+                        cur = 17;
+                    }
+                    _ => {
+                        cur = 15;
+                    }
+                }
             }
-            15 => { // mode_pre:exit
+            15 => { // mode_pre:expect:RPAREN
+                event = Some(p.expect(TokenKind::Rparen, SYNC_1, "expected RPAREN"));
+                cur = 16;
+            }
+            16 => { // mode_pre:exit
                 event = Some(p.exit(RuleKind::ModePre));
                 cur = p.ret();
             }
-            16 => { // decl:enter
-                event = Some(p.enter(RuleKind::Decl));
-                cur = 17;
-            }
-            17 => { // decl:expect:IDENT
+            17 => { // mode_pre:star-body:expect:IDENT
                 event = Some(p.expect(TokenKind::Ident, SYNC_1, "expected IDENT"));
-                cur = 18;
+                cur = p.ret();
             }
-            18 => { // decl:expect:EQ
+            18 => { // decl:enter
+                event = Some(p.enter(RuleKind::Decl));
+                cur = 19;
+            }
+            19 => { // decl:expect:IDENT
+                event = Some(p.expect(TokenKind::Ident, SYNC_1, "expected IDENT"));
+                cur = 20;
+            }
+            20 => { // decl:expect:EQ
                 event = Some(p.expect(TokenKind::Eq, SYNC_1, "expected EQ"));
-                p.push_ret(19);
-                cur = 35;
+                p.push_ret(21);
+                cur = 37;
             }
-            19 => { // decl:opt
+            21 => { // decl:opt
                 match p.look(0).kind {
                     Some(TokenKind::Arrow) => {
-                        p.push_ret(20);
+                        p.push_ret(22);
                         event = Some(p.enter(RuleKind::Actions));
-                        cur = 23;
+                        cur = 25;
                     }
                     _ => {
-                        cur = 20;
+                        cur = 22;
                     }
                 }
             }
-            20 => { // decl:expect:SEMI
+            22 => { // decl:expect:SEMI
                 event = Some(p.expect(TokenKind::Semi, SYNC_1, "expected SEMI"));
-                cur = 21;
+                cur = 23;
             }
-            21 => { // decl:exit
+            23 => { // decl:exit
                 event = Some(p.exit(RuleKind::Decl));
                 cur = p.ret();
             }
-            22 => { // actions:enter
+            24 => { // actions:enter
                 event = Some(p.enter(RuleKind::Actions));
-                cur = 23;
+                cur = 25;
             }
-            23 => { // actions:expect:ARROW
+            25 => { // actions:expect:ARROW
                 event = Some(p.expect(TokenKind::Arrow, SYNC_1, "expected ARROW"));
-                p.push_ret(24);
-                cur = 26;
+                p.push_ret(26);
+                cur = 28;
             }
-            24 => { // actions:star
+            26 => { // actions:star
                 match p.look(0).kind {
                     Some(TokenKind::Comma) => {
-                        p.push_ret(24);
+                        p.push_ret(26);
                         event = Some(p.expect(TokenKind::Comma, SYNC_1, "expected COMMA"));
-                        cur = 26;
+                        cur = 28;
                     }
                     _ => {
-                        cur = 25;
+                        cur = 27;
                     }
                 }
             }
-            25 => { // actions:exit
+            27 => { // actions:exit
                 event = Some(p.exit(RuleKind::Actions));
                 cur = p.ret();
             }
-            26 => { // action:enter
+            28 => { // action:enter
                 event = Some(p.enter(RuleKind::Action));
-                cur = 27;
+                cur = 29;
             }
-            27 => { // action:expect:IDENT
+            29 => { // action:expect:IDENT
                 event = Some(p.expect(TokenKind::Ident, SYNC_2, "expected IDENT"));
-                cur = 28;
+                cur = 30;
             }
-            28 => { // action:opt
+            30 => { // action:opt
                 match p.look(0).kind {
                     Some(TokenKind::Lparen) => {
-                        p.push_ret(29);
+                        p.push_ret(31);
                         event = Some(p.enter(RuleKind::ActionArg));
-                        cur = 31;
+                        cur = 33;
                     }
                     _ => {
-                        cur = 29;
+                        cur = 31;
                     }
                 }
             }
-            29 => { // action:exit
+            31 => { // action:exit
                 event = Some(p.exit(RuleKind::Action));
                 cur = p.ret();
             }
-            30 => { // action_arg:enter
+            32 => { // action_arg:enter
                 event = Some(p.enter(RuleKind::ActionArg));
-                cur = 31;
-            }
-            31 => { // action_arg:expect:LPAREN
-                event = Some(p.expect(TokenKind::Lparen, SYNC_2, "expected LPAREN"));
-                cur = 32;
-            }
-            32 => { // action_arg:expect:IDENT
-                event = Some(p.expect(TokenKind::Ident, SYNC_2, "expected IDENT"));
                 cur = 33;
             }
-            33 => { // action_arg:expect:RPAREN
-                event = Some(p.expect(TokenKind::Rparen, SYNC_2, "expected RPAREN"));
+            33 => { // action_arg:expect:LPAREN
+                event = Some(p.expect(TokenKind::Lparen, SYNC_2, "expected LPAREN"));
                 cur = 34;
             }
-            34 => { // action_arg:exit
+            34 => { // action_arg:expect:IDENT
+                event = Some(p.expect(TokenKind::Ident, SYNC_2, "expected IDENT"));
+                cur = 35;
+            }
+            35 => { // action_arg:expect:RPAREN
+                event = Some(p.expect(TokenKind::Rparen, SYNC_2, "expected RPAREN"));
+                cur = 36;
+            }
+            36 => { // action_arg:exit
                 event = Some(p.exit(RuleKind::ActionArg));
                 cur = p.ret();
             }
-            35 => { // alt_expr:enter
+            37 => { // alt_expr:enter
                 event = Some(p.enter(RuleKind::AltExpr));
-                p.push_ret(36);
-                cur = 38;
+                p.push_ret(38);
+                cur = 40;
             }
-            36 => { // alt_expr:star
+            38 => { // alt_expr:star
                 match p.look(0).kind {
                     Some(TokenKind::Pipe) => {
-                        p.push_ret(36);
+                        p.push_ret(38);
                         event = Some(p.expect(TokenKind::Pipe, SYNC_3, "expected PIPE"));
-                        cur = 38;
+                        cur = 40;
                     }
                     _ => {
-                        cur = 37;
+                        cur = 39;
                     }
                 }
             }
-            37 => { // alt_expr:exit
+            39 => { // alt_expr:exit
                 event = Some(p.exit(RuleKind::AltExpr));
                 cur = p.ret();
             }
-            38 => { // seq_expr:enter
+            40 => { // seq_expr:enter
                 event = Some(p.enter(RuleKind::SeqExpr));
                 match p.look(0).kind {
-                    Some(TokenKind::Lparen) | Some(TokenKind::Dot) | Some(TokenKind::Bang) | Some(TokenKind::String) | Some(TokenKind::Char) | Some(TokenKind::Ident) => {
-                        p.push_ret(39);
-                        cur = 41;
+                    Some(TokenKind::Lparen) | Some(TokenKind::Dot) | Some(TokenKind::Bang) | Some(TokenKind::String) | Some(TokenKind::Char) | Some(TokenKind::Label) | Some(TokenKind::Ident) => {
+                        p.push_ret(41);
+                        cur = 43;
                     }
                     _ => {
-                        cur = 40;
+                        cur = 42;
                     }
                 }
             }
-            39 => { // seq_expr:star
+            41 => { // seq_expr:star
                 match p.look(0).kind {
-                    Some(TokenKind::Lparen) | Some(TokenKind::Dot) | Some(TokenKind::Bang) | Some(TokenKind::String) | Some(TokenKind::Char) | Some(TokenKind::Ident) => {
-                        p.push_ret(39);
-                        p.push_ret(42);
+                    Some(TokenKind::Lparen) | Some(TokenKind::Dot) | Some(TokenKind::Bang) | Some(TokenKind::String) | Some(TokenKind::Char) | Some(TokenKind::Label) | Some(TokenKind::Ident) => {
+                        p.push_ret(41);
                         match p.look(0).kind {
-                            Some(TokenKind::Lparen) => {
-                                event = Some(p.enter(RuleKind::Group));
-                                cur = 44;
-                            }
-                            Some(TokenKind::Dot) => {
-                                event = Some(p.enter(RuleKind::Atom));
-                                cur = 48;
-                            }
-                            Some(TokenKind::Bang) => {
-                                event = Some(p.enter(RuleKind::Atom));
-                                cur = 48;
-                            }
-                            Some(TokenKind::String) => {
-                                event = Some(p.enter(RuleKind::Atom));
-                                cur = 48;
-                            }
-                            Some(TokenKind::Char) => {
-                                event = Some(p.enter(RuleKind::Atom));
-                                cur = 48;
-                            }
-                            Some(TokenKind::Ident) => {
-                                event = Some(p.enter(RuleKind::Atom));
-                                cur = 48;
+                            Some(TokenKind::Label) => {
+                                p.push_ret(44);
+                                event = Some(p.expect(TokenKind::Label, SYNC_3, "expected LABEL"));
+                                cur = p.ret();
                             }
                             _ => {
-                                event = Some(p.error_here("unexpected token"));
-                                p.recover_to(SYNC_3);
-                                cur = p.ret();
+                                cur = 44;
                             }
                         }
                     }
                     _ => {
-                        cur = 40;
+                        cur = 42;
                     }
                 }
             }
-            40 => { // seq_expr:exit
+            42 => { // seq_expr:exit
                 event = Some(p.exit(RuleKind::SeqExpr));
                 cur = p.ret();
             }
-            41 => { // seq_expr:star-body:call:_postfix_expr
-                p.push_ret(42);
+            43 => { // seq_expr:star-body:call:_postfix_expr
+                match p.look(0).kind {
+                    Some(TokenKind::Label) => {
+                        p.push_ret(44);
+                        event = Some(p.expect(TokenKind::Label, SYNC_3, "expected LABEL"));
+                        cur = p.ret();
+                    }
+                    _ => {
+                        cur = 44;
+                    }
+                }
+            }
+            44 => { // _postfix_expr:call:_primary_expr
+                p.push_ret(45);
                 match p.look(0).kind {
                     Some(TokenKind::Lparen) => {
                         event = Some(p.enter(RuleKind::Group));
-                        cur = 44;
+                        cur = 47;
                     }
                     Some(TokenKind::Dot) => {
                         event = Some(p.enter(RuleKind::Atom));
-                        cur = 48;
+                        cur = 51;
                     }
                     Some(TokenKind::Bang) => {
                         event = Some(p.enter(RuleKind::Atom));
-                        cur = 48;
+                        cur = 51;
                     }
                     Some(TokenKind::String) => {
                         event = Some(p.enter(RuleKind::Atom));
-                        cur = 48;
+                        cur = 51;
                     }
                     Some(TokenKind::Char) => {
                         event = Some(p.enter(RuleKind::Atom));
-                        cur = 48;
+                        cur = 51;
                     }
                     Some(TokenKind::Ident) => {
                         event = Some(p.enter(RuleKind::Atom));
-                        cur = 48;
+                        cur = 51;
                     }
                     _ => {
                         event = Some(p.error_here("unexpected token"));
@@ -777,10 +787,10 @@ impl parsuna_rt::Grammar<K> for Grammar {
                     }
                 }
             }
-            42 => { // _postfix_expr:star
+            45 => { // _postfix_expr:star
                 match p.look(0).kind {
                     Some(TokenKind::Question) | Some(TokenKind::Star) | Some(TokenKind::Plus) => {
-                        p.push_ret(42);
+                        p.push_ret(45);
                         match p.look(0).kind {
                             Some(TokenKind::Question) => {
                                 event = Some(p.expect(TokenKind::Question, SYNC_3, "expected QUESTION"));
@@ -806,80 +816,53 @@ impl parsuna_rt::Grammar<K> for Grammar {
                     }
                 }
             }
-            43 => { // group:enter
+            46 => { // group:enter
                 event = Some(p.enter(RuleKind::Group));
-                cur = 44;
+                cur = 47;
             }
-            44 => { // group:expect:LPAREN
+            47 => { // group:expect:LPAREN
                 event = Some(p.expect(TokenKind::Lparen, SYNC_3, "expected LPAREN"));
-                p.push_ret(45);
-                cur = 35;
+                p.push_ret(48);
+                cur = 37;
             }
-            45 => { // group:expect:RPAREN
+            48 => { // group:expect:RPAREN
                 event = Some(p.expect(TokenKind::Rparen, SYNC_3, "expected RPAREN"));
-                cur = 46;
+                cur = 49;
             }
-            46 => { // group:exit
+            49 => { // group:exit
                 event = Some(p.exit(RuleKind::Group));
                 cur = p.ret();
             }
-            47 => { // atom:enter
+            50 => { // atom:enter
                 event = Some(p.enter(RuleKind::Atom));
-                cur = 48;
+                cur = 51;
             }
-            48 => { // atom:dispatch
+            51 => { // atom:dispatch
                 match p.look(0).kind {
                     Some(TokenKind::Dot) => {
-                        p.push_ret(49);
+                        p.push_ret(52);
                         event = Some(p.enter(RuleKind::CharPrimary));
-                        cur = 51;
+                        cur = 54;
                     }
                     Some(TokenKind::Bang) => {
-                        p.push_ret(49);
+                        p.push_ret(52);
                         event = Some(p.enter(RuleKind::NegClass));
-                        cur = 56;
+                        cur = 59;
                     }
                     Some(TokenKind::String) => {
-                        p.push_ret(49);
+                        p.push_ret(52);
                         event = Some(p.expect(TokenKind::String, SYNC_3, "expected STRING"));
                         cur = p.ret();
                     }
                     Some(TokenKind::Char) => {
-                        p.push_ret(49);
+                        p.push_ret(52);
                         event = Some(p.enter(RuleKind::CharPrimary));
-                        cur = 51;
+                        cur = 54;
                     }
                     Some(TokenKind::Ident) => {
-                        p.push_ret(49);
+                        p.push_ret(52);
                         event = Some(p.expect(TokenKind::Ident, SYNC_3, "expected IDENT"));
                         cur = p.ret();
-                    }
-                    _ => {
-                        cur = 49;
-                        event = Some(p.error_here("unexpected token"));
-                        p.recover_to(SYNC_3);
-                    }
-                }
-            }
-            49 => { // atom:exit
-                event = Some(p.exit(RuleKind::Atom));
-                cur = p.ret();
-            }
-            50 => { // char_primary:enter
-                event = Some(p.enter(RuleKind::CharPrimary));
-                cur = 51;
-            }
-            51 => { // char_primary:dispatch
-                match p.look(0).kind {
-                    Some(TokenKind::Dot) => {
-                        p.push_ret(52);
-                        event = Some(p.expect(TokenKind::Dot, SYNC_3, "expected DOT"));
-                        cur = p.ret();
-                    }
-                    Some(TokenKind::Char) => {
-                        p.push_ret(52);
-                        event = Some(p.expect(TokenKind::Char, SYNC_3, "expected CHAR"));
-                        cur = 53;
                     }
                     _ => {
                         cur = 52;
@@ -888,47 +871,74 @@ impl parsuna_rt::Grammar<K> for Grammar {
                     }
                 }
             }
-            52 => { // char_primary:exit
+            52 => { // atom:exit
+                event = Some(p.exit(RuleKind::Atom));
+                cur = p.ret();
+            }
+            53 => { // char_primary:enter
+                event = Some(p.enter(RuleKind::CharPrimary));
+                cur = 54;
+            }
+            54 => { // char_primary:dispatch
+                match p.look(0).kind {
+                    Some(TokenKind::Dot) => {
+                        p.push_ret(55);
+                        event = Some(p.expect(TokenKind::Dot, SYNC_3, "expected DOT"));
+                        cur = p.ret();
+                    }
+                    Some(TokenKind::Char) => {
+                        p.push_ret(55);
+                        event = Some(p.expect(TokenKind::Char, SYNC_3, "expected CHAR"));
+                        cur = 56;
+                    }
+                    _ => {
+                        cur = 55;
+                        event = Some(p.error_here("unexpected token"));
+                        p.recover_to(SYNC_3);
+                    }
+                }
+            }
+            55 => { // char_primary:exit
                 event = Some(p.exit(RuleKind::CharPrimary));
                 cur = p.ret();
             }
-            53 => { // char_primary:alt0:opt
+            56 => { // char_primary:alt0:opt
                 match p.look(0).kind {
                     Some(TokenKind::Dotdot) => {
                         event = Some(p.expect(TokenKind::Dotdot, SYNC_3, "expected DOTDOT"));
-                        cur = 54;
+                        cur = 57;
                     }
                     _ => {
                         cur = p.ret();
                     }
                 }
             }
-            54 => { // char_primary:alt0:opt-body:expect:CHAR
+            57 => { // char_primary:alt0:opt-body:expect:CHAR
                 event = Some(p.expect(TokenKind::Char, SYNC_3, "expected CHAR"));
                 cur = p.ret();
             }
-            55 => { // neg_class:enter
+            58 => { // neg_class:enter
                 event = Some(p.enter(RuleKind::NegClass));
-                cur = 56;
+                cur = 59;
             }
-            56 => { // neg_class:expect:BANG
+            59 => { // neg_class:expect:BANG
                 event = Some(p.expect(TokenKind::Bang, SYNC_3, "expected BANG"));
-                cur = 57;
+                cur = 60;
             }
-            57 => { // neg_class:dispatch
+            60 => { // neg_class:dispatch
                 match p.look(0).kind {
                     Some(TokenKind::Lparen) => {
-                        p.push_ret(58);
+                        p.push_ret(61);
                         event = Some(p.expect(TokenKind::Lparen, SYNC_3, "expected LPAREN"));
-                        p.push_ret(59);
-                        cur = 61;
+                        p.push_ret(62);
+                        cur = 64;
                     }
                     Some(TokenKind::Dot) => {
-                        p.push_ret(58);
+                        p.push_ret(61);
                         match p.look(0).kind {
                             Some(TokenKind::Dot) => {
                                 event = Some(p.enter(RuleKind::CharPrimary));
-                                cur = 51;
+                                cur = 54;
                             }
                             Some(TokenKind::String) => {
                                 event = Some(p.expect(TokenKind::String, SYNC_3, "expected STRING"));
@@ -936,7 +946,7 @@ impl parsuna_rt::Grammar<K> for Grammar {
                             }
                             Some(TokenKind::Char) => {
                                 event = Some(p.enter(RuleKind::CharPrimary));
-                                cur = 51;
+                                cur = 54;
                             }
                             _ => {
                                 event = Some(p.error_here("unexpected token"));
@@ -946,11 +956,11 @@ impl parsuna_rt::Grammar<K> for Grammar {
                         }
                     }
                     Some(TokenKind::String) => {
-                        p.push_ret(58);
+                        p.push_ret(61);
                         match p.look(0).kind {
                             Some(TokenKind::Dot) => {
                                 event = Some(p.enter(RuleKind::CharPrimary));
-                                cur = 51;
+                                cur = 54;
                             }
                             Some(TokenKind::String) => {
                                 event = Some(p.expect(TokenKind::String, SYNC_3, "expected STRING"));
@@ -958,7 +968,7 @@ impl parsuna_rt::Grammar<K> for Grammar {
                             }
                             Some(TokenKind::Char) => {
                                 event = Some(p.enter(RuleKind::CharPrimary));
-                                cur = 51;
+                                cur = 54;
                             }
                             _ => {
                                 event = Some(p.error_here("unexpected token"));
@@ -968,11 +978,11 @@ impl parsuna_rt::Grammar<K> for Grammar {
                         }
                     }
                     Some(TokenKind::Char) => {
-                        p.push_ret(58);
+                        p.push_ret(61);
                         match p.look(0).kind {
                             Some(TokenKind::Dot) => {
                                 event = Some(p.enter(RuleKind::CharPrimary));
-                                cur = 51;
+                                cur = 54;
                             }
                             Some(TokenKind::String) => {
                                 event = Some(p.expect(TokenKind::String, SYNC_3, "expected STRING"));
@@ -980,7 +990,7 @@ impl parsuna_rt::Grammar<K> for Grammar {
                             }
                             Some(TokenKind::Char) => {
                                 event = Some(p.enter(RuleKind::CharPrimary));
-                                cur = 51;
+                                cur = 54;
                             }
                             _ => {
                                 event = Some(p.error_here("unexpected token"));
@@ -990,37 +1000,37 @@ impl parsuna_rt::Grammar<K> for Grammar {
                         }
                     }
                     _ => {
-                        cur = 58;
+                        cur = 61;
                         event = Some(p.error_here("unexpected token"));
                         p.recover_to(SYNC_3);
                     }
                 }
             }
-            58 => { // neg_class:exit
+            61 => { // neg_class:exit
                 event = Some(p.exit(RuleKind::NegClass));
                 cur = p.ret();
             }
-            59 => { // neg_class:alt1:star
+            62 => { // neg_class:alt1:star
                 match p.look(0).kind {
                     Some(TokenKind::Pipe) => {
-                        p.push_ret(59);
+                        p.push_ret(62);
                         event = Some(p.expect(TokenKind::Pipe, SYNC_3, "expected PIPE"));
-                        cur = 61;
+                        cur = 64;
                     }
                     _ => {
-                        cur = 60;
+                        cur = 63;
                     }
                 }
             }
-            60 => { // neg_class:alt1:expect:RPAREN
+            63 => { // neg_class:alt1:expect:RPAREN
                 event = Some(p.expect(TokenKind::Rparen, SYNC_3, "expected RPAREN"));
                 cur = p.ret();
             }
-            61 => { // _neg_atom:dispatch
+            64 => { // _neg_atom:dispatch
                 match p.look(0).kind {
                     Some(TokenKind::Dot) => {
                         event = Some(p.enter(RuleKind::CharPrimary));
-                        cur = 51;
+                        cur = 54;
                     }
                     Some(TokenKind::String) => {
                         event = Some(p.expect(TokenKind::String, SYNC_3, "expected STRING"));
@@ -1028,7 +1038,7 @@ impl parsuna_rt::Grammar<K> for Grammar {
                     }
                     Some(TokenKind::Char) => {
                         event = Some(p.enter(RuleKind::CharPrimary));
-                        cur = 51;
+                        cur = 54;
                     }
                     _ => {
                         event = Some(p.error_here("unexpected token"));

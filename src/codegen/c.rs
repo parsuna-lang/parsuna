@@ -831,11 +831,7 @@ fn emit_instr(c: &mut String, st: &StateTable, upper: &str, op: &Instr, ind: &st
             )
             .unwrap()
         }
-        Instr::Expect {
-            kind,
-            token_name,
-            sync,
-        } => {
+        Instr::Expect { kind, token_name, sync, .. } => {
             let name = c_token_name(st, upper, *kind);
             writeln!(
                 c,

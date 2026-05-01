@@ -38,6 +38,13 @@ export interface Token<TK = number> {
   kind: TK | null;
   span: Span;
   text: string;
+  /**
+   * Grammar-position label from a `name:NAME` form, or `null` if the
+   * position wasn't labeled. Set by the dispatch's labeled `tryConsume`
+   * path; left as `null` for skip tokens, garbage, and the
+   * synced-to-expected token after a recovery.
+   */
+  label: string | null;
 }
 
 /** A recoverable parse or lex error. */
@@ -225,7 +232,7 @@ export class Lexer<TK extends number> {
   nextToken(): Token<TK> {
     if (this.i >= this.bytes.length) {
       const p = this.pos();
-      return { kind: this.eofKind, span: pointSpan(p), text: "" };
+      return { kind: this.eofKind, span: pointSpan(p), text: "", label: null };
     }
 
     const mode = this.modeStack[this.modeStack.length - 1];
@@ -240,11 +247,11 @@ export class Lexer<TK extends number> {
       const n = Math.min(cpLen, this.bytes.length - this.i);
       const text = decodeBytes(this.bytes, this.i, this.i + n);
       this.advance(n);
-      return { kind: null, span: { start, end: this.pos() }, text };
+      return { kind: null, span: { start, end: this.pos() }, text, label: null };
     }
     const text = decodeBytes(this.bytes, this.i, this.i + bestLen);
     this.advance(bestLen);
-    return { kind: bestKind, span: { start, end: this.pos() }, text };
+    return { kind: bestKind, span: { start, end: this.pos() }, text, label: null };
   }
 }
 
@@ -283,8 +290,17 @@ export interface Cursor<TK extends number, RK extends number> {
   exit(rule: RK): Event<TK, RK>;
   /** Consume the lookahead as a `token` event. */
   consume(): Event<TK, RK>;
-  /** Try to consume `kind`; on miss arm recovery and return an error. */
-  tryConsume(kind: TK, sync: readonly TK[], expectedMsg: string): Event<TK, RK>;
+  /**
+   * Try to consume `kind`; on miss arm recovery and return an error.
+   * `label`, if non-null, is stamped on the produced Token's
+   * {@link Token.label} field (from a `name:NAME` form in the grammar).
+   */
+  tryConsume(
+    kind: TK,
+    sync: readonly TK[],
+    expectedMsg: string,
+    label?: string | null,
+  ): Event<TK, RK>;
   /** Arm recovery without an expected kind. */
   recoverTo(sync: readonly TK[]): void;
   /** Build a recoverable error event at the lookahead. */
@@ -484,8 +500,18 @@ export class Parser<
   }
 
   /** @internal */
-  tryConsume(kind: TK, sync: readonly TK[], expectedMsg: string): Event<TK, RK> {
-    if (this.lookBuf[0] !== null && this.lookBuf[0].kind === kind) {
+  tryConsume(
+    kind: TK,
+    sync: readonly TK[],
+    expectedMsg: string,
+    label: string | null = null,
+  ): Event<TK, RK> {
+    const t0 = this.lookBuf[0];
+    if (t0 !== null && t0.kind === kind) {
+      // Stamp the label on the slot's token before consume rotates
+      // it out — keeps the unlabeled hot path branch-free (label
+      // stays null from the lex-time construction).
+      if (label !== null) t0.label = label;
       return this.consume();
     }
     const event = this.errorHere(expectedMsg);

@@ -33,7 +33,9 @@ pub fn run(g: &Grammar, issues: &mut Vec<Diagnostic>) {
             }
             // Tokens in different lexer modes have separate DFAs, so they
             // can't shadow each other regardless of pattern overlap.
-            if t.mode != u.mode {
+            // With multi-mode tokens, two tokens shadow only if they
+            // share at least one mode (both empty = both default = share).
+            if t.modes.iter().all(|m| !u.modes.contains(m)) {
                 continue;
             }
             let resolved = resolve_pattern(&u.pattern, g);
@@ -76,18 +78,32 @@ fn ends(pat: &TokenPattern, s: &[u8], start: usize, out: &mut BTreeSet<usize>) {
                 out.insert(start + 1);
             }
         }
-        // Conservative over-approximation: pretend NegLook can match any
-        // single byte, so a token whose body contains `!"L"*` is treated
-        // as if it could swallow everything that comes after, including
-        // a later literal-token's text. This is the safe direction for
-        // the shadow lint — false positives flag a grammar where a real
-        // shadow *might* happen, prompting the user to look. The
-        // alternative (modelling NegLook precisely) would require
-        // implementing AC traversal in the lint, which isn't worth it.
-        TokenPattern::NegLook { .. } => {
-            if start < s.len() {
-                out.insert(start + 1);
+        // Per-position semantics: the byte at `start` is consumable iff
+        // it isn't in the negated char set AND no string in `strings`
+        // begins at `start`. This is enough precision to avoid the
+        // false-positive where e.g. COMMENT_TEXT = !"-->"+ would
+        // shadow a later `COMMENT_END = "-->"` token: when the lint
+        // tries to match COMMENT_TEXT against the bytes "-->", the
+        // string-prefix check at position 0 fails immediately, so the
+        // whole `+` rejects.
+        TokenPattern::NegLook { chars, strings } => {
+            if start >= s.len() {
+                return;
             }
+            let b = s[start];
+            // `chars` is always a negated class; `contains(b)` is true
+            // iff b is *not* in the forbidden item set, i.e. the byte
+            // is allowed.
+            if !chars.contains(b as u32) {
+                return;
+            }
+            for lit in strings {
+                let bs = lit.as_bytes();
+                if start + bs.len() <= s.len() && &s[start..start + bs.len()] == bs {
+                    return;
+                }
+            }
+            out.insert(start + 1);
         }
         TokenPattern::Ref(_) => {
             // resolve_pattern should have inlined these.
@@ -243,7 +259,7 @@ mod tests {
             pattern: pat,
             skip: false,
             is_fragment: false,
-            mode: None,
+            modes: vec!["default".to_string()],
             mode_actions: Vec::new(),
             span: Default::default(),
         }

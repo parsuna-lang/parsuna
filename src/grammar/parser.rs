@@ -112,6 +112,7 @@ impl<'a, I: Iterator<Item = Event<'a>>> Reader<'a, I> {
                         kind: None,
                         span,
                         text: std::borrow::Cow::Borrowed(""),
+                        label: None,
                     };
                 }
                 None => {
@@ -119,6 +120,7 @@ impl<'a, I: Iterator<Item = Event<'a>>> Reader<'a, I> {
                         kind: Some(TokenKind::Eof),
                         span: Span::default(),
                         text: std::borrow::Cow::Borrowed(""),
+                        label: None,
                     }
                 }
             }
@@ -152,33 +154,39 @@ fn is_skip(kind: TokenKind) -> bool {
     kind == TokenKind::Ws || kind == TokenKind::Comment
 }
 
-/// One item at the file's top level: an optional `@mode(name)`
-/// pre-annotation followed by a single decl. Mode is a per-token
-/// attribute, not a scope — applying it to many decls is just a
-/// repetition of `@mode(name)`, not a syntactic group.
+/// One item at the file's top level: an optional `@mode(...)`
+/// pre-annotation followed by a single decl. The annotation can list
+/// multiple mode names — `@mode(a, b, c) TOK = …` registers `TOK` in
+/// every listed mode, sharing one kind id across the per-mode DFAs.
 fn read_item<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>, g: &mut Grammar) {
     r.expect_enter(RuleKind::Item);
 
-    let mode = if r.peek_enter() == Some(RuleKind::ModePre) {
-        Some(read_mode_pre(r))
+    let modes = if r.peek_enter() == Some(RuleKind::ModePre) {
+        read_mode_pre(r)
     } else {
-        None
+        Vec::new()
     };
-    read_decl(r, g, mode.as_deref());
+    read_decl(r, g, &modes);
 
     r.expect_exit(RuleKind::Item);
 }
 
-/// `mode_pre = AT IDENT LPAREN IDENT RPAREN` — the only annotation kind
-/// today is `@mode(name)`. Returns the mode name. Other annotation names
-/// are recorded as an error and the mode name from the argument is still
-/// returned so we keep going.
-fn read_mode_pre<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>) -> String {
+/// `mode_pre = AT IDENT LPAREN IDENT (COMMA IDENT)* RPAREN` — the only
+/// annotation kind today is `@mode(...)`. Returns the listed mode
+/// names. Other annotation names are recorded as an error; the names
+/// inside the parens are still returned so we keep going.
+fn read_mode_pre<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>) -> Vec<String> {
     r.expect_enter(RuleKind::ModePre);
     let _at = r.next_token();
     let name_tok = r.next_token();
     let _lparen = r.next_token();
-    let arg_tok = r.next_token();
+    let mut args: Vec<String> = Vec::new();
+    let first = r.next_token();
+    args.push(first.text.into_owned());
+    while r.eat_token(TokenKind::Comma).is_some() {
+        let arg = r.next_token();
+        args.push(arg.text.into_owned());
+    }
     let _rparen = r.next_token();
     r.expect_exit(RuleKind::ModePre);
 
@@ -192,13 +200,13 @@ fn read_mode_pre<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>) -> St
             .at(name_tok.span),
         );
     }
-    arg_tok.text.into_owned()
+    args
 }
 
 fn read_decl<'a, I: Iterator<Item = Event<'a>>>(
     r: &mut Reader<'a, I>,
     g: &mut Grammar,
-    mode: Option<&str>,
+    modes: &[String],
 ) {
     r.expect_enter(RuleKind::Decl);
 
@@ -309,7 +317,11 @@ fn read_decl<'a, I: Iterator<Item = Event<'a>>>(
             pattern: pattern.unwrap_or(TokenPattern::Empty),
             skip,
             is_fragment,
-            mode: mode.map(|s| s.to_string()),
+            modes: if modes.is_empty() {
+                vec!["default".to_string()]
+            } else {
+                modes.to_vec()
+            },
             mode_actions,
             span: decl_span,
         });
@@ -332,7 +344,7 @@ fn read_decl<'a, I: Iterator<Item = Event<'a>>>(
                 .at(span),
             );
         }
-        if mode.is_some() {
+        if !modes.is_empty() {
             r.issues.push(
                 Error::new(format!(
                     "`@mode(...)` only applies to tokens, not rules; drop it on `{}`",
@@ -429,17 +441,78 @@ fn read_seq<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>) -> Expr {
     r.expect_enter(RuleKind::SeqExpr);
     let mut xs: Vec<Expr> = Vec::new();
     loop {
+        // `_postfix_expr = LABEL? _primary_expr _quant_op*` — `_postfix_expr`
+        // is a fragment, so we see its body inlined: an optional `LABEL`
+        // token (an IDENT immediately followed by `:`) before the atom or
+        // group. Label binds tighter than the quantifier — `name:A*`
+        // parses as `(name:A)*` so each iteration of the Star produces a
+        // labeled Token event.
+        let label = peek_label(r);
         match r.peek_enter() {
-            Some(RuleKind::Atom) => xs.push(read_primary_expr(r)),
-            Some(RuleKind::Group) => xs.push(read_group_expr(r)),
-            _ => break,
+            Some(RuleKind::Atom) => {
+                let atom = read_primary_atom(r);
+                let labeled = wrap_label(label, atom);
+                xs.push(apply_quantifiers(r, labeled));
+            }
+            Some(RuleKind::Group) => {
+                // For groups the existing helper applies quantifiers
+                // internally; reuse it but wrap before quantifying by
+                // splitting the group read.
+                let group = read_group_inner(r);
+                let labeled = wrap_label(label, group);
+                xs.push(apply_quantifiers(r, labeled));
+            }
+            _ => {
+                if let Some((name, span)) = label {
+                    r.issues.push(
+                        Error::new(format!(
+                            "label `{}:` must be followed by an atom or group",
+                            name
+                        ))
+                        .at(span),
+                    );
+                }
+                break;
+            }
         }
     }
     r.expect_exit(RuleKind::SeqExpr);
     Expr::seq(xs)
 }
 
-fn read_primary_expr<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>) -> Expr {
+/// Peek for an optional `LABEL` token at the start of the next postfix.
+/// Consumes it (and strips the trailing `:`) on a hit; returns `None`
+/// otherwise.
+fn peek_label<'a, I: Iterator<Item = Event<'a>>>(
+    r: &mut Reader<'a, I>,
+) -> Option<(String, Span)> {
+    let is_label = matches!(
+        r.peek(),
+        Some(Event::Token(t)) if t.kind == Some(TokenKind::Label)
+    );
+    if !is_label {
+        return None;
+    }
+    let tok = r.next_token();
+    let span = tok.span;
+    let mut text = tok.text.into_owned();
+    // LABEL is `IDENT ":"` — drop the trailing colon.
+    debug_assert!(text.ends_with(':'));
+    text.pop();
+    Some((text, span))
+}
+
+fn wrap_label(label: Option<(String, Span)>, body: Expr) -> Expr {
+    match label {
+        Some((name, _)) => Expr::Label(name, Box::new(body)),
+        None => body,
+    }
+}
+
+/// Read a single atom (Token / Rule / etc.) without consuming any
+/// trailing `*`/`+`/`?` — those are applied by the caller after any
+/// label wrapping, so labels bind tighter than quantifiers.
+fn read_primary_atom<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>) -> Expr {
     r.expect_enter(RuleKind::Atom);
 
     let x = match r.peek_enter() {
@@ -490,7 +563,7 @@ fn read_primary_expr<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>) -
         }
     };
     r.expect_exit(RuleKind::Atom);
-    apply_quantifiers(r, x)
+    x
 }
 
 fn skip_until_exit<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>, kind: RuleKind) {
@@ -506,13 +579,17 @@ fn skip_until_exit<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>, kin
     }
 }
 
-fn read_group_expr<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>) -> Expr {
+
+/// Read the contents of a `(... )` group, leaving any trailing
+/// quantifiers for the caller to apply. Splitting it lets the caller
+/// wrap the bare group with a label before quantifying.
+fn read_group_inner<'a, I: Iterator<Item = Event<'a>>>(r: &mut Reader<'a, I>) -> Expr {
     r.expect_enter(RuleKind::Group);
     let _lparen = r.next_token();
     let inner = read_alt(r);
     let _rparen = r.next_token();
     r.expect_exit(RuleKind::Group);
-    apply_quantifiers(r, inner)
+    inner
 }
 
 fn apply_quantifiers<'a, I: Iterator<Item = Event<'a>>>(
@@ -1185,8 +1262,58 @@ mod tests {
             "@mode(tag) NAME = \"x\"; OUTSIDE = \"y\"; main = NAME OUTSIDE;",
         )
         .expect("ok");
-        assert_eq!(g.tokens.get("NAME").unwrap().mode.as_deref(), Some("tag"));
-        assert_eq!(g.tokens.get("OUTSIDE").unwrap().mode, None);
+        assert_eq!(g.tokens.get("NAME").unwrap().modes, vec!["tag".to_string()]);
+        assert_eq!(g.tokens.get("OUTSIDE").unwrap().modes, vec!["default".to_string()]);
+    }
+
+    // ----- Labels ------------------------------------------------------
+
+    #[test]
+    fn labeled_token_yields_label_expr() {
+        let g = parse_grammar("A = \"a\"; B = \"b\"; r = name:A B;").expect("ok");
+        let body = &g.rules.get("r").unwrap().body;
+        let xs = match body {
+            Expr::Seq(xs) => xs,
+            other => panic!("expected Seq, got {:?}", other),
+        };
+        match &xs[0] {
+            Expr::Label(name, inner) => {
+                assert_eq!(name, "name");
+                assert!(matches!(inner.as_ref(), Expr::Token(n) if n == "A"));
+            }
+            other => panic!("expected Label, got {:?}", other),
+        }
+        assert!(matches!(&xs[1], Expr::Token(n) if n == "B"));
+    }
+
+    #[test]
+    fn label_with_quantifier_wraps_inner() {
+        // `name:A*` parses as `(name:A)*` — label binds tighter than `*`.
+        let g = parse_grammar("A = \"a\"; r = name:A*;").expect("ok");
+        let body = &g.rules.get("r").unwrap().body;
+        match body {
+            Expr::Star(inner) => match inner.as_ref() {
+                Expr::Label(name, leaf) => {
+                    assert_eq!(name, "name");
+                    assert!(matches!(leaf.as_ref(), Expr::Token(n) if n == "A"));
+                }
+                other => panic!("expected Star(Label), got Star({:?})", other),
+            },
+            other => panic!("expected Star, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn mode_pre_with_multiple_modes_records_each() {
+        let g = parse_grammar(
+            "@mode(a, b, c) X = \"x\"; @mode(a) Y = \"y\"; main = X Y;",
+        )
+        .expect("ok");
+        assert_eq!(
+            g.tokens.get("X").unwrap().modes,
+            vec!["a".to_string(), "b".to_string(), "c".to_string()]
+        );
+        assert_eq!(g.tokens.get("Y").unwrap().modes, vec!["a".to_string()]);
     }
 
     #[test]
@@ -1200,9 +1327,9 @@ mod tests {
             main = NAME EQ_T OUTSIDE;
         "#;
         let g = parse_grammar(src).expect("ok");
-        assert_eq!(g.tokens.get("NAME").unwrap().mode.as_deref(), Some("tag"));
-        assert_eq!(g.tokens.get("EQ_T").unwrap().mode.as_deref(), Some("tag"));
-        assert_eq!(g.tokens.get("OUTSIDE").unwrap().mode, None);
+        assert_eq!(g.tokens.get("NAME").unwrap().modes, vec!["tag".to_string()]);
+        assert_eq!(g.tokens.get("EQ_T").unwrap().modes, vec!["tag".to_string()]);
+        assert_eq!(g.tokens.get("OUTSIDE").unwrap().modes, vec!["default".to_string()]);
     }
 
     #[test]
@@ -1353,6 +1480,6 @@ mod tests {
         .expect("ok");
         let frag = g.tokens.get("_NSTART").expect("_NSTART");
         assert!(frag.is_fragment);
-        assert_eq!(frag.mode.as_deref(), Some("tag"));
+        assert_eq!(frag.modes, vec!["tag".to_string()]);
     }
 }

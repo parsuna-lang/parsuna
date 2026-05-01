@@ -172,6 +172,7 @@ impl<'a, TK: TokenKindEnum, D: DfaMatcher<TK>> LexerBackend<'a, TK> for Scanner<
                 kind: Some(TK::EOF),
                 span: Span::point(pos),
                 text: Cow::Borrowed(""),
+                label: None,
             };
         }
         let m = D::longest_match(self.buf, self.pos, self.current_mode());
@@ -183,6 +184,7 @@ impl<'a, TK: TokenKindEnum, D: DfaMatcher<TK>> LexerBackend<'a, TK> for Scanner<
                 kind: m.best_kind,
                 span: Span::new(start, self.cur_pos()),
                 text,
+                label: None,
             }
         } else {
             let ch_len = utf8_char_len(self.buf[self.pos]).min(self.buf.len() - self.pos);
@@ -192,6 +194,7 @@ impl<'a, TK: TokenKindEnum, D: DfaMatcher<TK>> LexerBackend<'a, TK> for Scanner<
                 kind: None,
                 span: Span::new(start, self.cur_pos()),
                 text,
+                label: None,
             }
         }
     }
@@ -348,6 +351,7 @@ impl<R: Read, TK: TokenKindEnum, D: DfaMatcher<TK>> LexerBackend<'static, TK>
                 kind: Some(TK::EOF),
                 span: Span::point(p),
                 text: Cow::Borrowed(""),
+                label: None,
             };
         }
         let (len, kind) = self.longest_match();
@@ -359,6 +363,7 @@ impl<R: Read, TK: TokenKindEnum, D: DfaMatcher<TK>> LexerBackend<'static, TK>
                 kind,
                 span: Span::new(start, self.pos()),
                 text,
+                label: None,
             }
         } else {
             let ch_len = utf8_char_len(self.view()[0]).min(self.view().len());
@@ -368,6 +373,7 @@ impl<R: Read, TK: TokenKindEnum, D: DfaMatcher<TK>> LexerBackend<'static, TK>
                 kind: None,
                 span: Span::new(start, self.pos()),
                 text,
+                label: None,
             }
         }
     }

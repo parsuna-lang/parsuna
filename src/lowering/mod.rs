@@ -161,10 +161,14 @@ pub struct TokenInfo {
     /// are surfaced as `Option<TK>` (`None`) at the runtime boundary, so
     /// they consume no kind id.
     pub kind: u16,
-    /// Lexer mode this token lives in. Indexes into `StateTable::modes`.
-    /// `0` is the default mode; the lexer only matches a token while its
-    /// mode is on top of the mode stack.
-    pub mode_id: u32,
+    /// Lexer modes this token lives in. Each id indexes into
+    /// `StateTable::modes`; `0` is the default mode, others come from
+    /// `@mode(name)` pre-annotations. The lexer only matches a token
+    /// while one of these modes is on top of the mode stack. A token
+    /// with `mode_ids = [0]` is the default-mode case (the most common
+    /// shape); `mode_ids = [1, 2]` would mean "live in modes 1 and 2,
+    /// not in the default mode".
+    pub mode_ids: Vec<u32>,
     /// Mode-stack actions to apply after this token matches, in source
     /// order. Resolved from `TokenDef::mode_actions` (mode names →
     /// numeric ids). Empty for tokens with no `-> push(...)` / `-> pop`.
@@ -198,7 +202,9 @@ pub enum Instr {
     /// Emit an `Exit` event for this rule-kind id.
     Exit(u16),
     /// Consume a token of `kind`; on mismatch, raise an error and recover
-    /// to the given SYNC set.
+    /// to the given SYNC set. `label`, if present, is the `name:NAME`
+    /// label from the grammar — runtimes stamp it on the resulting
+    /// `Token` event so consumers can identify the position by name.
     Expect {
         /// Required token-kind id.
         kind: u16,
@@ -206,6 +212,8 @@ pub enum Instr {
         token_name: String,
         /// SYNC set to recover to on mismatch.
         sync: SyncSetId,
+        /// Optional grammar label from `name:NAME` syntax.
+        label: Option<String>,
     },
     /// Push a return state. Pairs with a future `Tail::Ret`; the callee's
     /// `Ret` pops this to resume the caller's flow.

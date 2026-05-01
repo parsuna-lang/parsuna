@@ -1120,7 +1120,7 @@ mod tests {
             pattern: pat,
             skip: false,
             kind: 0,
-            mode_id: 0,
+            mode_ids: vec![0],
             mode_actions: Vec::new(),
         }
     }

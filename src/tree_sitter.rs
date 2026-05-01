@@ -88,6 +88,10 @@ fn render_expr(e: &Expr) -> String {
         Expr::Opt(x) => format!("optional({})", render_expr(x)),
         Expr::Star(x) => format!("repeat({})", render_expr(x)),
         Expr::Plus(x) => format!("repeat1({})", render_expr(x)),
+        // Tree-sitter has no direct equivalent for parsuna's labels —
+        // they're parser-level metadata that'd appear on Token events.
+        // Render the body as-is; the label vanishes.
+        Expr::Label(_, x) => render_expr(x),
     }
 }
 

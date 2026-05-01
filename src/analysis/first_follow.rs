@@ -180,6 +180,8 @@ pub fn first_of(
             let star = star_k(&inner, k);
             out = concat_k(&inner, &star, k);
         }
+        // Labels are pure annotations — delegate to the body.
+        Expr::Label(_, x) => out = first_of(x, nullable, rule_first, k),
     }
     out
 }
@@ -302,6 +304,7 @@ fn walk_follow(
                 }
             }
         }
+        Expr::Label(_, x) => walk_follow(x, host, nullable, first, follow, changed),
     }
 }
 
@@ -354,6 +357,7 @@ fn collect_trailing_rules(e: &Expr, nullable: &BTreeMap<String, bool>) -> Vec<St
         Expr::Opt(x) | Expr::Star(x) | Expr::Plus(x) => {
             out.append(&mut collect_trailing_rules(x, nullable))
         }
+        Expr::Label(_, x) => out.append(&mut collect_trailing_rules(x, nullable)),
     }
     out
 }
@@ -443,6 +447,7 @@ fn walk_follow_k(
             let body_tail = concat_k(&star, tail, k);
             walk_follow_k(x, &body_tail, nullable, first, follow, changed, k);
         }
+        Expr::Label(_, x) => walk_follow_k(x, tail, nullable, first, follow, changed, k),
     }
 }
 
@@ -455,6 +460,7 @@ fn expr_nullable(e: &Expr, nullable: &BTreeMap<String, bool>) -> bool {
         Expr::Alt(xs) => xs.iter().any(|x| expr_nullable(x, nullable)),
         Expr::Opt(_) | Expr::Star(_) => true,
         Expr::Plus(x) => expr_nullable(x, nullable),
+        Expr::Label(_, x) => expr_nullable(x, nullable),
     }
 }
 
@@ -647,6 +653,9 @@ fn walk_check_conflicts(
             let body_tail = concat_k(&star, tail, k);
             walk_check_conflicts(x, &body_tail, rule_name, rule_span, nullable, first, k, out);
         }
+        Expr::Label(_, x) => {
+            walk_check_conflicts(x, tail, rule_name, rule_span, nullable, first, k, out);
+        }
     }
 }
 
@@ -685,7 +694,7 @@ mod tests {
             pattern: TokenPattern::Empty,
             skip: false,
             is_fragment: false,
-            mode: None,
+            modes: vec!["default".to_string()],
             mode_actions: Vec::new(),
             span: Span::default(),
         }

@@ -41,6 +41,7 @@ pub fn run(g: &Grammar, issues: &mut Vec<Diagnostic>) {
             &r.name,
             r.span,
         );
+        check_labels_on_tokens_only(&r.body, issues, &r.name, r.span);
     }
 
     for t in g.tokens.values() {
@@ -104,7 +105,47 @@ fn check_expr_refs(
             ).at(ctx_span));
         },
         Expr::Seq(xs) | Expr::Alt(xs) => xs.iter().for_each(|x| check_expr_refs(x, tk, rl, issues, ctx, ctx_span)),
-        Expr::Opt(x) | Expr::Star(x) | Expr::Plus(x) => check_expr_refs(x, tk, rl, issues, ctx, ctx_span),
+        Expr::Opt(x) | Expr::Star(x) | Expr::Plus(x) | Expr::Label(_, x) => {
+            check_expr_refs(x, tk, rl, issues, ctx, ctx_span)
+        }
+    }
+}
+
+/// Walk a rule body checking that every `name:body` label binds to a
+/// single token reference. Labels on rule calls, groups, or repetition
+/// have no clean runtime representation today (the `Token::label`
+/// field is the only carrier); reject them with a pointed error so the
+/// grammar fails loudly rather than silently dropping the label.
+fn check_labels_on_tokens_only(
+    e: &Expr,
+    issues: &mut Vec<Diagnostic>,
+    ctx: &str,
+    ctx_span: Span,
+) {
+    match e {
+        Expr::Empty | Expr::Token(_) | Expr::Rule(_) => {}
+        Expr::Label(name, body) => {
+            match body.as_ref() {
+                Expr::Token(_) => {}
+                _ => {
+                    issues.push(
+                        Diagnostic::error(format!(
+                            "label `{}:` in rule `{}` must bind to a single token reference; \
+                             labels on rules, groups, or repeated expressions aren't supported",
+                            name, ctx
+                        ))
+                        .at(ctx_span),
+                    );
+                }
+            }
+            check_labels_on_tokens_only(body, issues, ctx, ctx_span);
+        }
+        Expr::Seq(xs) | Expr::Alt(xs) => xs
+            .iter()
+            .for_each(|x| check_labels_on_tokens_only(x, issues, ctx, ctx_span)),
+        Expr::Opt(x) | Expr::Star(x) | Expr::Plus(x) => {
+            check_labels_on_tokens_only(x, issues, ctx, ctx_span)
+        }
     }
 }
 
@@ -268,7 +309,9 @@ fn collect_first_rule_names(e: &Expr, out: &mut BTreeSet<String>) {
                 collect_first_rule_names(x, out);
             }
         }
-        Expr::Opt(x) | Expr::Star(x) | Expr::Plus(x) => collect_first_rule_names(x, out),
+        Expr::Opt(x) | Expr::Star(x) | Expr::Plus(x) | Expr::Label(_, x) => {
+            collect_first_rule_names(x, out)
+        }
     }
 }
 
@@ -289,7 +332,7 @@ mod tests {
             pattern: pat,
             skip: false,
             is_fragment: false,
-            mode: None,
+            modes: vec!["default".to_string()],
             mode_actions: Vec::new(),
             span: Span::default(),
         }
@@ -450,6 +493,37 @@ mod tests {
         assert!(issues
             .iter()
             .any(|d| d.message.contains("no non-fragment rules")));
+    }
+
+    #[test]
+    fn label_on_token_is_accepted() {
+        let mut g = Grammar::default();
+        g.add_token(tok("A", lit("a")));
+        g.add_rule(rule(
+            "r",
+            Expr::Label("name".into(), Box::new(Expr::Token("A".into()))),
+        ));
+        let issues = run_collect(&g);
+        assert!(issues.is_empty(), "{:?}", issues);
+    }
+
+    #[test]
+    fn label_on_rule_call_is_rejected() {
+        let mut g = Grammar::default();
+        g.add_token(tok("A", lit("a")));
+        g.add_rule(rule("other", Expr::Token("A".into())));
+        g.add_rule(rule(
+            "r",
+            Expr::Label("x".into(), Box::new(Expr::Rule("other".into()))),
+        ));
+        let issues = run_collect(&g);
+        assert!(
+            issues
+                .iter()
+                .any(|d| d.message.contains("must bind to a single token reference")),
+            "diagnostics: {:?}",
+            issues.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
     }
 
     #[test]

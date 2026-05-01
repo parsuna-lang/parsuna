@@ -68,9 +68,13 @@ pub struct TokenDef {
     /// Marked `_TOKEN`: usable inside other token patterns but not itself
     /// a real token kind at run time.
     pub is_fragment: bool,
-    /// Lexer mode this token belongs to. `None` means the default mode.
-    /// Set by an enclosing `@mode(name)` pre-annotation.
-    pub mode: Option<String>,
+    /// Lexer modes this token lives in — always at least one entry.
+    /// A token with no `@mode(...)` pre-annotation gets `["default"]`
+    /// filled in by the parser so downstream passes never have to
+    /// branch on emptiness. With `@mode(a, b, c)` the vec contains
+    /// every listed name in source order; the token shares one kind
+    /// id across the per-mode DFAs.
+    pub modes: Vec<String>,
     /// Mode-stack actions that fire in source order when this token
     /// matches. Each `-> push(name)` / `-> pop` action contributes one
     /// entry, so e.g. `-> pop, push(b)` swaps the top of the stack.
@@ -230,6 +234,14 @@ pub enum Expr {
     Star(Box<Expr>),
     /// `+` — the child appears one or more times.
     Plus(Box<Expr>),
+    /// `name:body` — a named position. Today the label only attaches
+    /// when `body` is a single token reference (`Expr::Token(n)`); the
+    /// label string is baked into the resulting `Expect` op so the
+    /// `Token` event a labeled match produces carries the name.
+    /// Lowering rejects labels on rule references, groups, or any
+    /// non-token expression — the runtime has no way to thread the
+    /// label through a multi-token subtree without extra structure.
+    Label(String, Box<Expr>),
 }
 
 impl Expr {
@@ -261,7 +273,7 @@ mod tests {
             pattern: TokenPattern::Empty,
             skip: false,
             is_fragment: false,
-            mode: None,
+            modes: vec!["default".to_string()],
             mode_actions: Vec::new(),
             span: Span::default(),
         }

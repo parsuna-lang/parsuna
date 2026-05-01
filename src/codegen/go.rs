@@ -505,11 +505,7 @@ fn emit_instr(s: &mut String, st: &StateTable, op: &Instr) {
             )
             .unwrap();
         }
-        Instr::Expect {
-            kind,
-            token_name,
-            sync,
-        } => {
+        Instr::Expect { kind, token_name, sync, .. } => {
             writeln!(
                 s,
                 "\t\tevent = p.TryConsume(uint16({}), sync_{}, {:?}); emitted = true",

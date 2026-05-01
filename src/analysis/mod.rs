@@ -133,7 +133,7 @@ mod tests {
             pattern: pat,
             skip: false,
             is_fragment: false,
-            mode: None,
+            modes: vec!["default".to_string()],
             mode_actions: Vec::new(),
             span: Span::default(),
         }

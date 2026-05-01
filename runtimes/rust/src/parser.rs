@@ -363,7 +363,31 @@ impl<
         sync: &'static [G::TokenKind],
         expected_msg: &'static str,
     ) -> Event<'a, G::TokenKind, G::RuleKind> {
+        self.expect_labeled(kind, sync, expected_msg, None)
+    }
+
+    /// Same as [`Cursor::expect`] but stamps `label` on the consumed
+    /// token's `Token::label` field on the success path. Used by
+    /// generated dispatch code for `name:NAME`-form positions in the
+    /// grammar; the label travels through to the consumer's `Event`
+    /// stream so they can identify the position by name without
+    /// tracking surrounding rule context.
+    #[inline(always)]
+    pub fn expect_labeled(
+        &mut self,
+        kind: G::TokenKind,
+        sync: &'static [G::TokenKind],
+        expected_msg: &'static str,
+        label: Option<&'static str>,
+    ) -> Event<'a, G::TokenKind, G::RuleKind> {
         if self.look(0).kind == Some(kind) {
+            // Stamp the label directly on the slot's token before
+            // `consume` rotates it out — saves a per-token branch in
+            // the unlabeled case (label stays `None` from
+            // construction).
+            if let Some(t) = self.p.look[0].as_mut() {
+                t.label = label;
+            }
             return self.consume();
         }
         let event = self.error_here(expected_msg);

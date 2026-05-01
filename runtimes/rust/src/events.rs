@@ -101,6 +101,11 @@ pub struct Token<'a, TK = u16> {
     /// The matched source text — borrowed from the input where possible
     /// and owned when the lexer cannot keep a stable reference.
     pub text: Cow<'a, str>,
+    /// Grammar-position label from a `name:NAME` form, or `None` if the
+    /// position wasn't labeled. Set by the dispatch's labeled `expect`
+    /// path; left as `None` for skip tokens, garbage, and the
+    /// synced-to-expected token after a recovery.
+    pub label: Option<&'static str>,
 }
 
 impl<'a> Token<'a, u16> {
@@ -112,6 +117,7 @@ impl<'a> Token<'a, u16> {
             kind: Some(kind),
             span,
             text: text.into(),
+            label: None,
         }
     }
     /// Build an EOF token at `span`. Always has empty text.
@@ -120,6 +126,7 @@ impl<'a> Token<'a, u16> {
             kind: Some(TOKEN_EOF),
             span,
             text: Cow::Borrowed(""),
+            label: None,
         }
     }
 }

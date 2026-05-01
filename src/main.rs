@@ -570,6 +570,7 @@ fn print_expr_tree(e: &Expr, prefix: &str, is_last: bool) {
         Expr::Opt(_) => "Opt".to_string(),
         Expr::Star(_) => "Star".to_string(),
         Expr::Plus(_) => "Plus".to_string(),
+        Expr::Label(name, _) => format!("Label({})", name),
     };
     println!("{}{}{}", prefix, branch, label);
 
@@ -582,7 +583,7 @@ fn print_expr_tree(e: &Expr, prefix: &str, is_last: bool) {
                 print_expr_tree(x, &next_prefix, i + 1 == n);
             }
         }
-        Expr::Opt(x) | Expr::Star(x) | Expr::Plus(x) => {
+        Expr::Opt(x) | Expr::Star(x) | Expr::Plus(x) | Expr::Label(_, x) => {
             print_expr_tree(x, &next_prefix, true);
         }
         _ => {}
@@ -613,10 +614,12 @@ fn format_instr(op: &parsuna::lowering::Instr, st: &StateTable) -> Vec<String> {
             kind,
             token_name,
             sync,
+            label,
         } => vec![format!(
-            "Expect {} sync={}",
+            "Expect {} sync={}{}",
             token_name_for_kind_fallback(st, *kind, token_name),
-            format_sync_set(st, *sync)
+            format_sync_set(st, *sync),
+            label.as_deref().map(|n| format!(" label={}", n)).unwrap_or_default()
         )],
         Instr::PushRet(r) => vec![format!("PushRet {}", state_ref(st, *r))],
     }
@@ -1095,6 +1098,7 @@ impl<'a> RailroadCtx<'a> {
                 self.edge(&jn, &br);
                 (br, jn)
             }
+            Expr::Label(_, x) => self.emit(x),
         }
     }
 }

@@ -130,7 +130,7 @@ pub fn layout(prog: Program, ag: &AnalyzedGrammar, dopts: DfaOpts) -> StateTable
             let mode_tokens: Vec<_> = prog
                 .tokens
                 .iter()
-                .filter(|t| t.mode_id == id)
+                .filter(|t| t.mode_ids.contains(&id))
                 .cloned()
                 .collect();
             let dfa = lexer_dfa::compile_with_opts(&mode_tokens, dopts);
@@ -244,11 +244,13 @@ fn lower_op(
             kind,
             token_name,
             sync,
+            label,
         } => Body {
             instrs: vec![Instr::Expect {
                 kind: *kind,
                 token_name: token_name.clone(),
                 sync: *sync,
+                label: label.clone(),
             }],
             tail: after,
         },

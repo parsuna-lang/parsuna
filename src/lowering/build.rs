@@ -56,7 +56,9 @@ pub enum Op {
         kind: u16,
     },
     /// Consume a token of `kind`; on mismatch, emit an error and recover
-    /// to `sync`.
+    /// to `sync`. `label` is the optional name from a `name:NAME` form
+    /// in the grammar; the runtime stamps it on the resulting `Token`
+    /// event so consumers can identify the position at runtime.
     Expect {
         /// Required token-kind id.
         kind: u16,
@@ -64,6 +66,8 @@ pub enum Op {
         token_name: String,
         /// SYNC-set id to recover to on mismatch.
         sync: SyncSetId,
+        /// Optional label from a `name:NAME` grammar form.
+        label: Option<String>,
     },
     /// Recursive call into another rule or block.
     Call {
@@ -194,11 +198,11 @@ pub fn build(ag: &AnalyzedGrammar) -> Program {
             pattern: resolve_pattern(&t.pattern, g),
             skip: t.skip,
             kind: (i + 1) as u16,
-            mode_id: t
-                .mode
-                .as_deref()
-                .map(|name| mode_ids[name])
-                .unwrap_or(0),
+            mode_ids: t
+                .modes
+                .iter()
+                .map(|name| mode_ids[name.as_str()])
+                .collect(),
             mode_actions: t
                 .mode_actions
                 .iter()
@@ -301,7 +305,7 @@ fn collect_mode_ids(g: &Grammar) -> HashMap<String, u32> {
     ids.insert("default".to_string(), 0);
     let mut next: u32 = 1;
     for t in g.tokens.values() {
-        if let Some(name) = t.mode.as_deref() {
+        for name in &t.modes {
             ids.entry(name.to_string()).or_insert_with(|| {
                 let id = next;
                 next += 1;
@@ -426,15 +430,16 @@ impl Builder<'_> {
             Expr::Empty => {}
             Expr::Token(name) => {
                 let kind = token_kind(self.ag, name);
-                let label = format!("{}:expect:{}", self.current_symbol, name);
+                let dbg_label = format!("{}:expect:{}", self.current_symbol, name);
                 self.push_op(
                     cur,
                     Op::Expect {
                         kind,
                         token_name: name.clone(),
                         sync: self.current_sync,
+                        label: None,
                     },
-                    label,
+                    dbg_label,
                 );
             }
             Expr::Rule(name) => {
@@ -561,6 +566,33 @@ impl Builder<'_> {
                     star_label,
                 );
             }
+            Expr::Label(name, body) => match body.as_ref() {
+                Expr::Token(tok_name) => {
+                    let kind = token_kind(self.ag, tok_name);
+                    let dbg_label = format!(
+                        "{}:expect:{}@{}",
+                        self.current_symbol, tok_name, name
+                    );
+                    self.push_op(
+                        cur,
+                        Op::Expect {
+                            kind,
+                            token_name: tok_name.clone(),
+                            sync: self.current_sync,
+                            label: Some(name.clone()),
+                        },
+                        dbg_label,
+                    );
+                }
+                _ => {
+                    // Defensive: validate.rs rejects labels on anything
+                    // other than a token reference. If something slips
+                    // through we strip the label and recurse so the
+                    // grammar still lowers — the missing label just
+                    // doesn't surface in the event stream.
+                    self.emit_expr(body, cur, tail);
+                }
+            },
         }
     }
 }
@@ -788,7 +820,7 @@ mod tests {
             pattern: TokenPattern::Literal("x".into()),
             skip: false,
             is_fragment: true,
-            mode: None,
+            modes: vec!["default".to_string()],
             mode_actions: Vec::new(),
             span: Default::default(),
         };
@@ -799,7 +831,7 @@ mod tests {
             pattern: TokenPattern::Ref("_LEAF".into()),
             skip: false,
             is_fragment: true,
-            mode: None,
+            modes: vec!["default".to_string()],
             mode_actions: Vec::new(),
             span: Default::default(),
         };

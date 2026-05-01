@@ -18,6 +18,7 @@ _ESCAPE    = "\\" ("u{" _HEX_DIGIT+ "}" | 'n' | 'r' | 't' | '0' | '\\' | '\'' | 
 
 STRING = "\"" ( !('"' | '\\' | '\n') | _ESCAPE )* "\"";
 CHAR   = "'"  ( !('\'' | '\\' | '\n') | _ESCAPE ) "'";
+LABEL  = ('A'..'Z' | 'a'..'z' | '_') ('A'..'Z' | 'a'..'z' | '_' | '0'..'9')* ":";
 IDENT  = ('A'..'Z' | 'a'..'z' | '_') ('A'..'Z' | 'a'..'z' | '_' | '0'..'9')*;
 
 WS      = (' ' | '\t' | '\r' | '\n')+  -> skip;
@@ -27,7 +28,7 @@ file = item*;
 
 item = mode_pre? decl;
 
-mode_pre = AT IDENT LPAREN IDENT RPAREN;
+mode_pre = AT IDENT LPAREN IDENT (COMMA IDENT)* RPAREN;
 
 decl = IDENT EQ alt_expr actions? SEMI;
 
@@ -37,7 +38,7 @@ action_arg = LPAREN IDENT RPAREN;
 
 alt_expr = seq_expr (PIPE seq_expr)*;
 seq_expr = _postfix_expr*;
-_postfix_expr = _primary_expr _quant_op*;
+_postfix_expr = LABEL? _primary_expr _quant_op*;
 _quant_op     = QUESTION | STAR | PLUS;
 _primary_expr = group | atom;
 group = LPAREN alt_expr RPAREN;

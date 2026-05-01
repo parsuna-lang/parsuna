@@ -13,7 +13,7 @@ pub fn visit<F: FnMut(&Expr)>(e: &Expr, f: &mut F) {
                 visit(x, f);
             }
         }
-        Expr::Opt(x) | Expr::Star(x) | Expr::Plus(x) => visit(x, f),
+        Expr::Opt(x) | Expr::Star(x) | Expr::Plus(x) | Expr::Label(_, x) => visit(x, f),
     }
 }
 
@@ -153,6 +153,7 @@ mod tests {
                 Expr::Opt(_) => "Opt".into(),
                 Expr::Star(_) => "Star".into(),
                 Expr::Plus(_) => "Plus".into(),
+                Expr::Label(name, _) => format!("Label({})", name),
             });
         });
         assert_eq!(seen, vec!["Opt", "Seq", "Token(A)", "Token(B)"]);

@@ -585,6 +585,7 @@ mod tests {
                 kind: 1,
                 token_name: "X".into(),
                 sync: 0,
+                label: None,
             }],
             tail: Tail::Ret,
         };

@@ -479,15 +479,23 @@ fn emit_instr(s: &mut String, st: &StateTable, op: &Instr, ind: &str) {
             kind,
             token_name,
             sync,
-        } => writeln!(
-            s,
-            "{}event = Some(p.expect({}, SYNC_{}, \"expected {}\"));",
-            ind,
-            token_variant(st, *kind),
-            sync,
-            token_name
-        )
-        .unwrap(),
+            label,
+        } => {
+            let label_arg = match label {
+                Some(name) => format!("Some({:?})", name),
+                None => "None".to_string(),
+            };
+            writeln!(
+                s,
+                "{}event = Some(p.expect_labeled({}, SYNC_{}, \"expected {}\", {}));",
+                ind,
+                token_variant(st, *kind),
+                sync,
+                token_name,
+                label_arg,
+            )
+            .unwrap();
+        }
         Instr::PushRet(r) => writeln!(s, "{}p.push_ret({});", ind, r).unwrap(),
     }
 }

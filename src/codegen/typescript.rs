@@ -526,13 +526,19 @@ fn emit_instr(s: &mut String, st: &StateTable, op: &Instr) {
             kind,
             token_name,
             sync,
+            label,
         } => {
+            let label_arg = match label {
+                Some(name) => format!("\"{}\"", name),
+                None => "null".to_string(),
+            };
             writeln!(
                 s,
-                "      event = p.tryConsume({}, SYNC_{}, \"expected {}\");",
+                "      event = p.tryConsume({}, SYNC_{}, \"expected {}\", {});",
                 token_variant(st, *kind),
                 sync,
-                token_name
+                token_name,
+                label_arg,
             )
             .unwrap();
         }

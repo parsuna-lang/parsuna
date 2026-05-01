@@ -675,11 +675,7 @@ fn emit_instr(s: &mut String, st: &StateTable, op: &Instr, ind: &str) {
         Instr::Exit(k) => {
             writeln!(s, "{}event = p.exit({});", ind, rule_id(st, *k)).unwrap();
         }
-        Instr::Expect {
-            kind,
-            token_name,
-            sync,
-        } => {
+        Instr::Expect { kind, token_name, sync, .. } => {
             writeln!(
                 s,
                 "{}event = p.tryConsume({}, SYNC_{}, \"{}\");",
