@@ -333,7 +333,7 @@ fn emit_dfa(s: &mut String, st: &StateTable) {
 
     write!(
         s,
-        "const SKIP_KINDS: ReadonlySet<TokenKind> = new Set(["
+        "export const SKIP_KINDS: ReadonlySet<TokenKind> = new Set(["
     )
     .unwrap();
     let mut first = true;
