@@ -55,6 +55,7 @@ pub fn emit(st: &StateTable, args: &Args) -> Vec<EmittedFile> {
     writeln!(&mut s, "import java.io.InputStream;").unwrap();
     writeln!(&mut s, "import java.nio.charset.StandardCharsets;").unwrap();
     writeln!(&mut s, "import dev.parsuna.runtime.DfaMatcher;").unwrap();
+    writeln!(&mut s, "import dev.parsuna.runtime.Event;").unwrap();
     writeln!(&mut s, "import dev.parsuna.runtime.Lexer;").unwrap();
     writeln!(&mut s, "import dev.parsuna.runtime.Parser;").unwrap();
     writeln!(&mut s, "import dev.parsuna.runtime.ParserConfig;").unwrap();
@@ -412,8 +413,9 @@ fn emit_tables(s: &mut String, st: &StateTable) {
 }
 
 fn emit_drive(s: &mut String, st: &StateTable) {
-    writeln!(s, "    private static void step(Cursor p) {{").unwrap();
+    writeln!(s, "    private static Event step(Cursor p) {{").unwrap();
     writeln!(s, "        int cur = p.state();").unwrap();
+    writeln!(s, "        Event event = null;").unwrap();
     writeln!(s, "        switch (cur) {{").unwrap();
     for state in st.states.values() {
         writeln!(
@@ -433,6 +435,7 @@ fn emit_drive(s: &mut String, st: &StateTable) {
     .unwrap();
     writeln!(s, "        }}").unwrap();
     writeln!(s, "        p.setState(cur);").unwrap();
+    writeln!(s, "        return event;").unwrap();
     writeln!(s, "    }}").unwrap();
     writeln!(s).unwrap();
 }
@@ -440,10 +443,10 @@ fn emit_drive(s: &mut String, st: &StateTable) {
 fn emit_instr(s: &mut String, st: &StateTable, op: &Instr, ind: &str) {
     match op {
         Instr::Enter(k) => {
-            writeln!(s, "{}p.enter({});", ind, rule_id(st, *k)).unwrap();
+            writeln!(s, "{}event = p.enter({});", ind, rule_id(st, *k)).unwrap();
         }
         Instr::Exit(k) => {
-            writeln!(s, "{}p.exit({});", ind, rule_id(st, *k)).unwrap();
+            writeln!(s, "{}event = p.exit({});", ind, rule_id(st, *k)).unwrap();
         }
         Instr::Expect {
             kind,
@@ -452,7 +455,7 @@ fn emit_instr(s: &mut String, st: &StateTable, op: &Instr, ind: &str) {
         } => {
             writeln!(
                 s,
-                "{}p.tryConsume({}, SYNC_{}, \"{}\");",
+                "{}event = p.tryConsume({}, SYNC_{}, \"{}\");",
                 ind,
                 token_id(st, *kind),
                 sync,
@@ -603,11 +606,11 @@ fn emit_dispatch_leaf_block(
         (DispatchLeaf::Fallthrough, None) => writeln!(s, "{}cur = p.popRet();", ind).unwrap(),
         (DispatchLeaf::Error, Some(n)) => {
             writeln!(s, "{}cur = {};", ind, n).unwrap();
-            writeln!(s, "{}p.errorHere(\"unexpected token\");", ind).unwrap();
+            writeln!(s, "{}event = p.errorHere(\"unexpected token\");", ind).unwrap();
             writeln!(s, "{}p.recoverTo(SYNC_{});", ind, sync).unwrap();
         }
         (DispatchLeaf::Error, None) => {
-            writeln!(s, "{}p.errorHere(\"unexpected token\");", ind).unwrap();
+            writeln!(s, "{}event = p.errorHere(\"unexpected token\");", ind).unwrap();
             writeln!(s, "{}p.recoverTo(SYNC_{});", ind, sync).unwrap();
             writeln!(s, "{}cur = p.popRet();", ind).unwrap();
         }

@@ -4,10 +4,10 @@ import java.util.function.IntPredicate;
 
 /** Grammar-specific callbacks a generated parser wires into the runtime.
  *
- *  <p>{@code step} runs one state body of the dispatch and (optionally)
- *  emits one event via the {@link Cursor} hooks. The runtime's
- *  {@code next} loop calls {@code step} again when the body was a pure
- *  transition.
+ *  <p>{@code step} runs one state body of the dispatch and returns the
+ *  pooled {@link Event} that body produced, or {@code null} for a pure
+ *  transition step — the runtime's {@code next} loop calls {@code step}
+ *  again in that case.
  *
  *  <p>{@code step} receives a {@link Cursor} — a thin wrapper that
  *  exposes just the runtime hooks generated dispatch needs (look/state/

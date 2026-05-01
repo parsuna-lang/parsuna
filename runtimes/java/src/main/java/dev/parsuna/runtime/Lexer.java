@@ -10,16 +10,14 @@ import java.io.InputStream;
  *   <li>{@link #Lexer(InputStream, DfaMatcher)} reads in 16 KiB chunks
  *   so memory use stays bounded for arbitrary-sized input.</li>
  *   <li>{@link #Lexer(byte[], DfaMatcher)} parses an in-memory buffer
- *   directly — no chunking, no read calls, no compaction. Use this when
- *   the input is already a byte array (e.g. {@code Files.readAllBytes})
- *   to skip the {@link InputStream} hop.</li>
+ *   directly — no chunking, no read calls, no compaction. Use this
+ *   when the input is already a byte array (e.g.
+ *   {@code Files.readAllBytes}) to skip the {@link InputStream} hop.</li>
  * </ul>
  *
- * <p>{@link #nextToken()} writes the matched token's metadata into the
- * lexer's {@code last*} scalar fields and returns no Token object — the
- * runtime copies the fields into its lookahead state without allocating
- * one Token per lex step. Callers that want a {@link Token} value can
- * call {@link #materializeLastToken()} after {@code nextToken}.
+ * <p>{@link #nextToken(Token)} writes the matched token's metadata into
+ * the caller-supplied {@link Token} — the runtime hands the lexer one of
+ * its pooled tokens so the lex step never allocates a Token on its own.
  */
 public final class Lexer {
     static final int CHUNK = 16384;
@@ -45,15 +43,6 @@ public final class Lexer {
      *  only the default remains so a stray `pop` action can't underflow. */
     private int[] modeStack = new int[]{0};
     private int modeTop = 0;
-
-    /** Last-matched token's metadata. Written by {@link #nextToken()};
-     *  read by the parser's pump-mode and copied into lookahead arrays
-     *  without ever materializing a {@link Token} object. */
-    public int lastKind;
-    public byte[] lastData;
-    public int lastDataOff, lastDataLen;
-    public int lastSOff, lastSLine, lastSCol;
-    public int lastEOff, lastELine, lastECol;
 
     public Lexer(InputStream in, DfaMatcher matcher) {
         this.in = in;
@@ -145,20 +134,17 @@ public final class Lexer {
     }
 
     /**
-     * Match the next token. Writes its kind, byte slice, and start/end
-     * position into the {@code last*} fields. Emits repeated EOF (kind 0,
-     * empty slice) once input ends; lex failures (no DFA pattern matched)
-     * come through with {@link #lastKind} == {@link #ERROR_KIND}.
+     * Match the next token, writing its kind, byte slice, and start/end
+     * position into {@code out}. Emits repeated EOF (kind 0, empty
+     * slice) once input ends; lex failures (no DFA pattern matched)
+     * come through with {@code out.kind() == }{@link #ERROR_KIND}.
      */
-    public void nextToken() {
+    public void nextToken(Token out) {
         if (in != null) ensure(CHUNK);
         if (bufLen - bufPos == 0) {
-            lastKind = 0;
-            lastData = buf;
-            lastDataOff = bufPos;
-            lastDataLen = 0;
-            lastSOff = offset; lastSLine = line; lastSCol = col;
-            lastEOff = offset; lastELine = line; lastECol = col;
+            out.set(0, buf, bufPos, 0,
+                offset, line, col,
+                offset, line, col);
             return;
         }
         runMatch();
@@ -190,26 +176,14 @@ public final class Lexer {
             byteOff = 0;
         }
         advance(matchLen);
-        lastKind = kind;
-        lastData = data;
-        lastDataOff = byteOff;
-        lastDataLen = matchLen;
-        lastSOff = sOff; lastSLine = sLine; lastSCol = sCol;
-        lastEOff = offset; lastELine = line; lastECol = col;
+        out.set(kind, data, byteOff, matchLen,
+            sOff, sLine, sCol,
+            offset, line, col);
         // InputStream mode: now that we've copied the bytes out, it's safe
         // to compact the read buffer.
         if (in != null && bufPos > 65536) {
             System.arraycopy(buf, bufPos, buf, 0, bufLen - bufPos);
             bufLen -= bufPos; bufPos = 0;
         }
-    }
-
-    /** Build a {@link Token} from the {@code last*} fields. Convenient for
-     *  callers that prefer the object-oriented Token shape; the runtime's
-     *  hot path doesn't use it. */
-    public Token materializeLastToken() {
-        return new Token(lastKind, lastData, lastDataOff, lastDataLen,
-            lastSOff, lastSLine, lastSCol,
-            lastEOff, lastELine, lastECol);
     }
 }
