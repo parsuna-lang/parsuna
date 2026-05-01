@@ -19,9 +19,9 @@ The high-level chain is:
          ▼
     AnalyzedGrammar   (Grammar plus FIRST/FOLLOW/nullable, chosen k)
          │
-         │  :doc:`lower` — build → layout → fuse
+         │  :doc:`lower` — build → layout → optimize → validate
          ▼
-    StateTable        (flat state machine + lexer DFA)
+    StateTable        (flat state machine + per-mode lexer DFAs)
          │
          │  :doc:`codegen`
          ▼

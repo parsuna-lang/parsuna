@@ -26,17 +26,19 @@ The shape each backend produces
 All backends produce the same logical artifacts, encoded in the
 target language's idioms:
 
-1. **TokenKind enum.** One variant per entry in ``state_table.tokens``,
-   plus ``EOF = 0``. Representation per language:
+1. **TokenKind enum.** One variant per entry in
+   ``state_table.tokens``, plus ``EOF = 0``. Representation per
+   language:
 
    * Rust / TypeScript / Python (PyO3 wraps Rust): ``u16``.
    * Go / C: ``uint16`` / ``uint16_t``.
    * C#: ``ushort``.
-   * Java: ``int`` (Java has no unsigned 16-bit primitive — values stay
-     in the ``0..0xFFFF`` range).
+   * Java: ``int`` (Java has no unsigned 16-bit primitive — values
+     stay in the ``0..0xFFFF`` range).
 
    Lex failures are not a TokenKind variant; they ride the optional /
    sentinel convention chosen per language.
+
 2. **Lex-failure representation.** Languages with a free structural
    nullable carry the kind as that:
 
@@ -49,8 +51,8 @@ target language's idioms:
 
    * Go: ``Token { Kind uint16, … }``; the runtime exposes
      ``parsunart.ErrorKind = 0xFFFF``.
-   * Java: ``Token { int kind, … }``; the runtime exposes
-     ``Lexer.ERROR_KIND = 0xFFFF``.
+   * Java: ``Token`` carries ``int kind`` (read via ``token.kind()``);
+     the runtime exposes ``Lexer.ERROR_KIND = 0xFFFF``.
    * C#: ``Token(ushort Kind, …)``; the runtime exposes
      ``Lexer.ErrorKind = 0xFFFF``.
    * C: ``{ uint16_t kind; … }``; the runtime defines
@@ -72,34 +74,47 @@ target language's idioms:
 4. **Name-lookup helpers.** ``tokenKindName`` / ``ruleKindName`` —
    useful for diagnostics and test output.
 5. **Compiled lexer DFA.** Not a packed table — the DFA is emitted
-   as code. Each state becomes one arm of a ``match``/``switch``
+   as code. Each state becomes one arm of a ``match`` / ``switch``
    that reads the current byte and dispatches on it; the whole
    machine is wrapped in a ``longest_match`` function exposed
    through the runtime's ``DfaMatcher`` (or equivalent) interface.
    Byte ranges sharing the same target collapse into single arms
    (so an ``[a-z]+`` token compiles to ``Some(&(b'a'..=b'z'))``
-   rather than 26 individual byte arms). See
-   :ref:`compiled-lexer-dfa` below for the shape and rationale.
+   rather than 26 individual byte arms). When the grammar declares
+   lexer modes (``@mode(name)`` pre-annotations), one matcher is
+   emitted per mode and the public ``longest_match`` dispatches on
+   the active mode id. See :ref:`compiled-lexer-dfa` below for the
+   shape and rationale.
 6. **SYNC intern pool.** Every entry from
    ``state_table.sync_sets`` becomes a named constant (``SYNC_N``).
    States refer to them by index, so rules whose FOLLOW sets
    intern to the same set share a single table entry.
 7. **FIRST intern pool — filtered.** Only the entries whose
    ``has_references`` flag is set get emitted as ``FIRST_N``
-   constants. For LL(1) grammars that's empty: ``Op::Star`` /
-   ``Op::Opt`` codegen at ``k = 1`` inlines the FIRST set into a
+   constants. For LL(1) grammars that's empty: ``Tail::Star`` /
+   ``Tail::Opt`` codegen at ``k = 1`` inlines the FIRST set into a
    ``match`` arm pattern instead of consulting the pool, and
-   ``Op::Dispatch`` builds its decision tree at lowering time.
+   ``Tail::Dispatch`` builds its decision tree at lowering time.
    For LL(k > 1) only the entries actually referenced by
    ``matches_first(FIRST_N)`` calls are emitted.
 8. **Entry-state constants.** One ``ENTRY_<RULE>`` per public rule.
 9. **State-dispatch function.** A single function — in most backends
-   a large ``switch`` on the current state id — that runs one state
-   of the parser and either consumes an event or transfers control.
-10. **parse_<rule> entry points.** One convenience constructor per
+   a large ``switch`` on the current state id — that runs *one*
+   state body of the parser and either yields the event that body
+   produced or signals "pure transition step" (the runtime's pull
+   loop calls back in for the next body in that case). This is the
+   ``step`` callback the runtime calls; see *The state-dispatch
+   function* below.
+10. **Per-token mode-action callback** (``apply_actions`` /
+    ``ApplyActions`` / etc.). A ``match`` over kinds firing the
+    declared ``-> push(name)`` / ``-> pop`` actions on the lexer's
+    mode stack in source order. Tokens with no actions fall through
+    with no effect; grammars that declare no modes get an empty
+    body that monomorphization can erase.
+11. **parse_<rule> entry points.** One convenience constructor per
     public rule, wrapping the runtime's ``Parser::new`` with the
     correct entry-state constant and a configured lexer.
-11. **A small amount of backend-specific plumbing.** Package
+12. **A small amount of backend-specific plumbing.** Package
     declarations, import blocks, module wrappers, and whatever else
     the target language needs. Each backend keeps this to the
     minimum.
@@ -107,68 +122,83 @@ target language's idioms:
 The state-dispatch function: how ops become code
 ------------------------------------------------
 
-The core translation every backend performs is from ``Op`` values to
-statements in the target language. The mapping is direct:
+The core translation every backend performs is from a state's
+``Body`` to statements in the target language. Each ``case`` arm
+emits the body's ``instrs`` list in order, then the ``tail``. The
+runtime's ``Cursor`` (or the generated equivalent — see
+*The Cursor handle* below) is the only handle the dispatch function
+talks to the runtime through.
+
+``Instr`` translation:
 
 ``Enter(kind)`` / ``Exit(kind)``
-  A call into the runtime: ``parser.enter(RuleKind::X)`` /
-  ``parser.exit(RuleKind::X)``. The runtime emits the structural
-  event and positions it at the current parse cursor.
+  ``return cursor.enter(RuleKind::X)`` / ``return cursor.exit(RuleKind::X)``.
+  These are emit ops — they end the dispatch arm, returning the
+  built event to the runtime.
 
 ``Expect { kind, token_name, sync }``
-  ``parser.expect(TokenKind::X, SYNC_N, "expected X")``. The runtime
-  handles the match/recover/retry protocol (see
-  :doc:`../event_model`).
+  ``return cursor.expect(TokenKind::X, &SYNC_N, "expected X")``. The
+  runtime handles the match / recover / retry protocol (see
+  :doc:`../event_model`); ``expect`` itself returns the produced
+  event (a ``Token`` on hit, or an ``Error`` plus armed recovery on
+  miss).
 
 ``PushRet(s)``
-  ``parser.push_ret(s)``.
+  ``cursor.push_ret(s)`` — does *not* end the arm; it's a side
+  effect followed by the next instr or the tail.
+
+``Tail`` translation:
 
 ``Jump(s)``
-  Set the current state to ``s`` and break out of the dispatch
-  iteration (or, in languages where it's simpler, fall through to
-  the next case by numeric adjacency).
+  ``cursor.set_state(s); return None`` — pure transition step. The
+  runtime's pull loop calls ``step`` again in the same iteration.
 
 ``Ret``
-  ``parser.state = parser.ret()``.
+  ``cursor.set_state(cursor.ret()); return None`` — pop the next
+  return address (or ``TERMINATED`` if the stack is empty) and
+  signal "pure transition step".
 
 ``Star { first, body, cont, head }`` / ``Opt { first, body, cont }``
-  A predicated branch. The lookahead test is the same in both ops;
-  the match-path push and the miss-path transfer differ slightly:
+  A predicated branch. The lookahead test is the same in both;
+  the match path differs:
 
-  * ``Star`` match path: ``parser.push_ret(head); cur = body``. The
+  * ``Star`` match: ``cursor.push_ret(head); <run body>``. The
     ``head`` push is what makes the body return back to the
     loop-condition state for the next iteration.
-  * ``Opt`` match path: depends on ``cont``.
+  * ``Opt`` match: depends on ``cont``.
 
   ``cont`` is ``Some(state)`` for the original push-and-jump shape
   or ``None`` after :ref:`tail-call elimination
-  <tail-call-elimination>` — the codegen pattern-matches:
+  <tail-call-elimination>`:
 
-  * ``Some(s)`` — ``Opt`` match emits ``parser.push_ret(s); cur =
-    body``; both ops' miss path emits ``cur = s``.
-  * ``None`` — ``Opt`` match emits ``cur = body`` (no push, the
+  * ``Some(s)`` — ``Opt`` match emits ``cursor.push_ret(s); <body>``;
+    both ops' miss path emits ``cursor.set_state(s)``.
+  * ``None`` — ``Opt`` match emits the body inline (no push, the
     body's trailing ``Ret`` returns to *our* caller); both ops'
-    miss path emits ``cur = parser.ret()``.
+    miss path emits ``cursor.set_state(cursor.ret())``.
+
+  Each sub-body is itself a ``Body`` — its instrs run inline, and
+  its tail is translated the same way as any other tail.
 
   The form of the lookahead test depends on ``state_table.k``:
 
   * ``k = 1`` — the FIRST set is inlined into a ``match`` arm
     pattern (one alternative per token kind it accepts). No
     ``FIRST_N`` constant is emitted or referenced.
-  * ``k > 1`` — emits ``parser.matches_first(FIRST_N)``, the
+  * ``k > 1`` — emits ``cursor.matches_first(FIRST_N)``, the
     only place the FIRST intern pool is consulted at runtime.
 
 ``Dispatch { tree, sync, cont }``
   A nested ``switch``. Each ``DispatchTree::Switch`` becomes one
-  level of ``switch (parser.look(depth).kind)``; each ``Leaf``
+  level of ``switch (cursor.look(depth).kind)``; each ``Leaf``
   becomes an action whose form depends on ``cont``:
 
-  * ``Some(s)`` — ``Arm`` leaves emit ``parser.push_ret(s); cur =
-    arm_body``; ``Fallthrough`` emits ``cur = s``; ``Error`` emits
-    ``cur = s; error+recover(sync)``.
-  * ``None`` — ``Arm`` leaves emit ``cur = arm_body`` (no push);
-    ``Fallthrough`` emits ``cur = parser.ret()``; ``Error`` runs
-    the recovery and then emits ``cur = parser.ret()``.
+  * ``Some(s)`` — ``Arm`` leaves emit ``cursor.push_ret(s); <arm body>``;
+    ``Fallthrough`` emits ``cursor.set_state(s)``; ``Error`` emits
+    ``cur = s; recover_to(sync)`` plus a returned error event.
+  * ``None`` — ``Arm`` leaves emit the arm body inline (no push);
+    ``Fallthrough`` emits ``cur = ret()``; ``Error`` arms recovery
+    and then emits ``cur = ret()``.
 
   The trie structure is what lets a k-token lookahead compile to k
   nested switches rather than a linear scan. ``Dispatch`` consumes
@@ -177,8 +207,30 @@ statements in the target language. The mapping is direct:
   ``FIRST_N`` reference appears at runtime.
 
 Because the ops are already linear and the state ids are dense
-integers, most backends can emit the whole parser as a single
-``switch`` in a single function.
+integers (``optimize`` compacts them to a ``1..N`` range), most
+backends emit the whole parser as a single ``switch`` in a single
+function.
+
+The Cursor handle
+-----------------
+
+Every runtime exposes a ``Cursor`` (or equivalent — ``*Cursor`` in
+Go, a thin wrapper around ``Parser`` in TS/C#/Java) that's the only
+handle generated dispatch talks to the runtime through. It re-exports
+just the operations dispatch needs — lookahead access, return-stack
+push / pop, event builders (``enter`` / ``exit`` / ``consume``),
+``expect``, and recovery arming. External code can't construct one
+(the constructor is internal to the pull loop), so the parser's
+internal state stays sealed: the only way to drive a parse is through
+the iterator's ``next`` / ``Next``.
+
+This is uniform across backends: Rust's ``parsuna_rt::Cursor``,
+Go's ``*Cursor`` (a ``type Cursor Parser`` alias for a free cast),
+the Java ``Cursor`` class, the C# ``Cursor`` class, the TS Cursor
+binding, and the C ``Parser *`` (which doubles as cursor and parser
+since the C runtime is single-TU). The visible parser type — the
+thing you iterate — has no dispatch hooks on it, only the
+``next_event`` / ``Next`` / ``next()`` iterator method.
 
 .. _compiled-lexer-dfa:
 
@@ -186,12 +238,18 @@ The compiled lexer DFA
 ----------------------
 
 The lexer DFA is **compiled to code**, not to data. Each backend
-walks ``state_table.lexer_dfa.states`` and emits a ``longest_match``
-function shaped like:
+walks ``state_table.modes`` and emits a ``longest_match`` function
+shaped like:
 
 .. parsed-literal::
 
-    fn longest_match(buf, start) -> DfaMatch:
+    fn longest_match(buf, start, mode) -> DfaMatch:
+        match mode:
+            0 => longest_match_mode_0(buf, start)
+            1 => longest_match_mode_1(buf, start)
+            …
+
+    fn longest_match_mode_0(buf, start) -> DfaMatch:
         pos        = start
         best_len   = 0
         best_kind  = None
@@ -222,10 +280,15 @@ per byte target. Whenever a transition lands on an accept state,
 the surrounding code records ``(best_len, best_kind)`` so the
 classic longest-match rule falls out of the structure.
 
+For grammars without ``@mode(name)`` pre-annotations the outer
+``match mode`` collapses to a single arm (or is elided entirely);
+backends that can compile to a function pointer typically expose
+``longest_match_mode_0`` directly.
+
 Self-loop prologue
 ~~~~~~~~~~~~~~~~~~
 
-For states whose ``self_loop`` field (set by lowering) is non-empty
+For states whose ``self_loop_ranges`` (set by lowering) is non-empty
 — the typical lexer hot-path states like whitespace runs, identifier
 bodies, comment / string contents — backends emit a bulk scan
 prologue ahead of the regular per-byte switch. The prologue advances
@@ -273,9 +336,9 @@ type (TypeScript). C is single-translation-unit: the runtime header
 forward-declares ``static void longest_match_impl(...)`` and the
 generated ``.c`` file (which ``#include``\s the header) provides the
 definition, so every reference resolves within the same TU. The
-runtime calls ``longest_match(buf, pos)`` once per token; everything
-else about the lexer (input buffering, position tracking, EOF
-handling) stays generic in the runtime crate.
+runtime calls ``longest_match(buf, pos, mode)`` once per token;
+everything else about the lexer (input buffering, position tracking,
+EOF handling, mode-stack maintenance) stays generic in the runtime.
 
 The ``buf`` argument is a byte view in every backend except
 TypeScript, which receives a Latin-1-decoded string so the matcher
@@ -304,23 +367,34 @@ The public surface is the same everywhere. The per-backend variation
 is limited to:
 
 * **File layout.** Rust and C# emit a single file; Java emits one
-  file per public type plus a ``Grammar`` class with the DFA tables;
-  C emits a header plus implementation; Go emits a single package
-  file with helper types re-exported from the runtime.
+  file per public type plus a ``Grammar`` class with the DFA
+  tables; C emits a header plus implementation; Go emits a single
+  package file with helper types re-exported from the runtime.
 * **Build file.** Python wraps the generated Rust in a ``pyo3``
   extension module and emits a ``Cargo.toml`` plus ``pyproject.toml``
   so ``maturin`` can build it. The other backends assume an existing
   build system in the consumer project.
 * **Runtime dependency.** Rust, Python, Go, Java, C#, and TypeScript
-  import a pre-built runtime crate/package (``parsuna-rt``,
+  import a pre-built runtime crate / package (``parsuna-rt``,
   ``parsuna.dev/parsuna-rt-go``, etc.). C inlines the runtime into
   ``parsuna_rt.h`` so a generated parser is self-contained.
+* **Skip-token policy.** Most runtimes expose two configs —
+  emit-skips (default, surfacing ``WS`` / ``COMMENT`` as ``Token``
+  events) or drop-skips (the parser silently consumes them) — chosen
+  at parser construction. In Rust this is a compile-time
+  ``ParserConfig`` (zero-sized type parameter); in Go / Java /
+  C# / TypeScript it's a runtime ``Options`` struct passed to the
+  constructor. Either way, the structural event stream is unchanged.
 
 The TypeScript, Go, Java, and C# backends also differ in how they
 encode the ``Event`` tagged union — an idiomatic discriminated union
 in TypeScript, a struct with an ``EventTag`` field in Go, a sealed
 class hierarchy in Java, a ``record`` hierarchy in C# — but the
-semantics are the same in each case.
+semantics are the same in each case. Each runtime additionally
+distinguishes a ``Garbage`` event (a token consumed by error
+recovery) from a normal ``Token`` event so consumers can tell
+recovered-past tokens from real ones without tracking recovery
+state externally.
 
 The tree-sitter backend
 -----------------------

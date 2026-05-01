@@ -17,7 +17,7 @@ Every check pushes into a single ``Vec<Diagnostic>``. A
 ``Diagnostic`` carries a severity (``Error`` or ``Warning``), a
 message, and a source span. Errors stop the build; warnings are
 surfaced but the build still succeeds unless the caller passes
-``--warnings=errors``, which promotes every warning at print time.
+``--warnings=error``, which promotes every warning at print time.
 
 Parser-level errors (``parsuna_rt::Error`` values produced by the
 generated grammar parser) are converted into error-severity diagnostics
@@ -38,12 +38,11 @@ Checks, in order:
 
 * **Reserved token names.** ``EOF`` (case-insensitive) is rejected
   because it is the end-of-input sentinel (kind id ``0``) emitted by
-  the lexer. ``ERROR`` is no longer reserved — lex failures are
+  the lexer. ``ERROR`` is **not** reserved — lex failures are
   surfaced via the language-appropriate "no kind" value
   (``Token { kind: None }`` in Rust/TS/Python; ``Token.kind == 0xFFFF``
-  in C/Java/C#/Go) rather than a special token-kind variant.
-* **Duplicates.** Token names and rule names are checked for
-  duplicates independently.
+  in C/Java/C#/Go) rather than a special token-kind variant, so a
+  grammar can declare a token called ``ERROR`` if it likes.
 * **Undefined references.** Every ``Expr::Token(n)`` must name a
   declared token; every ``Expr::Rule(n)`` must name a declared rule;
   every ``TokenPattern::Ref(n)`` must name a declared token. Rules
@@ -61,6 +60,10 @@ Checks, in order:
 * **Non-empty public surface.** A grammar with no non-fragment rules
   produces an empty public API; it is rejected.
 
+Duplicate token / rule names are *not* checked here — the IR's
+name-keyed ``IndexMap`` would silently dedupe them. Duplicates are
+caught at parse time instead (see :doc:`parse`).
+
 If any error-severity diagnostics land in the bag here, analysis
 returns immediately without proceeding to lints or FIRST/FOLLOW —
 the later passes assume references resolve and there are no cycles,
@@ -71,9 +74,9 @@ Sub-pass 2b — Post-validation lints
 
 Files: ``src/analysis/lints.rs`` and ``src/analysis/shadow.rs``.
 
-Once validation has cleared, four additional checks look for
-grammars that *would* compile but shouldn't. Each picks its own
-severity.
+Once validation has cleared, three lint checks plus a literal-token
+shadow check look for grammars that *would* compile but shouldn't.
+Each picks its own severity.
 
 * **Empty-match tokens.** A token whose pattern can match the empty
   string (``T = 'a'?;``, ``T = 'x'*;``, ``T = "";``) would let the
@@ -94,10 +97,12 @@ severity.
 * **Literal-token shadowing.** A ``Literal``-pattern token (e.g.
   ``IF = "if";``) declared *after* a more general token whose
   pattern also accepts that literal (e.g. ``IDENT = ('a'..'z')+;``)
-  is unreachable: the lexer breaks ties by smallest token id (=
-  declaration order), so the earlier token always wins. Detected by
-  running a small NFA-style pattern matcher over each candidate
-  shadower; reported as **error**.
+  is unreachable inside the same lexer mode: the lexer breaks ties
+  by smallest token id (= declaration order), so the earlier token
+  always wins. Detected by running a small NFA-style pattern matcher
+  over each candidate shadower; reported as **error**. Tokens in
+  different lexer modes can't shadow each other (each mode has its
+  own DFA), so the check is mode-aware.
 
 The lint pass and the shadow pass each push into the same diagnostic
 bag. After both have run, if any error-severity diagnostics are
@@ -171,7 +176,9 @@ The AnalyzedGrammar
 When analysis succeeds it produces:
 
 * ``grammar`` — the original ``Grammar``, verbatim. Downstream passes
-  reach through it for the raw token and rule definitions.
+  reach through it for the raw token and rule definitions (including
+  per-token mode metadata, which lowering needs to bin tokens into
+  per-mode DFAs).
 * ``first: BTreeMap<String, FirstSet>`` — FIRST(k) per rule,
   deduplicated. Sequences are stored as ``Vec<String>`` of token
   names (not ids — those come later).
@@ -209,5 +216,5 @@ The grammar is ``Some`` iff no diagnostic in ``diagnostics`` has
 
 On success the grammar is handed to :doc:`lower`. Either way, the
 caller iterates ``diagnostics`` for printing — under
-``--warnings=errors`` warnings are re-rendered with the ``error``
+``--warnings=error`` warnings are re-rendered with the ``error``
 label and the build fails even if ``grammar`` was produced.

@@ -34,11 +34,17 @@ The parse produces a flat ``Grammar``:
 * ``name: String`` — a label used by later phases for file and
   package naming. The parser leaves this empty; the CLI fills it
   from the input file's stem (or from ``--name`` when given).
-* ``tokens: Vec<TokenDef>`` — every token declaration in source
-  order. Each ``TokenDef`` records the name, the body
-  (``TokenPattern``), the ``skip`` flag (``[skip]`` annotation), the
-  ``is_fragment`` flag (``_`` prefix), and a source span.
-* ``rules: Vec<RuleDef>`` — every rule declaration in source order.
+* ``tokens: IndexMap<String, TokenDef>`` — every token declaration,
+  keyed by name. ``IndexMap`` preserves insertion (= source) order
+  on iteration, which the lexer DFA relies on for tie-breaking and
+  the lowering pass relies on for ``RuleKind`` id assignment. Each
+  ``TokenDef`` records the name, the body (``TokenPattern``), the
+  ``skip`` flag (from a ``-> skip`` action), the ``is_fragment``
+  flag (``_``-prefix), the optional lexer ``mode`` (from an
+  ``@mode(name)`` pre-annotation), the resolved ``mode_actions``
+  list (from ``-> push(mode)`` / ``-> pop`` actions), and a source
+  span.
+* ``rules: IndexMap<String, RuleDef>`` — every rule declaration.
   Each ``RuleDef`` records the name, the body (``Expr``), the
   ``is_fragment`` flag, and a source span.
 
@@ -66,6 +72,29 @@ functions (``read_pattern_*`` vs. ``read_*``) so that:
   Identifiers in a token body are always ``TokenPattern::Ref(name)``
   and are resolved later.
 
+Actions and pre-annotations
+---------------------------
+
+A declaration may carry a trailing ``-> action[, action...]`` block
+and a leading ``@kind(arg)`` pre-annotation. Both are parsed here
+and lowered into ``TokenDef`` fields:
+
+* ``-> skip`` sets ``skip = true``. Rejected on rules and on
+  fragments (``_NAME``).
+* ``-> push(mode)`` / ``-> pop`` append a ``ModeAction::Push`` /
+  ``ModeAction::Pop`` to ``mode_actions``. Mode-stack actions are
+  kept in source order so combinations like ``-> pop, push(b)``
+  (swap top) and ``-> push(a), push(b)`` (push two) round-trip
+  cleanly. Combining ``skip`` with any mode action is rejected.
+* ``@mode(name)`` before a token declaration sets ``mode =
+  Some(name)``. Applies to the very next decl only — it is a
+  per-token attribute, not a scope, so ``@mode(tag)`` repeats once
+  per token bound to that mode. Rejected on rules.
+
+Unknown action names (anything other than ``skip`` / ``push`` /
+``pop``) and unknown pre-annotation kinds (anything other than
+``mode``) are recorded as errors and parsing continues.
+
 Error collection
 ----------------
 
@@ -78,7 +107,12 @@ IR, and the user sees every syntactic issue in a single run.
 The ``Reader`` abstraction handles the book-keeping. It holds the
 current lookahead event, exposes ``peek``/``advance``/``expect_*``
 helpers, and transparently drops ``WS`` and ``COMMENT`` tokens so
-callers never have to think about trivia.
+callers never have to think about trivia. Recovery ``Garbage``
+events from the bootstrap parser (the underlying runtime emits
+these when it skips past unexpected input — see :doc:`../event_model`)
+are silently swallowed by the ``Reader``: the per-token errors that
+accompany them already say what went wrong, so re-reporting them
+would just be noise.
 
 Post-conditions
 ---------------
@@ -89,7 +123,10 @@ but **semantically** unchecked. It may still contain:
 * References to undefined tokens or rules.
 * Left-recursive rules.
 * Token reference cycles.
-* Duplicate declarations.
 * Names that collide with reserved runtime identifiers (``EOF``).
+* Mode actions that refer to mode names no token actually declares.
 
-The next pass, :doc:`analyze`, is what catches those.
+Duplicate declarations are caught here, at parse time, because the
+IR's name-keyed ``IndexMap`` would silently dedupe them otherwise.
+Everything else listed above is left for the next pass,
+:doc:`analyze`, to catch.

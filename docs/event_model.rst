@@ -6,7 +6,7 @@ sequence of **events**, and a program that consumes events can
 reconstruct whatever tree (or no tree at all) it needs. This page
 specifies the event stream — the contract every backend implements.
 
-The four events
+The five events
 ---------------
 
 Every event is one of:
@@ -25,15 +25,27 @@ Every event is one of:
   position if nothing was consumed).
 
 ``Token``
-  A lexed token. Carries:
+  A lexed token consumed from the input. Carries:
 
   * ``kind`` — a ``TokenKind`` value identifying which token
-    declaration this matches, or a nullable/sentinel value when the
+    declaration this matches, or a nullable / sentinel value when the
     lexer failed to match at the current position; see below.
   * ``span`` — a ``Span`` covering the matched input.
   * ``text`` — the matched source text, exactly as it appeared.
     Un-escaping, numeric conversion, and other transforms are not
     performed by the parser.
+
+  ``Token`` events always carry legitimate parse data, including the
+  "synced-to-expected" token after a recovery (when an ``expect``
+  mismatched and the recovery's sync set landed on the kind it was
+  expecting).
+
+``Garbage``
+  A token consumed by error recovery — emitted between an ``Error``
+  and the recovery's sync point. Carries the same payload shape as
+  ``Token`` (kind, span, text), but is distinct so consumers can
+  drop these from their AST or render them as error spans without
+  tracking recovery state externally.
 
 ``Error``
   A recoverable diagnostic. Carries a human-readable message and a
@@ -41,12 +53,18 @@ Every event is one of:
   emitting events after an error, so a file with many errors still
   yields a useful stream.
 
-Every backend names these four cases the same way in its idiomatic
-tagged-union form — in TypeScript they are ``{tag: "enter" | "exit" |
-"token" | "error", ...}``; in Rust they are ``Event::Enter { .. }``
-and friends; in Python they are ``Event`` objects with a ``.tag``
-string attribute; in Go they are distinguished by an ``EventTag``
-constant.
+Every backend names these five cases the same way in its idiomatic
+tagged-union form — in TypeScript they are ``{tag: "enter" | "exit"
+| "token" | "garbage" | "error", ...}``; in Rust they are
+``Event::Enter { .. }`` / ``Event::Exit { .. }`` / ``Event::Token(..)``
+/ ``Event::Garbage(..)`` / ``Event::Error(..)``; in Python they are
+``Event`` objects with a ``.tag`` string attribute; in Go they are
+distinguished by an ``EventTag`` constant (``EvEnter``, ``EvExit``,
+``EvToken``, ``EvGarbage``, ``EvError``); in C# they are sealed
+records (``EnterEvent``, ``ExitEvent``, ``TokenEvent``,
+``GarbageEvent``, ``ErrorEvent``); in Java they are sealed
+sub-classes of ``Event``; in C they are ``EventTag`` constants
+(``EV_ENTER``, ``EV_EXIT``, ``EV_TOKEN``, ``EV_GARBAGE``, ``EV_ERROR``).
 
 Ordering guarantees
 -------------------
@@ -63,7 +81,7 @@ Ordering guarantees
 * **Termination.** The stream ends when the parser reaches the end of
   input. If there are trailing bytes after the start rule completes,
   the parser emits an "expected end of input" error and consumes the
-  remaining tokens before terminating.
+  remaining tokens (as ``Garbage``) before terminating.
 
 Building a tree from events
 ---------------------------
@@ -83,6 +101,10 @@ attach tokens as children of the top-of-stack node, and pop on
                 stack[-1].children.append(ev.token)
             case "exit":
                 stack.pop()
+            case "garbage":
+                # token consumed by recovery — typically dropped, or
+                # collected on the side as an error span
+                continue
             case "error":
                 errors.append(ev.error)
 
@@ -94,14 +116,20 @@ the right node type, and switch on ``ev.token.kind`` inside
 Skip tokens
 -----------
 
-Tokens declared with the ``[skip]`` annotation (whitespace, comments)
+Tokens declared with the ``-> skip`` action (whitespace, comments)
 are **skips**. The parser's state machine does not see them — they are
 never consumed by ``Expect`` or examined by lookahead. The runtime
 re-inserts them into the event stream just before the next structural
 event, so consumers that want trivia (formatters, highlighters) see
-skips in their correct source position, while consumers that only
-care about structure can filter them out by kind or by the fact that
-they appear outside any rule scope.
+skips in their correct source position by default.
+
+Consumers that don't want skips can opt into drop-skips mode at
+parser construction (a compile-time ``ParserConfig`` in Rust, a
+runtime ``Options`` flag in the other backends — see :doc:`usage`).
+With drop-skips on, the lexer still matches skip tokens (they
+delimit structural ones), but the parser silently consumes them
+instead of yielding them as ``Token`` events. The structural event
+stream is unchanged either way.
 
 The ``Pos`` and ``Span`` types
 ------------------------------
@@ -145,19 +173,29 @@ was expected.
 Error recovery, observably
 --------------------------
 
-Two things happen on an unexpected token:
+When the parser commits to a rule that wants a particular kind and
+the lookahead doesn't match, three things happen, observable as
+events:
 
 1. An ``Error`` event is emitted with a message like ``"expected X"``
    and a span over the current lookahead.
-2. The parser runs recovery — it consumes tokens until the lookahead
-   matches a token in the enclosing rule's synchronization set
-   (essentially that rule's ``FOLLOW`` plus ``EOF``), then retries
-   the expectation once. Tokens skipped during recovery are still
-   emitted as ``Token`` events so consumers do not silently lose
-   input.
+2. The parser switches into recovery mode — it consumes tokens until
+   the lookahead matches a token in the enclosing rule's
+   synchronization set (essentially that rule's ``FOLLOW`` plus
+   ``EOF``). Each token consumed during recovery comes through as a
+   ``Garbage`` event, one per call to the iterator, so consumers
+   stay in lock-step with input even on long error runs.
+3. Once the lookahead lands on a sync token, recovery finalises. If
+   the synced token happens to be the kind the rule was expecting,
+   it comes through as a normal ``Token`` event (because it *is*
+   legitimate parse data). Otherwise recovery just clears the armed
+   state and the rule's surrounding flow resumes — the sync token
+   is not consumed; the next iteration sees it via the regular
+   structural events.
 
 This means a parse of a broken file produces a stream where every
-input byte is accounted for: some as well-formed tokens, some as
-errors plus the tokens recovery skipped over. An editor or linter
-consuming the stream can highlight error spans without losing track
-of the surrounding structure.
+input byte is accounted for: some as well-formed ``Token`` events,
+some as ``Garbage`` followed by ``Token`` once recovery synced, and
+each error position carries its own ``Error`` event. An editor or
+linter consuming the stream can highlight error spans without losing
+track of the surrounding structure.
