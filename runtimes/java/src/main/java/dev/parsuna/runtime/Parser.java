@@ -63,9 +63,11 @@ public final class Parser implements Iterator<Event> {
 
     // -----------------------------------------------------------------
     // Token pool — k+1 mutable Tokens. The pump rotates round-robin
-    // through them, so at any point at most k are held by the lookahead
-    // and one by the just-yielded event; the slot the round-robin
-    // counter is about to write next is always free.
+    // through them, so at any point at most k+1 are live: k held by the
+    // lookahead, plus either the just-yielded event's token *or* a
+    // {@link #pendingLexGarbage} token (the two are mutually exclusive
+    // in time — see the lex-failure absorb in {@link #next}). The slot
+    // the round-robin counter is about to write next is always free.
     // -----------------------------------------------------------------
     private final Token[] pool;
     private int nextLexSlot = 0;
@@ -89,6 +91,17 @@ public final class Parser implements Iterator<Event> {
     int retTop = -1;
 
     Recovery recovery;
+
+    /**
+     * Holds the lex-failure token (kind = {@link Lexer#ERROR_KIND}) whose
+     * paired {@link Event.Error} the previous {@link #next()} call returned;
+     * this call owes the matching {@link Event.Garbage}. Lex-failure
+     * tokens never enter {@link #lookBuf}, so dispatch can read
+     * {@code look(i).kind()} as a real grammar token id without a
+     * {@code ERROR_KIND} guard, and a stray bad byte doesn't push the
+     * parser out of an active Star into SYNC recovery.
+     */
+    private Token pendingLexGarbage;
 
     // -----------------------------------------------------------------
     // Pooled event instances — one per variant. Cursor / pull-loop
@@ -195,11 +208,34 @@ public final class Parser implements Iterator<Event> {
             return e;
         }
         while (true) {
+            // Pump-time-deferred Garbage half of a lex-failure pair: the
+            // previous call returned the paired Error event; this call
+            // returns the Garbage carrying the bad codepoint.
+            if (pendingLexGarbage != null) {
+                evtGarbage.token = pendingLexGarbage;
+                pendingLexGarbage = null;
+                return evtGarbage;
+            }
+
             if (pumpPending()) {
                 Token t = nextLexToken();
                 lex.nextToken(t);
                 int kind = t.kind();
                 cfg.applyActions.apply(kind, lex);
+                // Lex pattern miss — surface as a paired error+garbage so
+                // the bad codepoint never enters lookahead. Keeps
+                // dispatch's kind-based switch honest (it never has to
+                // match against ERROR_KIND) and stops a stray bad byte
+                // from pushing the parser out of an active Star into
+                // SYNC recovery.
+                if (kind == Lexer.ERROR_KIND) {
+                    pendingLexGarbage = t;
+                    Span s = t.span();
+                    evtError.error().set("unexpected character",
+                        s.start().offset(), s.start().line(), s.start().column(),
+                        s.end().offset(), s.end().line(), s.end().column());
+                    return evtError;
+                }
                 if (cfg.isSkip.test(kind)) {
                     if (!opts.dropSkips) {
                         evtToken.token = t;
@@ -210,6 +246,8 @@ public final class Parser implements Iterator<Event> {
                 lookBuf[lookFilled++] = t;
                 continue;
             }
+            // Lookahead is guaranteed to carry a real grammar kind —
+            // pump strips lex failures before they reach the buffer.
             if (recovery != null) {
                 int look0 = lookBuf[0].kind();
                 boolean synced = look0 == ParserConfig.EOF_KIND

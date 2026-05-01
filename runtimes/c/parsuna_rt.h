@@ -32,7 +32,9 @@ typedef struct { Pos start, end; } Span;
  *
  * `kind` is `uint16_t`. EOF = 0; grammar tokens get ids starting at 1; the
  * lexer emits `PARSUNA_LEX_ERROR` (0xFFFF) when it can't classify a
- * codepoint at the current position.
+ * codepoint at the current position. The parser runtime turns those
+ * into a paired EV_ERROR+EV_GARBAGE sequence at pump time and never
+ * lets them reach generated dispatch (see parser_next).
  *
  * `text` and `text_len` describe the matched bytes. In *reader* mode
  * (parser_init_from_read_fn) `text` is a fresh allocation owned by the
@@ -177,6 +179,16 @@ typedef struct Parser {
     int   *ret; size_t ret_len, ret_cap;
 
     Recovery recovery;
+
+    /* Holds the lex-failure token (kind = PARSUNA_LEX_ERROR) whose
+     * paired EV_ERROR the previous parser_next call returned; this
+     * call owes the matching EV_GARBAGE. Lex-failure tokens never
+     * enter `look_buf`, so dispatch reads `look_buf[i].kind` as a real
+     * grammar token id without a PARSUNA_LEX_ERROR guard, and a stray
+     * bad byte doesn't push the parser out of an active Star into
+     * SYNC recovery. */
+    Token pending_lex_garbage;
+    int   pending_lex_garbage_set;
 
     /* Lexer mode stack — top-of-stack is the active mode. Initialised
      * with the default mode (id 0) and never empty; `parser_pop_mode`
@@ -584,6 +596,17 @@ static inline void parser_init_from_string(Parser *p,
 static inline int parser_next(Parser *p, Event *out) {
     free_last(p);
     for (;;) {
+        /* Pump-time-deferred Garbage half of a lex-failure pair: the
+         * previous call returned the paired EV_ERROR; this call returns
+         * the EV_GARBAGE carrying the bad codepoint. */
+        if (p->pending_lex_garbage_set) {
+            Event e = {0};
+            e.tag = EV_GARBAGE;
+            e.token = p->pending_lex_garbage;
+            p->pending_lex_garbage_set = 0;
+            p->pending_lex_garbage = (Token){0};
+            return yield_event(p, e, out);
+        }
         if (pump_pending(p)) {
             Token t = lex_next(p);
             /* Apply per-token mode-stack actions before deciding skip vs.
@@ -593,6 +616,20 @@ static inline int parser_next(Parser *p, Event *out) {
              * simple and the default impl is empty for action-free
              * grammars. */
             apply_actions(t.kind, p);
+            /* Lex pattern miss — surface as a paired error+garbage so
+             * the bad codepoint never enters lookahead. Keeps dispatch
+             * honest (it never has to match against PARSUNA_LEX_ERROR)
+             * and stops a stray bad byte from pushing the parser out
+             * of an active Star into SYNC recovery. */
+            if (t.kind == PARSUNA_LEX_ERROR) {
+                p->pending_lex_garbage = t;
+                p->pending_lex_garbage_set = 1;
+                Event e = {0};
+                e.tag = EV_ERROR;
+                e.error.message = strdup("unexpected character");
+                e.error.span = t.span;
+                return yield_event(p, e, out);
+            }
             if (is_skip(t.kind)) {
                 if (!p->drop_skips) {
                     Event e = {0};
@@ -615,6 +652,8 @@ static inline int parser_next(Parser *p, Event *out) {
             }
             continue;
         }
+        /* Lookahead is guaranteed to carry a real grammar kind — pump
+         * strips lex failures before they reach the buffer. */
         if (p->recovery.active) {
             uint16_t k = p->look_buf[0].kind;
             int synced = (k == PARSUNA_TK_EOF) || set_contains(p->recovery.sync, k);
@@ -662,6 +701,10 @@ static inline void parser_destroy(Parser *p) {
         for (int i = 0; i < PARSUNA_K; i++) {
             if (p->look_filled[i]) free(p->look_buf[i].text);
         }
+        /* If the caller bailed out between the EV_ERROR and EV_GARBAGE
+         * halves of a lex-failure pair, the pending garbage token's
+         * text is still owned by the parser. */
+        if (p->pending_lex_garbage_set) free(p->pending_lex_garbage.text);
     }
     free_last(p);
 }

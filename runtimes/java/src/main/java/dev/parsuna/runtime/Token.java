@@ -14,7 +14,10 @@ import java.nio.charset.StandardCharsets;
  * <p>{@link #kind()} is an unsigned 16-bit kind id matching the
  * generated TokenKind enum's {@code id} field. EOF = 0; grammar tokens
  * have ids starting at 1; the lexer emits {@link Lexer#ERROR_KIND}
- * (0xFFFF) when no DFA pattern matched at the current position.
+ * (0xFFFF) when no DFA pattern matched at the current position. The
+ * parser runtime turns those into a paired {@link Event.Error}
+ * +{@link Event.Garbage} sequence at pump time and never lets them
+ * reach generated dispatch.
  *
  * <p>The decoded text and {@link Span} are built lazily — {@link #text()}
  * decodes UTF-8 on first access (and clears the cache on each set);

@@ -82,9 +82,11 @@ pub enum Event<'a, TK = u16, RK = u16> {
 
 /// A lexed token: kind, source span, and the matched text.
 ///
-/// `kind` is `None` only when the lexer could not match any pattern at the
-/// current position; the scanner still advances by one codepoint so parsing
-/// can recover. EOF is its own variant (`Some(TK::EOF)`).
+/// `kind` is `None` only on a lex pattern miss. The scanner advances by
+/// one codepoint and emits the byte(s) as a `kind: None` token; the
+/// parser runtime turns that into a paired
+/// [`Event::Error`]+[`Event::Garbage`] sequence at pump time and never
+/// lets it reach dispatch. EOF is its own variant (`Some(TK::EOF)`).
 ///
 /// `text` borrows from the input when possible ([`Scanner`](crate::lexer::Scanner)),
 /// and owns an independent string when that is not possible

@@ -28,9 +28,11 @@ export function pointSpan(p: Pos): Span {
 /**
  * A lexed token: kind, source span, and the matched text.
  *
- * `kind` is `null` only when the lexer could not match any pattern at the
- * current position; the scanner still advances by one codepoint so parsing
- * can recover. EOF is its own kind value.
+ * `kind` is `null` only on a lex pattern miss. The scanner advances by
+ * one codepoint and emits the byte(s) as a kind=null token; the parser
+ * runtime turns that into a paired `error`+`garbage` event sequence at
+ * pump time and never lets the token reach dispatch. EOF is its own
+ * kind value.
  */
 export interface Token<TK = number> {
   kind: TK | null;
@@ -107,9 +109,29 @@ export interface DfaMatch<TK> {
 export type MatcherFunc<TK> = (buf: string, start: number, mode: number) => DfaMatch<TK>;
 
 const _TEXT_DECODER = new TextDecoder();
-const _LATIN1_DECODER = new TextDecoder("latin1");
 function decodeBytes(buf: Uint8Array, start: number, end: number): string {
   return _TEXT_DECODER.decode(buf.subarray(start, end));
+}
+
+// Build a "byte-string" where each char's codepoint equals the original byte.
+// `TextDecoder("latin1")` is *not* what we want: per the WHATWG encoding spec,
+// every single-byte alias (`latin1`, `iso-8859-1`, …) decodes as windows-1252,
+// which remaps bytes 0x80–0x9F to assorted symbols (e.g. 0x98 → U+02DC). That
+// breaks generated DFAs whose UTF-8 continuation-byte checks look like
+// `b >= 0x80 && b <= 0xBF`. We do the byte→codepoint copy by hand instead.
+function bytesToByteString(bytes: Uint8Array): string {
+  // Chunked apply() avoids the call-arg limit on long inputs and stays well
+  // ahead of any per-char string concat in V8.
+  const CHUNK = 0x8000;
+  if (bytes.length <= CHUNK) {
+    return String.fromCharCode.apply(null, bytes as unknown as number[]);
+  }
+  let out = "";
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    const slice = bytes.subarray(i, Math.min(i + CHUNK, bytes.length));
+    out += String.fromCharCode.apply(null, slice as unknown as number[]);
+  }
+  return out;
 }
 
 /**
@@ -123,9 +145,10 @@ function decodeBytes(buf: Uint8Array, start: number, end: number): string {
  * - `bytes` (Uint8Array) — used to count lines/columns and to UTF-8-decode
  *   each token's text payload. The byte view is what the public Span
  *   offsets refer to.
- * - `buf` (Latin-1 string) — fed to the generated matcher so byte reads
+ * - `buf` (byte-string) — fed to the generated matcher so byte reads
  *   compile to `String.charCodeAt`, which V8 specialises hard for one-byte
- *   strings.
+ *   strings. Built by hand because `TextDecoder("latin1")` is actually
+ *   windows-1252 and remaps 0x80–0x9F.
  */
 export class Lexer<TK extends number> {
   private bytes: Uint8Array;
@@ -147,7 +170,7 @@ export class Lexer<TK extends number> {
     private readonly eofKind: TK,
   ) {
     this.bytes = new TextEncoder().encode(src);
-    this.buf = _LATIN1_DECODER.decode(this.bytes);
+    this.buf = bytesToByteString(this.bytes);
   }
 
   /**
@@ -355,6 +378,12 @@ export class Parser<
   private retStack: number[] = [];
   private recovery: Recovery<TK> | null = null;
   private readonly emitSkips: boolean;
+  // Holds the lex-failure token (kind=null) whose paired `error` event
+  // the previous `next()` call already returned; this call owes the
+  // matching `garbage` event. Lex-failure tokens never enter
+  // [`lookBuf`], so dispatch can read `look(i).kind` as a real `TK`
+  // without a null-guard.
+  private pendingLexGarbage: Token<TK> | null = null;
 
   constructor(
     private readonly lex: Lexer<TK>,
@@ -491,17 +520,38 @@ export class Parser<
    */
   next(): IteratorResult<Event<TK, RK>> {
     for (;;) {
-      // Skip mode: refill any empty lookahead slot. A skip token
-      // becomes the yielded event; a structural token fills the slot
-      // and the loop retries. Slots fill leftmost-first and `consume`
-      // parks new `null`s at the end, so checking slot `k-1` is the
-      // O(1) form of "any slot is null".
+      // Pump-time-deferred `garbage` half of a lex-failure pair: the
+      // previous call returned the paired `error` event; this call
+      // returns the `garbage` carrying the bad codepoint.
+      if (this.pendingLexGarbage !== null) {
+        const t = this.pendingLexGarbage;
+        this.pendingLexGarbage = null;
+        return { done: false, value: { tag: "garbage", token: t } };
+      }
+
+      // Pump mode: refill any empty lookahead slot. Slots fill
+      // leftmost-first and `consume` parks new `null`s at the end, so
+      // checking slot `k-1` is the O(1) form of "any slot is null".
+      // Three pump outcomes:
+      //   - skip token: yield it (when emitSkips) or loop;
+      //   - lex failure (kind=null): surface as a paired error+garbage,
+      //     don't enter the buffer — keeps `look(i).kind` always a
+      //     real `TK` for dispatch, and stops a stray bad byte from
+      //     pushing the parser out of an active Star into SYNC recovery;
+      //   - structural token: fill the slot and loop.
       if (this.lookBuf[this.cfg.k - 1] === null) {
         const t = this.lex.nextToken();
         if (this.cfg.applyActions !== undefined) {
           this.cfg.applyActions(t.kind, this.lex);
         }
-        if (t.kind !== null && this.cfg.isSkip(t.kind)) {
+        if (t.kind === null) {
+          this.pendingLexGarbage = t;
+          return {
+            done: false,
+            value: { tag: "error", error: { message: "unexpected character", span: t.span } },
+          };
+        }
+        if (this.cfg.isSkip(t.kind)) {
           if (this.emitSkips) {
             return { done: false, value: { tag: "token", token: t } };
           }
@@ -519,15 +569,17 @@ export class Parser<
       // Recovery mode: advance one step. Three outcomes — yield a
       // `garbage` event for an unexpected token, yield a normal
       // `token` event when the sync hit on the kind we were
-      // expecting, or finalise without consuming and loop.
+      // expecting, or finalise without consuming and loop. Lookahead
+      // is guaranteed to carry a real `TK` kind — pump strips lex
+      // failures before they reach the buffer.
       if (this.recovery !== null) {
         const rec = this.recovery;
-        const look0Kind = this.lookBuf[0]!.kind;
+        const look0Kind = this.lookBuf[0]!.kind as TK;
         if (look0Kind === this.cfg.eofKind) {
           this.recovery = null;
           continue;
         }
-        if (look0Kind !== null && rec.sync.indexOf(look0Kind) >= 0) {
+        if (rec.sync.indexOf(look0Kind) >= 0) {
           const wasExpected = rec.expected !== null && rec.expected === look0Kind;
           this.recovery = null;
           if (wasExpected) {

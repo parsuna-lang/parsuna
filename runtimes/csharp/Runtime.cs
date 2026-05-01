@@ -28,7 +28,9 @@ public readonly record struct Span(Pos Start, Pos End)
 /// <c>Kind</c> is a <c>ushort</c> matching the generated <c>TokenKind</c>
 /// enum's underlying value. EOF = 0; grammar tokens have ids starting at
 /// 1; the lexer emits <see cref="Lexer.ErrorKind"/> (0xFFFF) when no DFA
-/// pattern matched at the current position.
+/// pattern matched at the current position. The parser runtime turns
+/// those into a paired <see cref="ErrorEvent"/>+<see cref="GarbageEvent"/>
+/// sequence at pump time and never lets them reach generated dispatch.
 /// </remarks>
 public sealed record Token(ushort Kind, Span Span, string Text);
 
@@ -367,6 +369,14 @@ public sealed class Parser : IEnumerable<Event>, IEnumerator<Event>
     internal Recovery _recovery;
     internal bool _recoveryActive;
 
+    // Holds the lex-failure token (Kind = Lexer.ErrorKind) whose paired
+    // ErrorEvent the previous MoveNext() call returned; this call owes
+    // the matching GarbageEvent. Lex-failure tokens never enter _look,
+    // so dispatch can read Look(i).Kind as a real grammar token id
+    // without an ErrorKind guard, and a stray bad byte doesn't push the
+    // parser out of an active Star into SYNC recovery.
+    private Token? _pendingLexGarbage;
+
     internal readonly ParserConfig _cfg;
     internal readonly ParserOptions _opts;
 
@@ -428,10 +438,31 @@ public sealed class Parser : IEnumerable<Event>, IEnumerator<Event>
     {
         while (true)
         {
+            // Pump-time-deferred Garbage half of a lex-failure pair: the
+            // previous call returned the paired ErrorEvent; this call
+            // returns the GarbageEvent carrying the bad codepoint.
+            if (_pendingLexGarbage is not null)
+            {
+                _current = new GarbageEvent(_pendingLexGarbage);
+                _pendingLexGarbage = null;
+                return true;
+            }
             if (PumpPending())
             {
                 var t = _lex.NextToken();
                 _cfg.ApplyActions(t.Kind, _lex);
+                // Lex pattern miss — surface as a paired error+garbage
+                // so the bad codepoint never enters lookahead. Keeps
+                // dispatch's kind-based switch honest (it never has to
+                // match against ErrorKind) and stops a stray bad byte
+                // from pushing the parser out of an active Star into
+                // SYNC recovery.
+                if (t.Kind == Lexer.ErrorKind)
+                {
+                    _pendingLexGarbage = t;
+                    _current = new ErrorEvent(new ParseError("unexpected character", t.Span));
+                    return true;
+                }
                 if (_cfg.HasSkips && _cfg.IsSkip(t.Kind))
                 {
                     if (!_opts.DropSkips)
@@ -447,6 +478,8 @@ public sealed class Parser : IEnumerable<Event>, IEnumerator<Event>
                 }
                 continue;
             }
+            // Lookahead is guaranteed to carry a real grammar kind —
+            // pump strips lex failures before they reach the buffer.
             if (_recoveryActive)
             {
                 ushort look0 = _look[0]!.Kind;

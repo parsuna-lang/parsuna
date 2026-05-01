@@ -35,7 +35,9 @@ func PointSpan(p Pos) Span { return Span{Start: p, End: p} }
 // Kind is stored as uint16 to match the generated TokenKind enum's values.
 // EOF is always 0 (EofKind); grammar tokens have ids starting at 1; the
 // lexer emits ErrorKind (0xFFFF) when no DFA pattern matched at the
-// current position.
+// current position. The parser runtime turns those into a paired
+// EvError+EvGarbage sequence at pump time and never lets them reach
+// generated dispatch (see Parser.Next).
 type Token struct {
 	Kind uint16
 	Span Span
@@ -333,8 +335,16 @@ type Parser struct {
 	ret        []int
 	rec        recovery
 	recActive  bool
-	cfg        Config
-	opts       Options
+	// pendingLexGarbage holds the lex-failure token (Kind = ErrorKind)
+	// whose paired EvError the previous Next call returned; this call
+	// owes the matching EvGarbage. Lex-failure tokens never enter
+	// `look`, so dispatch reads `Look(i).Kind` as a real grammar token
+	// id without an ErrorKind guard, and a stray bad byte doesn't push
+	// the parser out of an active Star into SYNC recovery.
+	pendingLexGarbage    Token
+	pendingLexGarbageSet bool
+	cfg                  Config
+	opts                 Options
 }
 
 // NewParser builds a parser starting at state `entry`.
@@ -503,13 +513,33 @@ func (c *Cursor) ErrorHere(msg string) Event { return (*Parser)(c).errorHere(msg
 // most one event per iteration before the loop runs again.
 func (p *Parser) Next() (Event, bool) {
 	for {
-		// Skip mode: refill any empty lookahead slot. Slots fill
+		// Pump-time-deferred Garbage half of a lex-failure pair: the
+		// previous call returned the paired EvError; this call returns
+		// the EvGarbage carrying the bad codepoint.
+		if p.pendingLexGarbageSet {
+			t := p.pendingLexGarbage
+			p.pendingLexGarbage = Token{}
+			p.pendingLexGarbageSet = false
+			return Event{Tag: EvGarbage, Token: t}, true
+		}
+
+		// Pump mode: refill any empty lookahead slot. Slots fill
 		// leftmost-first and Consume parks new empties at K-1, so
 		// checking slot K-1 is the O(1) form of "any slot empty".
 		if !p.lookFilled[p.cfg.K-1] {
 			t := p.lex.NextToken()
 			if p.cfg.ApplyActions != nil {
 				p.cfg.ApplyActions(t.Kind, p.lex)
+			}
+			// Lex pattern miss — surface as a paired error+garbage so
+			// the bad codepoint never enters lookahead. Keeps dispatch
+			// honest (it never has to match against ErrorKind) and
+			// stops a stray bad byte from pushing the parser out of
+			// an active Star into SYNC recovery.
+			if t.Kind == ErrorKind {
+				p.pendingLexGarbage = t
+				p.pendingLexGarbageSet = true
+				return Event{Tag: EvError, Err: ParseError{Message: "unexpected character", Span: t.Span}}, true
 			}
 			if p.cfg.IsSkip(t.Kind) {
 				if !p.opts.DropSkips {
@@ -530,7 +560,9 @@ func (p *Parser) Next() (Event, bool) {
 		// Recovery mode: advance one step. Yield a Garbage event
 		// for an unexpected token, a Token event when the sync hit
 		// on the kind we were expecting, or finalise without
-		// consuming and loop.
+		// consuming and loop. Lookahead is guaranteed to carry a
+		// real grammar kind — pump strips lex failures before they
+		// reach the buffer.
 		if p.recActive {
 			k := p.look[0].Kind
 			synced := k == EofKind || containsKind(p.rec.sync, k)

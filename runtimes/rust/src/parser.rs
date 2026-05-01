@@ -149,12 +149,21 @@ pub struct Parser<
     /// Lookahead ring. `None` slots are awaiting refill — Skip mode pulls
     /// lex tokens one-at-a-time until every slot holds a structural token.
     /// Generated `step()` code only ever reads lookahead when every slot
-    /// is filled, so [`Cursor::look`] can unwrap unconditionally.
+    /// is filled, so [`Cursor::look`] can unwrap unconditionally. Lex
+    /// failures (`Token { kind: None, .. }`) are surfaced via the
+    /// pump-time absorb below and never enter the buffer, so once a slot
+    /// is filled its `kind` is always `Some(_)`.
     look: [Option<Token<'a, G::TokenKind>>; K],
     prev_end: Pos,
     state: u32,
     ret_stack: Vec<u32>,
     recovery: Option<Recovery<G::TokenKind>>,
+    /// Holds the lex-failure token whose paired [`Event::Error`] the
+    /// previous [`Iterator::next`] call returned; this call owes the
+    /// matching [`Event::Garbage`]. Lex-failure tokens never enter
+    /// `look`, so dispatch can read `look[i].kind.unwrap()` without
+    /// caring about the no-pattern-matched path.
+    pending_lex_garbage: Option<Token<'a, G::TokenKind>>,
     _config: PhantomData<C>,
 }
 
@@ -178,6 +187,7 @@ impl<'a, L: LexerBackend<'a, G::TokenKind>, const K: usize, G: Grammar<K>, C: Pa
             state: entry,
             ret_stack: Vec::with_capacity(64),
             recovery: None,
+            pending_lex_garbage: None,
             _config: PhantomData,
         }
     }
@@ -393,14 +403,25 @@ impl<'a, L: LexerBackend<'a, G::TokenKind>, const K: usize, G: Grammar<K>, C: Pa
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            // Skip mode: refill any empty lookahead slot. A skip token
-            // becomes the yielded event; a structural token fills the
-            // slot and the loop retries.
-            //
-            // Empty slots are always a contiguous suffix of `look` —
-            // `consume`'s `rotate_left(1)` parks the new `None` at
-            // index `K-1`, and pump always fills the leftmost empty
-            // slot. So slot `K-1` is `None` iff *any* slot is empty.
+            // Pump-time-deferred `Garbage` half of a lex-failure pair:
+            // the previous call returned the paired `Error` event;
+            // this call returns the `Garbage` carrying the bad
+            // codepoint.
+            if let Some(t) = self.pending_lex_garbage.take() {
+                return Some(Event::Garbage(t));
+            }
+
+            // Pump mode: refill any empty lookahead slot. Slots fill
+            // leftmost-first and `consume`'s `rotate_left(1)` parks
+            // the new `None` at index `K-1`, so slot `K-1` is `None`
+            // iff *any* slot is empty. Three pump outcomes:
+            //   - skip token: yield it (when `EMIT_SKIPS`) or loop;
+            //   - lex failure (`kind: None`): surface as a paired
+            //     error+garbage, don't enter the buffer — keeps
+            //     `look(i).kind` always a real `TK` for dispatch, and
+            //     stops a stray bad byte from pushing the parser out
+            //     of an active Star into SYNC recovery;
+            //   - structural token: fill the slot and loop.
             if self.look[K - 1].is_none() {
                 let t = self.lex.next_token();
                 // Apply token-level mode-stack actions before deciding
@@ -410,18 +431,21 @@ impl<'a, L: LexerBackend<'a, G::TokenKind>, const K: usize, G: Grammar<K>, C: Pa
                 // unconditionally keeps the call site simple; the default
                 // impl is empty for action-free grammars.
                 G::apply_actions(t.kind, &mut self.lex);
-                if G::HAS_SKIPS {
-                    if let Some(k) = t.kind {
-                        if G::is_skip(k) {
-                            // Compile-time gate: with `C = DropSkips`,
-                            // monomorphization removes the yield arm, so
-                            // the skip token is silently consumed.
-                            if C::EMIT_SKIPS {
-                                return Some(Event::Token(t));
-                            }
-                            continue;
-                        }
+                let Some(k) = t.kind else {
+                    let span = t.span;
+                    self.pending_lex_garbage = Some(t);
+                    return Some(Event::Error(
+                        Error::new("unexpected character").at(span),
+                    ));
+                };
+                if G::HAS_SKIPS && G::is_skip(k) {
+                    // Compile-time gate: with `C = DropSkips`,
+                    // monomorphization removes the yield arm, so
+                    // the skip token is silently consumed.
+                    if C::EMIT_SKIPS {
+                        return Some(Event::Token(t));
                     }
+                    continue;
                 }
                 let slot = self
                     .look
@@ -436,15 +460,18 @@ impl<'a, L: LexerBackend<'a, G::TokenKind>, const K: usize, G: Grammar<K>, C: Pa
             // yield a `Garbage` event for an unexpected token, yield
             // a normal `Token` event when the sync hit on the kind
             // we were expecting, or finalise without consuming and
-            // loop (sync hit on a non-expected kind / EOF).
+            // loop (sync hit on a non-expected kind / EOF). Lookahead
+            // is guaranteed to carry a real kind — pump strips lex
+            // failures before they reach the buffer.
             if let Some(rec) = self.recovery.as_ref() {
-                let look0_kind = self.look[0].as_ref().and_then(|t| t.kind);
-                let synced = matches!(
-                    look0_kind,
-                    Some(k) if k == G::TokenKind::EOF || rec.sync.contains(&k)
-                );
+                let look0_kind = self.look[0]
+                    .as_ref()
+                    .expect("look slot empty in recovery — invariant broken")
+                    .kind
+                    .expect("look kind None in recovery — pump should have absorbed it");
+                let synced = look0_kind == G::TokenKind::EOF || rec.sync.contains(&look0_kind);
                 if synced {
-                    let was_expected = rec.expected == look0_kind;
+                    let was_expected = rec.expected == Some(look0_kind);
                     self.recovery = None;
                     if was_expected {
                         return Some(self.consume());
