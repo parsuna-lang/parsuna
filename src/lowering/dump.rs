@@ -13,6 +13,7 @@
 
 use std::fmt::Write;
 
+use crate::lowering::recovery::{Insertion, PostFirst};
 use crate::lowering::{
     Body, DispatchLeaf, DispatchTree, Instr, ModeActionInfo, StateTable, Tail,
 };
@@ -262,6 +263,55 @@ fn emit_first_pool(b: &mut SpanBuilder, st: &StateTable, id: u32) {
     b.punct("}");
 }
 
+/// Render one `Tail::Dispatch` insertion candidate as
+/// `recover insert <name> if {kinds…} → <post_first>`. Emitted on its
+/// own indented line right after the `Dispatch sync=… cont=…` header,
+/// so a reader can see at a glance "if look[0] looks like one of
+/// these, the dispatch will treat the missing token as inserted
+/// instead of falling through to recover_to."
+fn emit_insertion(b: &mut SpanBuilder, st: &StateTable, ins: &Insertion, indent: &str) {
+    b.plain(indent);
+    b.kw("recover insert");
+    b.plain(" ");
+    b.token(&ins.token_name);
+    b.plain(" ");
+    b.kw("if");
+    b.plain(" ");
+    b.punct("{");
+    for (i, kind) in ins.kinds_to_match.iter().enumerate() {
+        if i > 0 {
+            b.punct(",");
+            b.plain(" ");
+        }
+        emit_token_kind(b, st, *kind);
+    }
+    b.punct("}");
+    b.plain(" ");
+    b.punct("→");
+    b.plain(" ");
+    match &ins.post_first {
+        PostFirst::Goto(n) => {
+            b.kw("goto");
+            b.plain(" ");
+            emit_state_ref(b, st, *n);
+        }
+        PostFirst::PushAndGoto { push, jump } => {
+            b.kw("push");
+            b.plain(" ");
+            emit_state_ref(b, st, *push);
+            b.punct(",");
+            b.plain(" ");
+            b.kw("goto");
+            b.plain(" ");
+            emit_state_ref(b, st, *jump);
+        }
+        PostFirst::Return => {
+            b.kw("return");
+        }
+    }
+    b.newline();
+}
+
 fn emit_sync_set(b: &mut SpanBuilder, st: &StateTable, id: u32) {
     let Some(set) = st.sync_sets.get(id as usize) else {
         b.num(format!("SYNC_{}", id));
@@ -459,7 +509,12 @@ fn emit_tail(b: &mut SpanBuilder, tail: &Tail, st: &StateTable, indent: &str) {
             let inner = format!("{}  ", indent);
             emit_body(b, body, st, &inner);
         }
-        Tail::Dispatch { tree, sync, cont, .. } => {
+        Tail::Dispatch {
+            tree,
+            sync,
+            cont,
+            insertions,
+        } => {
             b.plain(indent);
             b.kw("Dispatch");
             b.plain(" ");
@@ -477,6 +532,9 @@ fn emit_tail(b: &mut SpanBuilder, tail: &Tail, st: &StateTable, indent: &str) {
             }
             b.newline();
             let inner = format!("{}  ", indent);
+            for ins in insertions {
+                emit_insertion(b, st, ins, &inner);
+            }
             emit_dispatch_tree(b, tree, st, &inner);
         }
     }
