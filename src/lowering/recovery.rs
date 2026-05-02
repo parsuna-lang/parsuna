@@ -218,17 +218,20 @@ fn extract(
         _ => return None,
     };
 
-    let mut kinds: BTreeSet<u16> = match &post_first {
+    let kinds: BTreeSet<u16> = match &post_first {
         PostFirst::Jump(n) => state_firsts.get(n).cloned().unwrap_or_default(),
         PostFirst::PushRetAndJump { jump: n, .. } => {
             state_firsts.get(n).cloned().unwrap_or_default()
         }
         PostFirst::Ret => rule_follows.get(host_rule).cloned().unwrap_or_default(),
     };
-    // Drop EOF — recovering to "end of input" by inserting a missing
-    // token is just an extra error event the EOF gate would fire
-    // anyway.
-    kinds.remove(&0);
+    // EOF (kind 0) stays in `kinds`. Mid-rule EOF lookahead is
+    // exactly the case the user-facing "expected X" message helps
+    // most with — letting the dispatch pick the arm that exits the
+    // rule cleanly produces a precise error rather than the
+    // catch-all "unexpected token" the deletion fallback would
+    // emit. The runtime's EOF gate only fires after `TERMINATED`,
+    // so insertion-recovery here doesn't double-report.
 
     if kinds.is_empty() {
         return None;
