@@ -267,16 +267,20 @@ fn emit_first_pool(b: &mut SpanBuilder, st: &StateTable, id: u32) {
 }
 
 /// Render one `Tail::Dispatch` insertion candidate as
-/// `recover insert <name> if {kinds…} → <post_first>`. Emitted on its
+/// `recover <expected_msg> if {kinds…} -> <post_first>`. Emitted on its
 /// own indented line right after the `Dispatch sync=… cont=…` header,
 /// so a reader can see at a glance "if look[0] looks like one of
 /// these, the dispatch will treat the missing token as inserted
-/// instead of falling through to recover_to."
+/// instead of falling through to recover_to." The `expected_msg`
+/// already lists every arm whose insertion FIRST overlaps the kinds
+/// in this entry (a single dispatch arm if the lookahead is
+/// disambiguating, or multiple arms when the lookahead could route
+/// to any of them).
 fn emit_insertion(b: &mut SpanBuilder, st: &StateTable, ins: &Insertion, indent: &str) {
     b.plain(indent);
-    b.kw("recover insert");
+    b.kw("recover");
     b.plain(" ");
-    b.token(&ins.token_name);
+    b.plain(&ins.expected_msg());
     b.plain(" ");
     b.kw("if");
     b.plain(" ");

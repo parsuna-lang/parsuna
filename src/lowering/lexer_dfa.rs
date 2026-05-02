@@ -1117,6 +1117,7 @@ mod tests {
     fn tok(name: &str, pat: TokenPattern) -> TokenInfo {
         TokenInfo {
             name: name.into(),
+            display_name: name.into(),
             pattern: pat,
             skip: false,
             kind: 0,

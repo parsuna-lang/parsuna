@@ -706,8 +706,9 @@ fn emit_insertion(s: &mut String, st: &StateTable, ins: &Insertion, ind: &str) {
     }
     writeln!(
         s,
-        "{}event = Some(p.error_here(\"expected {}\"));",
-        inner, ins.token_name
+        "{}event = Some(p.error_here(\"{}\"));",
+        inner,
+        ins.expected_msg()
     )
     .unwrap();
     writeln!(s, "{}}} else ", ind).unwrap();

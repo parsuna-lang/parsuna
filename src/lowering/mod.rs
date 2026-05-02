@@ -167,6 +167,13 @@ pub struct ModeInfo {
 pub struct TokenInfo {
     /// Grammar-declared token name.
     pub name: String,
+    /// Human-readable form for user-facing messages. For tokens whose
+    /// resolved pattern is a single literal, this is the literal in
+    /// backticks (e.g. `` `>` `` for the GT token whose pattern is
+    /// `">"`); otherwise it falls back to the grammar-declared
+    /// `name`. Already debug-escaped (so `\\` and `\"` are pre-applied),
+    /// safe to embed in any backend's `"..."` string literal.
+    pub display_name: String,
     /// Token body with every `Ref` inlined, ready for the DFA builder.
     pub pattern: TokenPattern,
     /// True if the token has a `-> skip` action: matched but dropped from

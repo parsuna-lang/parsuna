@@ -688,8 +688,8 @@ fn emit_insertion(s: &mut String, st: &StateTable, ins: &Insertion, ind: &str) {
     }
     writeln!(
         s,
-        "{inner}event = p.ErrorHere(\"expected {}\"); emitted = true",
-        ins.token_name
+        "{inner}event = p.ErrorHere(\"{}\"); emitted = true",
+        ins.expected_msg()
     )
     .unwrap();
     writeln!(s, "{ind}}} else").unwrap();

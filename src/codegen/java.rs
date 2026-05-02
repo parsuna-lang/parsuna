@@ -904,8 +904,8 @@ fn emit_insertion(s: &mut String, ins: &Insertion, ind: &str) {
     }
     writeln!(
         s,
-        "{inner}event = p.errorHere(\"expected {}\");",
-        ins.token_name
+        "{inner}event = p.errorHere(\"{}\");",
+        ins.expected_msg()
     )
     .unwrap();
     writeln!(s, "{ind}}} else").unwrap();

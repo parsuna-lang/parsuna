@@ -1027,8 +1027,8 @@ fn emit_insertion(c: &mut String, st: &StateTable, upper: &str, ins: &Insertion,
     }
     writeln!(
         c,
-        "{inner}*out = ev_error_here(p, \"expected {}\"); emitted = 1;",
-        ins.token_name
+        "{inner}*out = ev_error_here(p, \"{}\"); emitted = 1;",
+        ins.expected_msg()
     )
     .unwrap();
     writeln!(c, "{ind}}} else").unwrap();

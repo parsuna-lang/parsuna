@@ -851,6 +851,14 @@ impl parsuna_rt::Grammar<K> for Grammar {
                         cur = 53;
                     }
                     _ => {
+                        if matches!(p.look(0).kind, Some(TokenKind::Lparen)) {
+                            cur = 49;
+                            event = Some(p.error_here("expected `(` | `.` | `!` | STRING | CHAR | IDENT"));
+                        } else 
+                        if matches!(p.look(0).kind, Some(TokenKind::Dot) | Some(TokenKind::Bang) | Some(TokenKind::String) | Some(TokenKind::Char) | Some(TokenKind::Ident)) {
+                            cur = 53;
+                            event = Some(p.error_here("expected `(` | `.` | `!` | STRING | CHAR | IDENT"));
+                        } else 
                         {
                             event = Some(p.error_here("unexpected token"));
                             p.recover_to(SYNC_8);
@@ -879,15 +887,7 @@ impl parsuna_rt::Grammar<K> for Grammar {
                             _ => {
                                 if matches!(p.look(0).kind, Some(TokenKind::Eof) | Some(TokenKind::Lparen) | Some(TokenKind::Rparen) | Some(TokenKind::Semi) | Some(TokenKind::Pipe) | Some(TokenKind::Dot) | Some(TokenKind::Bang) | Some(TokenKind::Arrow) | Some(TokenKind::String) | Some(TokenKind::Char) | Some(TokenKind::Label) | Some(TokenKind::Ident)) {
                                     cur = p.ret();
-                                    event = Some(p.error_here("expected `?`"));
-                                } else 
-                                if matches!(p.look(0).kind, Some(TokenKind::Eof) | Some(TokenKind::Lparen) | Some(TokenKind::Rparen) | Some(TokenKind::Semi) | Some(TokenKind::Pipe) | Some(TokenKind::Dot) | Some(TokenKind::Bang) | Some(TokenKind::Arrow) | Some(TokenKind::String) | Some(TokenKind::Char) | Some(TokenKind::Label) | Some(TokenKind::Ident)) {
-                                    cur = p.ret();
-                                    event = Some(p.error_here("expected `*`"));
-                                } else 
-                                if matches!(p.look(0).kind, Some(TokenKind::Eof) | Some(TokenKind::Lparen) | Some(TokenKind::Rparen) | Some(TokenKind::Semi) | Some(TokenKind::Pipe) | Some(TokenKind::Dot) | Some(TokenKind::Bang) | Some(TokenKind::Arrow) | Some(TokenKind::String) | Some(TokenKind::Char) | Some(TokenKind::Label) | Some(TokenKind::Ident)) {
-                                    cur = p.ret();
-                                    event = Some(p.error_here("expected `+`"));
+                                    event = Some(p.error_here("expected `?` | `*` | `+`"));
                                 } else 
                                 {
                                     event = Some(p.error_here("unexpected token"));
@@ -951,13 +951,19 @@ impl parsuna_rt::Grammar<K> for Grammar {
                         cur = p.ret();
                     }
                     _ => {
-                        if matches!(p.look(0).kind, Some(TokenKind::Eof) | Some(TokenKind::Lparen) | Some(TokenKind::Rparen) | Some(TokenKind::Semi) | Some(TokenKind::Pipe) | Some(TokenKind::Question) | Some(TokenKind::Star) | Some(TokenKind::Plus) | Some(TokenKind::Dot) | Some(TokenKind::Bang) | Some(TokenKind::Arrow) | Some(TokenKind::String) | Some(TokenKind::Char) | Some(TokenKind::Label) | Some(TokenKind::Ident)) {
-                            cur = 54;
-                            event = Some(p.error_here("expected STRING"));
+                        if matches!(p.look(0).kind, Some(TokenKind::Dot) | Some(TokenKind::Char)) {
+                            p.push_ret(54);
+                            cur = 56;
+                            event = Some(p.error_here("expected `.` | `!` | STRING | CHAR | IDENT"));
                         } else 
-                        if matches!(p.look(0).kind, Some(TokenKind::Eof) | Some(TokenKind::Lparen) | Some(TokenKind::Rparen) | Some(TokenKind::Semi) | Some(TokenKind::Pipe) | Some(TokenKind::Question) | Some(TokenKind::Star) | Some(TokenKind::Plus) | Some(TokenKind::Dot) | Some(TokenKind::Bang) | Some(TokenKind::Arrow) | Some(TokenKind::String) | Some(TokenKind::Char) | Some(TokenKind::Label) | Some(TokenKind::Ident)) {
+                        if matches!(p.look(0).kind, Some(TokenKind::Bang)) {
+                            p.push_ret(54);
+                            cur = 61;
+                            event = Some(p.error_here("expected `.` | `!` | STRING | CHAR | IDENT"));
+                        } else 
+                        if matches!(p.look(0).kind, Some(TokenKind::Eof) | Some(TokenKind::Lparen) | Some(TokenKind::Rparen) | Some(TokenKind::Semi) | Some(TokenKind::Pipe) | Some(TokenKind::Question) | Some(TokenKind::Star) | Some(TokenKind::Plus) | Some(TokenKind::Arrow) | Some(TokenKind::String) | Some(TokenKind::Label) | Some(TokenKind::Ident)) {
                             cur = 54;
-                            event = Some(p.error_here("expected IDENT"));
+                            event = Some(p.error_here("expected `.` | `!` | STRING | CHAR | IDENT"));
                         } else 
                         {
                             cur = 54;
@@ -990,12 +996,12 @@ impl parsuna_rt::Grammar<K> for Grammar {
                     _ => {
                         if matches!(p.look(0).kind, Some(TokenKind::Eof) | Some(TokenKind::Lparen) | Some(TokenKind::Rparen) | Some(TokenKind::Semi) | Some(TokenKind::Pipe) | Some(TokenKind::Question) | Some(TokenKind::Star) | Some(TokenKind::Plus) | Some(TokenKind::Dot) | Some(TokenKind::Bang) | Some(TokenKind::Arrow) | Some(TokenKind::String) | Some(TokenKind::Char) | Some(TokenKind::Label) | Some(TokenKind::Ident)) {
                             cur = 57;
-                            event = Some(p.error_here("expected `.`"));
+                            event = Some(p.error_here("expected `.` | CHAR"));
                         } else 
-                        if matches!(p.look(0).kind, Some(TokenKind::Eof) | Some(TokenKind::Lparen) | Some(TokenKind::Rparen) | Some(TokenKind::Semi) | Some(TokenKind::Pipe) | Some(TokenKind::Question) | Some(TokenKind::Star) | Some(TokenKind::Plus) | Some(TokenKind::Dotdot) | Some(TokenKind::Dot) | Some(TokenKind::Bang) | Some(TokenKind::Arrow) | Some(TokenKind::String) | Some(TokenKind::Char) | Some(TokenKind::Label) | Some(TokenKind::Ident)) {
+                        if matches!(p.look(0).kind, Some(TokenKind::Dotdot)) {
                             p.push_ret(57);
                             cur = 58;
-                            event = Some(p.error_here("expected CHAR"));
+                            event = Some(p.error_here("expected `.` | CHAR"));
                         } else 
                         {
                             cur = 57;
@@ -1056,9 +1062,13 @@ impl parsuna_rt::Grammar<K> for Grammar {
                                 cur = 56;
                             }
                             _ => {
-                                if matches!(p.look(0).kind, Some(TokenKind::Eof) | Some(TokenKind::Lparen) | Some(TokenKind::Rparen) | Some(TokenKind::Semi) | Some(TokenKind::Pipe) | Some(TokenKind::Question) | Some(TokenKind::Star) | Some(TokenKind::Plus) | Some(TokenKind::Dot) | Some(TokenKind::Bang) | Some(TokenKind::Arrow) | Some(TokenKind::String) | Some(TokenKind::Char) | Some(TokenKind::Label) | Some(TokenKind::Ident)) {
+                                if matches!(p.look(0).kind, Some(TokenKind::Dot) | Some(TokenKind::Char)) {
+                                    cur = 56;
+                                    event = Some(p.error_here("expected `.` | STRING | CHAR"));
+                                } else 
+                                if matches!(p.look(0).kind, Some(TokenKind::Eof) | Some(TokenKind::Lparen) | Some(TokenKind::Rparen) | Some(TokenKind::Semi) | Some(TokenKind::Pipe) | Some(TokenKind::Question) | Some(TokenKind::Star) | Some(TokenKind::Plus) | Some(TokenKind::Bang) | Some(TokenKind::Arrow) | Some(TokenKind::String) | Some(TokenKind::Label) | Some(TokenKind::Ident)) {
                                     cur = p.ret();
-                                    event = Some(p.error_here("expected STRING"));
+                                    event = Some(p.error_here("expected `.` | STRING | CHAR"));
                                 } else 
                                 {
                                     event = Some(p.error_here("unexpected token"));
@@ -1084,9 +1094,13 @@ impl parsuna_rt::Grammar<K> for Grammar {
                                 cur = 56;
                             }
                             _ => {
-                                if matches!(p.look(0).kind, Some(TokenKind::Eof) | Some(TokenKind::Lparen) | Some(TokenKind::Rparen) | Some(TokenKind::Semi) | Some(TokenKind::Pipe) | Some(TokenKind::Question) | Some(TokenKind::Star) | Some(TokenKind::Plus) | Some(TokenKind::Dot) | Some(TokenKind::Bang) | Some(TokenKind::Arrow) | Some(TokenKind::String) | Some(TokenKind::Char) | Some(TokenKind::Label) | Some(TokenKind::Ident)) {
+                                if matches!(p.look(0).kind, Some(TokenKind::Dot) | Some(TokenKind::Char)) {
+                                    cur = 56;
+                                    event = Some(p.error_here("expected `.` | STRING | CHAR"));
+                                } else 
+                                if matches!(p.look(0).kind, Some(TokenKind::Eof) | Some(TokenKind::Lparen) | Some(TokenKind::Rparen) | Some(TokenKind::Semi) | Some(TokenKind::Pipe) | Some(TokenKind::Question) | Some(TokenKind::Star) | Some(TokenKind::Plus) | Some(TokenKind::Bang) | Some(TokenKind::Arrow) | Some(TokenKind::String) | Some(TokenKind::Label) | Some(TokenKind::Ident)) {
                                     cur = p.ret();
-                                    event = Some(p.error_here("expected STRING"));
+                                    event = Some(p.error_here("expected `.` | STRING | CHAR"));
                                 } else 
                                 {
                                     event = Some(p.error_here("unexpected token"));
@@ -1112,9 +1126,13 @@ impl parsuna_rt::Grammar<K> for Grammar {
                                 cur = 56;
                             }
                             _ => {
-                                if matches!(p.look(0).kind, Some(TokenKind::Eof) | Some(TokenKind::Lparen) | Some(TokenKind::Rparen) | Some(TokenKind::Semi) | Some(TokenKind::Pipe) | Some(TokenKind::Question) | Some(TokenKind::Star) | Some(TokenKind::Plus) | Some(TokenKind::Dot) | Some(TokenKind::Bang) | Some(TokenKind::Arrow) | Some(TokenKind::String) | Some(TokenKind::Char) | Some(TokenKind::Label) | Some(TokenKind::Ident)) {
+                                if matches!(p.look(0).kind, Some(TokenKind::Dot) | Some(TokenKind::Char)) {
+                                    cur = 56;
+                                    event = Some(p.error_here("expected `.` | STRING | CHAR"));
+                                } else 
+                                if matches!(p.look(0).kind, Some(TokenKind::Eof) | Some(TokenKind::Lparen) | Some(TokenKind::Rparen) | Some(TokenKind::Semi) | Some(TokenKind::Pipe) | Some(TokenKind::Question) | Some(TokenKind::Star) | Some(TokenKind::Plus) | Some(TokenKind::Bang) | Some(TokenKind::Arrow) | Some(TokenKind::String) | Some(TokenKind::Label) | Some(TokenKind::Ident)) {
                                     cur = p.ret();
-                                    event = Some(p.error_here("expected STRING"));
+                                    event = Some(p.error_here("expected `.` | STRING | CHAR"));
                                 } else 
                                 {
                                     event = Some(p.error_here("unexpected token"));
@@ -1173,9 +1191,13 @@ impl parsuna_rt::Grammar<K> for Grammar {
                         cur = 56;
                     }
                     _ => {
-                        if matches!(p.look(0).kind, Some(TokenKind::Eof) | Some(TokenKind::Lparen) | Some(TokenKind::Rparen) | Some(TokenKind::Semi) | Some(TokenKind::Pipe) | Some(TokenKind::Question) | Some(TokenKind::Star) | Some(TokenKind::Plus) | Some(TokenKind::Dot) | Some(TokenKind::Bang) | Some(TokenKind::Arrow) | Some(TokenKind::String) | Some(TokenKind::Char) | Some(TokenKind::Label) | Some(TokenKind::Ident)) {
+                        if matches!(p.look(0).kind, Some(TokenKind::Dot) | Some(TokenKind::Char)) {
+                            cur = 56;
+                            event = Some(p.error_here("expected `.` | STRING | CHAR"));
+                        } else 
+                        if matches!(p.look(0).kind, Some(TokenKind::Eof) | Some(TokenKind::Lparen) | Some(TokenKind::Rparen) | Some(TokenKind::Semi) | Some(TokenKind::Pipe) | Some(TokenKind::Question) | Some(TokenKind::Star) | Some(TokenKind::Plus) | Some(TokenKind::Bang) | Some(TokenKind::Arrow) | Some(TokenKind::String) | Some(TokenKind::Label) | Some(TokenKind::Ident)) {
                             cur = p.ret();
-                            event = Some(p.error_here("expected STRING"));
+                            event = Some(p.error_here("expected `.` | STRING | CHAR"));
                         } else 
                         {
                             event = Some(p.error_here("unexpected token"));

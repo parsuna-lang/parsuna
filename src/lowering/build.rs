@@ -227,6 +227,7 @@ pub fn build(ag: &AnalyzedGrammar) -> Program {
         .enumerate()
         .map(|(i, t)| TokenInfo {
             name: t.name.clone(),
+            display_name: token_display_name(ag, &t.name),
             pattern: resolve_pattern(&t.pattern, g),
             skip: t.skip,
             kind: (i + 1) as u16,

@@ -753,8 +753,8 @@ fn emit_insertion(s: &mut String, ins: &Insertion, ind: &str) {
     }
     writeln!(
         s,
-        "{inner}@event = p.ErrorHere(\"expected {}\");",
-        ins.token_name
+        "{inner}@event = p.ErrorHere(\"{}\");",
+        ins.expected_msg()
     )
     .unwrap();
     writeln!(s, "{ind}}} else").unwrap();
