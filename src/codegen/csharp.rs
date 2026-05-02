@@ -742,17 +742,14 @@ fn emit_insertion(s: &mut String, ins: &Insertion, ind: &str) {
     writeln!(s, "{ind}if ({cond}) {{").unwrap();
     let inner = format!("{ind}  ");
     match &ins.post_first {
-        PostFirst::Jump(n) => {
+        PostFirst::Goto(n) => {
             writeln!(s, "{inner}cur = {n};").unwrap();
         }
-        PostFirst::PushAndJump { push, jump } => {
+        PostFirst::PushAndGoto { push, jump } => {
             writeln!(s, "{inner}p.PushRet({push});").unwrap();
             writeln!(s, "{inner}cur = {jump};").unwrap();
         }
-        PostFirst::Cont(n) => {
-            writeln!(s, "{inner}cur = {n};").unwrap();
-        }
-        PostFirst::TailReturn => {
+        PostFirst::Return => {
             writeln!(s, "{inner}cur = p.PopRet();").unwrap();
         }
     }

@@ -418,11 +418,24 @@ impl<
 
     /// Try to consume a token of `kind`, returning the resulting event.
     /// On a hit this is a `consume` and yields a `Token` event. On a
-    /// miss it produces an error event and arms recovery — `step` will
-    /// return that error to the runtime, and subsequent pull-loop calls
-    /// skip garbage one token at a time until the lookahead lands on
-    /// `sync` (when it does, the matching token is also consumed so the
-    /// surrounding rule continues as if `expect` had matched).
+    /// miss the parser picks one of two recovery strategies based on
+    /// the lookahead:
+    ///
+    /// * **Insertion** — if `look[0]` is already in `sync` (i.e. a
+    ///   structurally valid continuation past this expect), the error
+    ///   is yielded but recovery is *not* armed. Drive resumes at the
+    ///   post-expect state with the lookahead untouched, as if the
+    ///   missing token had been silently inserted. This is the
+    ///   single-arm sibling of [`Tail::Dispatch`]'s insertion
+    ///   recovery — both paths share the rule "if `look[0]` looks
+    ///   like a valid continuation, treat the missing token as
+    ///   inserted and keep going." See `src/lowering/recovery.rs`
+    ///   for the multi-arm version.
+    /// * **Deletion** — otherwise, recovery is armed and subsequent
+    ///   pull-loop calls skip garbage one token at a time until the
+    ///   lookahead lands on `sync`.
+    ///
+    /// [`Tail::Dispatch`]: ../../parsuna/lowering/enum.Tail.html#variant.Dispatch
     #[inline(always)]
     pub fn expect(
         &mut self,
@@ -448,7 +461,8 @@ impl<
         expected_msg: &'static str,
         label: Option<G::LabelKind>,
     ) -> Event<'a, G::TokenKind, G::RuleKind, G::LabelKind> {
-        if self.look(0).kind == Some(kind) {
+        let look0_kind = self.look(0).kind;
+        if look0_kind == Some(kind) {
             // Stamp the label directly on the slot's token before
             // `consume` rotates it out — saves a per-token branch in
             // the unlabeled case (label stays `None` from the
@@ -461,7 +475,21 @@ impl<
             return self.consume();
         }
         let event = self.error_here(expected_msg);
-        self.p.arm_recovery(sync, Some(kind));
+        // Insertion shortcut: if the lookahead is already a valid
+        // continuation past this expect (i.e. in the rule's SYNC),
+        // pretending the missing token was inserted leaves us with
+        // structurally-valid input. Skip arming recovery so we don't
+        // round-trip through the deletion loop just to clear it
+        // again; drive will resume at the post-expect state and the
+        // surrounding rule keeps making progress. Same model as
+        // `Tail::Dispatch`'s insertion arms — see
+        // `src/lowering/recovery.rs`.
+        let synced_already = look0_kind
+            .map(|k| sync.contains(&k))
+            .unwrap_or(false);
+        if !synced_already {
+            self.p.arm_recovery(sync, Some(kind));
+        }
         event
     }
 

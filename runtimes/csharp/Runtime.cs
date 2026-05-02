@@ -705,7 +705,8 @@ public sealed class Cursor
     /// unlabeled positions.</summary>
     public Event TryConsumeLabeled(ushort kind, ushort[] sync, string name, ushort label)
     {
-        if (_p._look[0]!.Kind == kind)
+        var look0 = _p._look[0]!.Kind;
+        if (look0 == kind)
         {
             // `Token` is an immutable record — use `with` to stamp the
             // label and write it back into the lookahead slot before
@@ -717,9 +718,18 @@ public sealed class Cursor
             return _p.Consume();
         }
         var ev = _p.ErrorHere($"expected {name}");
-        _p._recovery = new Parser.Recovery { Sync = sync, ExpectedPlusOne = kind + 1 };
-        _p._recoveryActive = true;
-        UnwindModes();
+        // Insertion shortcut: if the lookahead is already a valid
+        // continuation past this expect (in the rule's SYNC), drive
+        // will resume at the post-expect state with the missing token
+        // treated as inserted. Skip arming deletion recovery in that
+        // case — same mental model as Tail::Dispatch's insertion
+        // arms.
+        if (System.Array.IndexOf(sync, look0) < 0)
+        {
+            _p._recovery = new Parser.Recovery { Sync = sync, ExpectedPlusOne = kind + 1 };
+            _p._recoveryActive = true;
+            UnwindModes();
+        }
         return ev;
     }
 

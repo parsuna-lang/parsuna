@@ -9,10 +9,29 @@
 //! FIRST sets.
 //!
 //! Each [`Insertion`] knows the kinds to match, the message to emit,
-//! and a [`PostFirst`] disposition that maps directly to four
-//! `cur = …` recipes (Jump-tail / Ret-tail × non-tail dispatch / tail
-//! dispatch). Backends pick the branch and emit identical control
-//! flow.
+//! and a [`PostFirst`] disposition that maps directly to one of three
+//! `cur = …` recipes. Backends pick the branch and emit identical
+//! control flow.
+//!
+//! ## Unified recovery model
+//!
+//! Two failure sites can produce a missing-token error: `Cursor::expect`
+//! (one expected kind) and a `Tail::Dispatch` arm (one expected kind
+//! per arm). Both observe the same mental model:
+//!
+//! 1. **Insertion** — if `look[0]` is already a valid continuation past
+//!    the missing token, emit `Error("expected X")`, advance to the
+//!    post-first state, and *don't* arm recovery. The lookahead is
+//!    untouched and the surrounding rule keeps making progress.
+//! 2. **Deletion** — otherwise, emit the error, arm `recover_to(SYNC)`,
+//!    and let the runtime consume tokens as `Garbage` until `look[0]`
+//!    lands in the rule's FOLLOW.
+//!
+//! The two sites differ only in *which* "valid continuation" set they
+//! consult: `Expect` uses the rule's SYNC (= FOLLOW + EOF) as a
+//! cheap proxy because there's only one possible insertion; a
+//! `Dispatch` has to disambiguate among arms, so each arm carries its
+//! own per-arm "post-first FIRST" derived from the destination state.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -40,26 +59,36 @@ pub struct Insertion {
     pub post_first: PostFirst,
 }
 
-/// The four shapes a post-first-token continuation takes, encoded as
-/// data so backends can render them without re-deriving the body's
-/// shape.
+/// How a backend should advance `cur` after the synthetic error.
+///
+/// Three variants, each tied to a single `cur = …` recipe:
+///
+/// | variant       | render                     |
+/// |---------------|----------------------------|
+/// | `Goto(N)`     | `cur = N`                  |
+/// | `PushAndGoto` | `pushRet(push); cur = jump`|
+/// | `Return`      | `cur = popRet()`           |
+///
+/// They cover the four `(arm body tail, dispatch cont)` combinations,
+/// with `Goto` doubling for both the no-push case (`Jump`-tail / no
+/// cont) *and* the push-and-cancel case (`Ret`-tail / `Some(cont)`),
+/// since the wrapper's `pushRet(cont)` is popped by the body's `Ret`
+/// and the runtime sees a plain `cur = cont`.
+///
+/// | body tail | dispatch cont | variant                       |
+/// |-----------|---------------|-------------------------------|
+/// | `Jump(N)` | `None`        | `Goto(N)`                     |
+/// | `Jump(N)` | `Some(C)`     | `PushAndGoto { push: C, jump: N }` |
+/// | `Ret`     | `Some(C)`     | `Goto(C)`                     |
+/// | `Ret`     | `None`        | `Return`                      |
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PostFirst {
-    /// Body had `Tail::Jump(N)` and the dispatch is in tail position
-    /// (`cont: None`). Render as `cur = N;`.
-    Jump(StateId),
-    /// Body had `Tail::Jump(jump)` and the dispatch is non-tail
-    /// (`cont: Some(push)`). Render as `pushRet(push); cur = jump;`.
-    PushAndJump { push: StateId, jump: StateId },
-    /// Body had `Tail::Ret` and the dispatch is non-tail
-    /// (`cont: Some(c)`). The arm's wrapper-pushed `c` would be
-    /// popped by the body's `Ret`, so the two cancel: render as
-    /// `cur = c;`.
-    Cont(StateId),
-    /// Body had `Tail::Ret` and the dispatch is in tail position
-    /// (`cont: None`). Render as `cur = popRet();` (or the
-    /// backend-equivalent).
-    TailReturn,
+    /// `cur = state`. Direct transition with no stack effect.
+    Goto(StateId),
+    /// `pushRet(push); cur = jump`. Push a continuation, then jump.
+    PushAndGoto { push: StateId, jump: StateId },
+    /// `cur = popRet()`. Tail-return into the caller's stack top.
+    Return,
 }
 
 /// Stamp insertion candidates onto every `Tail::Dispatch` in `st`.
@@ -183,10 +212,13 @@ fn extract(
     })?;
 
     let post_first = match (&body.tail, cont) {
-        (Tail::Jump(n), Some(c)) => PostFirst::PushAndJump { push: c, jump: *n },
-        (Tail::Jump(n), None) => PostFirst::Jump(*n),
-        (Tail::Ret, Some(c)) => PostFirst::Cont(c),
-        (Tail::Ret, None) => PostFirst::TailReturn,
+        (Tail::Jump(n), Some(c)) => PostFirst::PushAndGoto { push: c, jump: *n },
+        (Tail::Jump(n), None) => PostFirst::Goto(*n),
+        // `pushRet(c); …; ret` cancels back to `cur = c`, so the
+        // structural Ret-tail-with-cont collapses into the same
+        // single-state goto as a Jump-tail.
+        (Tail::Ret, Some(c)) => PostFirst::Goto(c),
+        (Tail::Ret, None) => PostFirst::Return,
         // Star/Opt/Dispatch as arm tail: the runtime invariant
         // forbids these after an Expect, so an arm with this shape
         // has no Expect to insert.
@@ -194,11 +226,11 @@ fn extract(
     };
 
     let mut kinds: BTreeSet<u16> = match &post_first {
-        PostFirst::Jump(n) | PostFirst::PushAndJump { jump: n, .. } => {
+        PostFirst::Goto(n) => state_firsts.get(n).cloned().unwrap_or_default(),
+        PostFirst::PushAndGoto { jump: n, .. } => {
             state_firsts.get(n).cloned().unwrap_or_default()
         }
-        PostFirst::Cont(c) => state_firsts.get(c).cloned().unwrap_or_default(),
-        PostFirst::TailReturn => rule_follows.get(host_rule).cloned().unwrap_or_default(),
+        PostFirst::Return => rule_follows.get(host_rule).cloned().unwrap_or_default(),
     };
     // Drop EOF — recovering to "end of input" by inserting a missing
     // token is just an extra error event the EOF gate would fire

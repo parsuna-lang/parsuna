@@ -1051,17 +1051,14 @@ fn emit_insertion(c: &mut String, st: &StateTable, upper: &str, ins: &Insertion,
     writeln!(c, "{ind}if ({cond}) {{").unwrap();
     let inner = format!("{ind}  ");
     match &ins.post_first {
-        PostFirst::Jump(n) => {
+        PostFirst::Goto(n) => {
             writeln!(c, "{inner}cur = {n};").unwrap();
         }
-        PostFirst::PushAndJump { push, jump } => {
+        PostFirst::PushAndGoto { push, jump } => {
             writeln!(c, "{inner}push_ret(p, {push});").unwrap();
             writeln!(c, "{inner}cur = {jump};").unwrap();
         }
-        PostFirst::Cont(n) => {
-            writeln!(c, "{inner}cur = {n};").unwrap();
-        }
-        PostFirst::TailReturn => {
+        PostFirst::Return => {
             writeln!(c, "{inner}cur = pop_ret(p);").unwrap();
         }
     }

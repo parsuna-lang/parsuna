@@ -570,7 +570,8 @@ func (c *Cursor) TryConsume(kind uint16, sync []uint16, name string) Event {
 // Pass label = "" for unlabeled positions.
 func (c *Cursor) TryConsumeLabeled(kind uint16, sync []uint16, name string, label uint16) Event {
 	p := (*Parser)(c)
-	if c.look[0].Kind == kind {
+	look0 := c.look[0].Kind
+	if look0 == kind {
 		// Stamp the label directly on the slot's token before
 		// consume rotates it out — keeps the unlabeled hot path
 		// branch-free (the zero-value empty string from the
@@ -581,7 +582,21 @@ func (c *Cursor) TryConsumeLabeled(kind uint16, sync []uint16, name string, labe
 		return p.consume()
 	}
 	ev := p.errorHere("expected " + name)
-	p.armRecovery(sync, kind, true)
+	// Insertion shortcut: if the lookahead is already a valid
+	// continuation past this expect (in the rule's SYNC), drive
+	// will resume at the post-expect state with the missing token
+	// treated as inserted. Skip arming deletion recovery in that
+	// case — same mental model as Tail::Dispatch's insertion arms.
+	syncedAlready := false
+	for _, s := range sync {
+		if s == look0 {
+			syncedAlready = true
+			break
+		}
+	}
+	if !syncedAlready {
+		p.armRecovery(sync, kind, true)
+	}
 	return ev
 }
 

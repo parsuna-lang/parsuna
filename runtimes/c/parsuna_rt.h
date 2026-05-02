@@ -530,11 +530,18 @@ static inline Event try_consume_labeled(Parser *p, uint16_t kind, const uint16_t
     e.error.message = msg;
     e.error.span.start = p->look_buf[0].span.start;
     e.error.span.end = p->look_buf[0].span.end;
-    p->recovery.active = 1;
-    p->recovery.expected_set = 1;
-    p->recovery.expected_kind = kind;
-    p->recovery.sync = sync;
-    parser_unwind_modes_for_recovery(p);
+    /* Insertion shortcut: if the lookahead is already a valid
+     * continuation past this expect (in the rule's SYNC), drive will
+     * resume at the post-expect state with the missing token treated
+     * as inserted. Skip arming deletion recovery in that case — same
+     * mental model as Tail::Dispatch's insertion arms. */
+    if (!set_contains(sync, p->look_buf[0].kind)) {
+        p->recovery.active = 1;
+        p->recovery.expected_set = 1;
+        p->recovery.expected_kind = kind;
+        p->recovery.sync = sync;
+        parser_unwind_modes_for_recovery(p);
+    }
     return e;
 }
 

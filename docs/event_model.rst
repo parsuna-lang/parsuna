@@ -173,29 +173,40 @@ was expected.
 Error recovery, observably
 --------------------------
 
-When the parser commits to a rule that wants a particular kind and
-the lookahead doesn't match, the parser picks one of two strategies
-based on what the lookahead would let the parse continue with.
+Whenever the parser hits a missing-token site — a sequence ``Expect``
+that mismatches, or an alternative ``Dispatch`` whose lookahead
+matches no arm — it picks between two strategies by the same rule:
+*if* the current lookahead is already a valid continuation past the
+missing token, treat the missing token as inserted; *otherwise*,
+delete tokens until the lookahead lands on something that resyncs
+the surrounding rule.
 
-**Insertion recovery** — at an alternative dispatch (an ``Alt`` arm
-choice), if the lookahead doesn't match any arm's first token but
-*would* match somewhere inside one of the arms past its first
-token, the parser treats the missing first token as inserted and
-takes that arm:
+**Insertion recovery** — the parser treats the missing token as if
+it had been silently inserted:
 
 1. An ``Error`` event is emitted with a message like
-   ``"expected X"`` (where ``X`` is the inserted token) and a
-   zero-width span at the current lookahead.
-2. Drive resumes inside the arm, just past the synthetic first
-   token, with the lookahead untouched. The arm's body and
-   continuation parse normally from there.
+   ``"expected `>`"`` and a zero-width span at the current lookahead
+   (the message quotes the literal in backticks for simple tokens, or
+   uses the grammar-declared name like ``IDENT`` for pattern-class
+   tokens).
+2. Drive resumes just past the synthetic missing token, with the
+   lookahead untouched. The surrounding rule keeps making progress.
 
-This is the path taken for a missing structural delimiter (e.g.
-the ``>`` of an XML start-tag) where the next token is part of
-well-formed input that should not be consumed as garbage.
+For a single-arm site (``Expect``) the trigger is "lookahead is in
+the rule's SYNC set" (= ``FOLLOW`` + ``EOF``). For a multi-arm site
+(``Dispatch``) each arm carries its own per-arm continuation FIRST,
+and the parser commits to the first arm whose set contains the
+lookahead. Both paths route through the same model: missing-token
+errors leave the lookahead in place; only deletion produces
+``Garbage``.
 
-**Deletion recovery** — when no arm could fold the lookahead in,
-the parser falls back on synchronization:
+This is the path taken for a missing structural delimiter (e.g. the
+``>`` of an XML start-tag, the ``;`` ending a declaration) where the
+next token is part of well-formed input that should not be consumed
+as garbage.
+
+**Deletion recovery** — when the lookahead isn't a valid continuation
+anywhere, the parser falls back on synchronization:
 
 1. An ``Error`` event is emitted with a message like
    ``"expected X"`` or ``"unexpected token"`` and a span over the

@@ -591,7 +591,17 @@ export class Parser<
       return this.consume();
     }
     const event = this.errorHere(expectedMsg);
-    this.armRecovery(sync, kind);
+    // Insertion shortcut: if look[0] is already a valid continuation
+    // past this expect (in the rule's SYNC), drive can resume at the
+    // post-expect state with the missing token treated as inserted.
+    // Skip arming the deletion recovery loop in that case — same
+    // mental model as Tail::Dispatch's insertion arms (see
+    // src/lowering/recovery.rs).
+    const look0Kind = t0 !== null ? t0.kind : null;
+    const syncedAlready = look0Kind !== null && sync.includes(look0Kind);
+    if (!syncedAlready) {
+      this.armRecovery(sync, kind);
+    }
     return event;
   }
 

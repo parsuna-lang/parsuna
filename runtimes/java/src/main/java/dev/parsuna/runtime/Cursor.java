@@ -143,8 +143,21 @@ public final class Cursor {
         pp.evtError.error().set("expected " + name,
             s.start().offset(), s.start().line(), s.start().column(),
             s.end().offset(), s.end().line(), s.end().column());
-        pp.recovery = new Parser.Recovery(sync, kind);
-        unwindModes(pp);
+        // Insertion shortcut: if the lookahead is already a valid
+        // continuation past this expect (in the rule's SYNC), drive
+        // will resume at the post-expect state with the missing token
+        // treated as inserted. Skip arming deletion recovery in that
+        // case — same mental model as Tail::Dispatch's insertion
+        // arms.
+        int look0 = pp.lookBuf[0].kind();
+        boolean syncedAlready = false;
+        for (int k : sync) {
+            if (k == look0) { syncedAlready = true; break; }
+        }
+        if (!syncedAlready) {
+            pp.recovery = new Parser.Recovery(sync, kind);
+            unwindModes(pp);
+        }
         return pp.evtError;
     }
 

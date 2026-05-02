@@ -709,17 +709,14 @@ fn emit_insertion(s: &mut String, st: &StateTable, ins: &Insertion, ind: &str) {
     writeln!(s, "{}if matches!(p.look(0).kind, {}) {{", ind, pat).unwrap();
     let inner = format!("{}    ", ind);
     match &ins.post_first {
-        PostFirst::Jump(n) => {
+        PostFirst::Goto(n) => {
             writeln!(s, "{}cur = {};", inner, n).unwrap();
         }
-        PostFirst::PushAndJump { push, jump } => {
+        PostFirst::PushAndGoto { push, jump } => {
             writeln!(s, "{}p.push_ret({});", inner, push).unwrap();
             writeln!(s, "{}cur = {};", inner, jump).unwrap();
         }
-        PostFirst::Cont(c) => {
-            writeln!(s, "{}cur = {};", inner, c).unwrap();
-        }
-        PostFirst::TailReturn => {
+        PostFirst::Return => {
             writeln!(s, "{}cur = p.ret();", inner).unwrap();
         }
     }
