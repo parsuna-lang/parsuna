@@ -9,7 +9,7 @@
 //! `layout.rs` picks up from here to assign concrete state ids and resolve
 //! every `Target` into a `StateId`.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::analysis::{self, AnalyzedGrammar, EOF_MARKER};
 use crate::grammar::ir::*;
@@ -111,6 +111,11 @@ pub enum Op {
 /// and into the debug dumps.
 #[derive(Clone)]
 pub struct Block {
+    /// Grammar rule that owns this block. Sub-blocks (alt arms, loop
+    /// bodies) share their parent rule's name; layout writes it onto
+    /// the resulting [`crate::lowering::State::rule`] so per-state
+    /// FIRST analysis can resolve `Tail::Ret` to the rule's FOLLOW.
+    pub rule: String,
     /// Human-readable prefix that every op label in this block starts with.
     /// Preserves a rule-hierarchical trail in debug dumps, e.g. `expr:alt1`.
     pub label_prefix: String,
@@ -155,6 +160,11 @@ pub struct Program {
     /// Interned SYNC-set pool. Each entry is a flat `Vec<u16>` of token
     /// ids. Index by [`SyncSetId`].
     pub sync_sets: SyncSetPool,
+    /// Per-rule SYNC-set id (each rule's FOLLOW + EOF). Captured here so
+    /// downstream analyses that key off "what tokens follow rule X" can
+    /// look the rule up directly instead of trawling the rule's states
+    /// for an `Expect` to read the SYNC off of.
+    pub rule_sync: BTreeMap<String, SyncSetId>,
     /// Lexer mode names indexed by id. `mode_names[0]` is always
     /// `"default"`; further entries come from `@mode(name)` annotations
     /// in declaration order.
@@ -180,7 +190,17 @@ struct Builder<'a> {
     labels: Vec<String>,
     label_intern: HashMap<String, u16>,
     current_sync: SyncSetId,
+    /// Diagnostic label prefix for the block currently being emitted —
+    /// e.g. `expr:alt0` for an alt's sub-block, `expr` for the rule's
+    /// root block. Sub-blocks extend this; the original parent's value
+    /// is restored on the way out.
     current_symbol: String,
+    /// Grammar rule name the current block belongs to. Unlike
+    /// `current_symbol` this stays stable across `build_sub` recursion
+    /// because every sub-block of a rule still belongs to that rule —
+    /// it's the value layout copies onto each emitted state for FIRST
+    /// analysis to look up FOLLOW.
+    current_rule: String,
 }
 
 /// Lower every rule in `ag` to a [`Program`]. Walks the rules in grammar
@@ -247,17 +267,21 @@ pub fn build(ag: &AnalyzedGrammar) -> Program {
         label_intern: HashMap::new(),
         current_sync: 0,
         current_symbol: String::new(),
+        current_rule: String::new(),
     };
 
     let mut rule_entry: HashMap<String, BlockId> = HashMap::new();
     let mut rule_order: Vec<String> = Vec::with_capacity(g.rules.len());
+    let mut rule_sync: BTreeMap<String, SyncSetId> = BTreeMap::new();
     for rule in g.rules.values() {
         // Every rule gets its own SYNC set (its FOLLOW plus EOF). Interned
         // up-front and stashed in `current_sync` so every `Expect` emitted
         // inside this rule's body can refer to it without recomputing.
         let sync = compute_sync(ag, &rule.name);
         b.current_sync = b.intern_sync(sync);
+        rule_sync.insert(rule.name.clone(), b.current_sync);
         b.current_symbol = rule.name.clone();
+        b.current_rule = rule.name.clone();
         let bid = b.new_block(rule.name.clone());
         rule_entry.insert(rule.name.clone(), bid);
         rule_order.push(rule.name.clone());
@@ -306,6 +330,7 @@ pub fn build(ag: &AnalyzedGrammar) -> Program {
         labels,
         first_sets,
         sync_sets,
+        rule_sync,
         mode_names,
     }
 }
@@ -346,6 +371,7 @@ impl Builder<'_> {
     fn new_block(&mut self, label_prefix: String) -> BlockId {
         let id = BlockId(self.blocks.len() as u32);
         self.blocks.push(Block {
+            rule: self.current_rule.clone(),
             label_prefix,
             ops: Vec::new(),
             op_labels: Vec::new(),
@@ -465,7 +491,7 @@ impl Builder<'_> {
                     cur,
                     Op::Expect {
                         kind,
-                        token_name: name.clone(),
+                        token_name: token_display_name(self.ag, name),
                         sync: self.current_sync,
                         label: None,
                     },
@@ -608,7 +634,7 @@ impl Builder<'_> {
                         cur,
                         Op::Expect {
                             kind,
-                            token_name: tok_name.clone(),
+                            token_name: token_display_name(self.ag, tok_name),
                             sync: self.current_sync,
                             label: Some(label_id),
                         },
@@ -669,6 +695,41 @@ fn token_kind(ag: &AnalyzedGrammar, name: &str) -> u16 {
         .position(|t| t.name == name)
         .map(|i| (i + 1) as u16)
         .unwrap_or(0)
+}
+
+/// Human-readable display name for a token, used inside `"expected …"`
+/// error messages. For a simple-literal token the literal itself goes
+/// in (backtick-quoted so the rendering doesn't need per-language
+/// quote juggling — backticks aren't a string delimiter in C, Rust,
+/// TypeScript, Java, Go, or C#); anything more complex falls back to
+/// the grammar-declared identifier so the user at least sees the
+/// kind name. Tokens without a fragment-resolved pattern (e.g. a
+/// dangling `Ref` that survived analysis) also fall back to the
+/// identifier.
+///
+/// The literal is debug-escaped (`\\`, `\"`, control codes) so the
+/// resulting string is safe to embed verbatim inside a `"..."` string
+/// literal in any of the supported target languages — they all share
+/// the same backslash-escape vocabulary.
+fn token_display_name(ag: &AnalyzedGrammar, name: &str) -> String {
+    let Some(t) = ag.grammar.tokens.get(name) else {
+        return name.to_string();
+    };
+    let resolved = resolve_pattern(&t.pattern, &ag.grammar);
+    match &resolved {
+        TokenPattern::Literal(s) => {
+            // {:?} on &str gives `"..."` with `\\`, `\"`, `\n`, etc.
+            // already applied; strip the outer quotes and re-wrap in
+            // backticks for the user-visible form.
+            let escaped = format!("{:?}", s);
+            let inner = escaped
+                .strip_prefix('"')
+                .and_then(|s| s.strip_suffix('"'))
+                .unwrap_or(escaped.as_str());
+            format!("`{}`", inner)
+        }
+        _ => name.to_string(),
+    }
 }
 
 /// Inline every `TokenPattern::Ref` into the referenced token's body.

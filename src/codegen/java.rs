@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use crate::codegen::common::{pascal, screaming_snake};
 use crate::codegen::EmittedFile;
 use crate::lowering::lexer_dfa::{DfaState, START};
+use crate::lowering::recovery::{Insertion, PostFirst};
 use crate::lowering::{Body, DispatchLeaf, DispatchTree, Instr, StateTable, Tail};
 
 /// Per-backend arguments for the Java target.
@@ -788,8 +789,13 @@ fn emit_tail(s: &mut String, st: &StateTable, tail: &Tail, ind: &str) {
                 None => writeln!(s, "{}else cur = p.popRet();", ind).unwrap(),
             }
         }
-        Tail::Dispatch { tree, sync, cont } => {
-            emit_dispatch_tree(s, st, tree, *sync, *cont, ind);
+        Tail::Dispatch {
+            tree,
+            sync,
+            cont,
+            insertions,
+        } => {
+            emit_dispatch_tree(s, st, tree, *sync, *cont, insertions, ind);
         }
     }
 }
@@ -844,12 +850,13 @@ fn emit_dispatch_tree(
     tree: &DispatchTree,
     sync: u32,
     cont: Option<u32>,
+    insertions: &[Insertion],
     ind: &str,
 ) {
     match tree {
         DispatchTree::Leaf(leaf) => {
             writeln!(s, "{}{{", ind).unwrap();
-            emit_dispatch_leaf_block(s, st, leaf, sync, cont, &format!("{}  ", ind));
+            emit_dispatch_leaf_block(s, st, leaf, sync, cont, &[], &format!("{}  ", ind));
             writeln!(s, "{}}}", ind).unwrap();
         }
         DispatchTree::Switch {
@@ -857,22 +864,65 @@ fn emit_dispatch_tree(
             arms,
             default,
         } => {
+            let inner_inserts: &[Insertion] = if *depth == 0 { insertions } else { &[] };
+
             writeln!(s, "{}switch (p.look({})) {{", ind, depth).unwrap();
             let inner = format!("{}  ", ind);
             for (kind, sub) in arms {
                 let literal = format!("{}", *kind);
                 writeln!(s, "{}case {}: {{", inner, literal).unwrap();
-                emit_dispatch_tree(s, st, sub, sync, cont, &format!("{}  ", inner));
+                emit_dispatch_tree(s, st, sub, sync, cont, &[], &format!("{}  ", inner));
                 writeln!(s, "{}  break;", inner).unwrap();
                 writeln!(s, "{}}}", inner).unwrap();
             }
             writeln!(s, "{}default: {{", inner).unwrap();
-            emit_dispatch_leaf_block(s, st, default, sync, cont, &format!("{}  ", inner));
+            emit_dispatch_leaf_block(
+                s,
+                st,
+                default,
+                sync,
+                cont,
+                inner_inserts,
+                &format!("{}  ", inner),
+            );
             writeln!(s, "{}  break;", inner).unwrap();
             writeln!(s, "{}}}", inner).unwrap();
             writeln!(s, "{}}}", ind).unwrap();
         }
     }
+}
+
+fn emit_insertion(s: &mut String, ins: &Insertion, ind: &str) {
+    let cond = ins
+        .kinds_to_match
+        .iter()
+        .map(|k| format!("look0 == {}", k))
+        .collect::<Vec<_>>()
+        .join(" || ");
+    writeln!(s, "{ind}if ({cond}) {{").unwrap();
+    let inner = format!("{ind}  ");
+    match &ins.post_first {
+        PostFirst::Jump(n) => {
+            writeln!(s, "{inner}cur = {n};").unwrap();
+        }
+        PostFirst::PushAndJump { push, jump } => {
+            writeln!(s, "{inner}p.pushRet({push});").unwrap();
+            writeln!(s, "{inner}cur = {jump};").unwrap();
+        }
+        PostFirst::Cont(n) => {
+            writeln!(s, "{inner}cur = {n};").unwrap();
+        }
+        PostFirst::TailReturn => {
+            writeln!(s, "{inner}cur = p.popRet();").unwrap();
+        }
+    }
+    writeln!(
+        s,
+        "{inner}event = p.errorHere(\"expected {}\");",
+        ins.token_name
+    )
+    .unwrap();
+    writeln!(s, "{ind}}} else").unwrap();
 }
 
 fn emit_dispatch_leaf_block(
@@ -881,6 +931,7 @@ fn emit_dispatch_leaf_block(
     leaf: &DispatchLeaf,
     sync: u32,
     cont: Option<u32>,
+    insertions: &[Insertion],
     ind: &str,
 ) {
     match (leaf, cont) {
@@ -891,15 +942,28 @@ fn emit_dispatch_leaf_block(
         (DispatchLeaf::Arm(b), None) => emit_body(s, st, b, ind),
         (DispatchLeaf::Fallthrough, Some(n)) => writeln!(s, "{}cur = {};", ind, n).unwrap(),
         (DispatchLeaf::Fallthrough, None) => writeln!(s, "{}cur = p.popRet();", ind).unwrap(),
-        (DispatchLeaf::Error, Some(n)) => {
-            writeln!(s, "{}cur = {};", ind, n).unwrap();
-            writeln!(s, "{}event = p.errorHere(\"unexpected token\");", ind).unwrap();
-            writeln!(s, "{}p.recoverTo(SYNC_{});", ind, sync).unwrap();
-        }
-        (DispatchLeaf::Error, None) => {
-            writeln!(s, "{}event = p.errorHere(\"unexpected token\");", ind).unwrap();
-            writeln!(s, "{}p.recoverTo(SYNC_{});", ind, sync).unwrap();
-            writeln!(s, "{}cur = p.popRet();", ind).unwrap();
+        (DispatchLeaf::Error, _) => {
+            if !insertions.is_empty() {
+                writeln!(s, "{ind}int look0 = p.look(0);").unwrap();
+                for ins in insertions {
+                    emit_insertion(s, ins, ind);
+                }
+            }
+            writeln!(s, "{ind}{{").unwrap();
+            let inner = format!("{ind}  ");
+            match cont {
+                Some(n) => {
+                    writeln!(s, "{inner}cur = {n};").unwrap();
+                    writeln!(s, "{inner}event = p.errorHere(\"unexpected token\");").unwrap();
+                    writeln!(s, "{inner}p.recoverTo(SYNC_{sync});").unwrap();
+                }
+                None => {
+                    writeln!(s, "{inner}event = p.errorHere(\"unexpected token\");").unwrap();
+                    writeln!(s, "{inner}p.recoverTo(SYNC_{sync});").unwrap();
+                    writeln!(s, "{inner}cur = p.popRet();").unwrap();
+                }
+            }
+            writeln!(s, "{ind}}}").unwrap();
         }
     }
 }

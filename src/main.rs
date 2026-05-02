@@ -667,7 +667,7 @@ fn format_tail(tail: &parsuna::lowering::Tail, st: &StateTable) -> Vec<String> {
             append_body_ops(st, body, "  ", &mut lines);
             lines
         }
-        Tail::Dispatch { tree, sync, cont } => {
+        Tail::Dispatch { tree, sync, cont, .. } => {
             let mut lines = vec![format!(
                 "Dispatch sync={} {}",
                 format_sync_set(st, *sync),

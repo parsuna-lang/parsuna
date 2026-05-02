@@ -223,7 +223,15 @@ pub fn compute_follow(
     loop {
         let mut changed = false;
         for r in g.rules.values() {
-            walk_follow(&r.body, &r.name, nullable, first, &mut follow, &mut changed);
+            let host_follow = follow.get(&r.name).cloned().unwrap_or_default();
+            walk_follow(
+                &r.body,
+                &host_follow,
+                nullable,
+                first,
+                &mut follow,
+                &mut changed,
+            );
         }
         if !changed {
             break;
@@ -232,9 +240,16 @@ pub fn compute_follow(
     follow
 }
 
+/// `post_follow` is the set of single tokens that may immediately follow the
+/// position of `e` in its surrounding context (with the empty string standing
+/// in for "the position is nullable past `e`, so the host rule's FOLLOW
+/// applies"). Threading it through the recursion lets us account for FIRST
+/// of the seq tail past a Star/Plus/Opt — without it, rules buried inside a
+/// repetition only ever pick up the *host rule's* FOLLOW and miss any token
+/// that follows the repetition within the same Seq.
 fn walk_follow(
     e: &Expr,
-    host: &str,
+    post_follow: &FollowSet,
     nullable: &BTreeMap<String, bool>,
     first: &BTreeMap<String, FirstSet>,
     follow: &mut BTreeMap<String, FollowSet>,
@@ -243,123 +258,60 @@ fn walk_follow(
     match e {
         Expr::Empty | Expr::Token(_) => {}
         Expr::Rule(name) => {
-            if let Some(hf) = follow.get(host).cloned() {
-                let target = follow.entry(name.clone()).or_default();
-                for t in &hf {
-                    if target.insert(t.clone()) {
-                        *changed = true;
-                    }
+            let target = follow.entry(name.clone()).or_default();
+            for t in post_follow {
+                if target.insert(t.clone()) {
+                    *changed = true;
                 }
             }
         }
         Expr::Seq(xs) => {
-            for (i, x) in xs.iter().enumerate() {
-                if let Expr::Rule(name) = x {
-                    let tail = &xs[i + 1..];
-                    let tf = first_of_seq_1(tail, nullable, first);
-                    let tail_nullable = tf.contains("");
-                    {
-                        let target = follow.entry(name.clone()).or_default();
-                        for t in tf.iter().filter(|t| !t.is_empty()) {
-                            if target.insert(t.clone()) {
-                                *changed = true;
-                            }
-                        }
-                    }
-                    if tail_nullable {
-                        let host_follow = follow.get(host).cloned().unwrap_or_default();
-                        let target = follow.entry(name.clone()).or_default();
-                        for t in &host_follow {
-                            if target.insert(t.clone()) {
-                                *changed = true;
-                            }
-                        }
+            // Compute, for each position i, the FOLLOW set of that position:
+            // FIRST of xs[i+1..] (single-token), plus `post_follow` if the
+            // suffix is nullable. Walked back-to-front so each step extends
+            // the previous succ.
+            let n = xs.len();
+            let mut succ: Vec<FollowSet> = vec![post_follow.clone(); n + 1];
+            for i in (0..n).rev() {
+                let fx = first_of(&xs[i], nullable, first, 1);
+                let mut s: FollowSet = fx
+                    .iter()
+                    .filter(|seq| !seq.is_empty())
+                    .map(|seq| seq[0].clone())
+                    .collect();
+                if expr_nullable(&xs[i], nullable) {
+                    for t in &succ[i + 1] {
+                        s.insert(t.clone());
                     }
                 }
-                walk_follow(x, host, nullable, first, follow, changed);
+                succ[i] = s;
+            }
+            for i in 0..n {
+                walk_follow(&xs[i], &succ[i + 1], nullable, first, follow, changed);
             }
         }
         Expr::Alt(xs) => {
             for x in xs {
-                walk_follow(x, host, nullable, first, follow, changed);
+                walk_follow(x, post_follow, nullable, first, follow, changed);
             }
         }
-        Expr::Opt(x) => walk_follow(x, host, nullable, first, follow, changed),
+        Expr::Opt(x) => walk_follow(x, post_follow, nullable, first, follow, changed),
         Expr::Star(x) | Expr::Plus(x) => {
-            walk_follow(x, host, nullable, first, follow, changed);
+            // Body of one iteration is followed by either another iteration
+            // (FIRST(x)) or by the surrounding `post_follow`.
             let fx = first_of(x, nullable, first, 1);
-            let trailing = collect_trailing_rules(x, nullable);
-            let host_follow = follow.get(host).cloned().unwrap_or_default();
-            for r in trailing {
-                let target = follow.entry(r).or_default();
-                for seq in fx.iter().filter(|s| !s.is_empty()) {
-                    if target.insert(seq[0].clone()) {
-                        *changed = true;
-                    }
-                }
-                for t in &host_follow {
-                    if target.insert(t.clone()) {
-                        *changed = true;
-                    }
-                }
+            let mut body_post: FollowSet = fx
+                .iter()
+                .filter(|s| !s.is_empty())
+                .map(|s| s[0].clone())
+                .collect();
+            for t in post_follow {
+                body_post.insert(t.clone());
             }
+            walk_follow(x, &body_post, nullable, first, follow, changed);
         }
-        Expr::Label(_, x) => walk_follow(x, host, nullable, first, follow, changed),
+        Expr::Label(_, x) => walk_follow(x, post_follow, nullable, first, follow, changed),
     }
-}
-
-fn first_of_seq_1(
-    xs: &[Expr],
-    nullable: &BTreeMap<String, bool>,
-    first: &BTreeMap<String, FirstSet>,
-) -> BTreeSet<String> {
-    let mut out = BTreeSet::new();
-    let mut all_nullable = true;
-    for x in xs {
-        let f = first_of(x, nullable, first, 1);
-        let has_eps = f.iter().any(|s| s.is_empty());
-        for seq in &f {
-            if !seq.is_empty() {
-                out.insert(seq[0].clone());
-            }
-        }
-        if !has_eps {
-            all_nullable = false;
-            break;
-        }
-    }
-    if all_nullable {
-        out.insert(String::new());
-    }
-    out
-}
-
-fn collect_trailing_rules(e: &Expr, nullable: &BTreeMap<String, bool>) -> Vec<String> {
-    let mut out = Vec::new();
-    match e {
-        Expr::Empty | Expr::Token(_) => {}
-        Expr::Rule(n) => out.push(n.clone()),
-        Expr::Seq(xs) => {
-            for x in xs.iter().rev() {
-                let mut sub = collect_trailing_rules(x, nullable);
-                let is_null = expr_nullable(x, nullable);
-                out.append(&mut sub);
-                if !is_null {
-                    break;
-                }
-            }
-        }
-        Expr::Alt(xs) => {
-            for x in xs {
-                out.append(&mut collect_trailing_rules(x, nullable));
-            }
-        }
-        Expr::Opt(x) | Expr::Star(x) | Expr::Plus(x) => {
-            out.append(&mut collect_trailing_rules(x, nullable))
-        }
-        Expr::Label(_, x) => out.append(&mut collect_trailing_rules(x, nullable)),
-    }
-    out
 }
 
 /// FOLLOW(k): like [`compute_follow`] but producing sequences of up to `k`

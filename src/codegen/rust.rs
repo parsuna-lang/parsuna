@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use crate::codegen::common::pascal;
 use crate::codegen::EmittedFile;
 use crate::lowering::lexer_dfa::{DfaState, START};
+use crate::lowering::recovery::{Insertion, PostFirst};
 use crate::lowering::{Body, DispatchLeaf, DispatchTree, Instr, StateTable, Tail};
 
 /// Per-backend arguments. Currently empty — kept as a struct (deriving
@@ -611,8 +612,13 @@ fn emit_tail(s: &mut String, st: &StateTable, tail: &Tail, ind: &str) {
                 },
             );
         }
-        Tail::Dispatch { tree, sync, cont } => {
-            emit_dispatch_tree(s, st, tree, *sync, *cont, ind);
+        Tail::Dispatch {
+            tree,
+            sync,
+            cont,
+            insertions,
+        } => {
+            emit_dispatch_tree(s, st, tree, *sync, *cont, insertions, ind);
         }
     }
 }
@@ -661,33 +667,80 @@ fn emit_dispatch_tree(
     tree: &DispatchTree,
     sync: u32,
     cont: Option<u32>,
+    insertions: &[Insertion],
     ind: &str,
 ) {
     match tree {
-        DispatchTree::Leaf(leaf) => emit_dispatch_leaf(s, st, leaf, sync, cont, ind),
+        DispatchTree::Leaf(leaf) => emit_dispatch_leaf(s, st, leaf, sync, cont, &[], ind),
         DispatchTree::Switch {
             depth,
             arms,
             default,
         } => {
+            // Insertion arms only flow through at depth 0 — nested
+            // sub-trees can't contribute new `look[0]` candidates,
+            // so they walk with an empty insertions slice.
+            let inner_inserts: &[Insertion] = if *depth == 0 { insertions } else { &[] };
+
             writeln!(s, "{}match p.look({}).kind {{", ind, depth).unwrap();
             let inner = format!("{}    ", ind);
             let inner2 = format!("{}    ", inner);
             for (kind, sub) in arms {
                 let pat = format!("Some({})", token_variant(st, *kind));
                 writeln!(s, "{}{} => {{", inner, pat).unwrap();
-                emit_dispatch_tree(s, st, sub, sync, cont, &inner2);
+                emit_dispatch_tree(s, st, sub, sync, cont, &[], &inner2);
                 writeln!(s, "{}}}", inner).unwrap();
             }
             writeln!(s, "{}_ => {{", inner).unwrap();
-            emit_dispatch_leaf(s, st, default, sync, cont, &inner2);
+            emit_dispatch_leaf(s, st, default, sync, cont, inner_inserts, &inner2);
             writeln!(s, "{}}}", inner).unwrap();
             writeln!(s, "{}}}", ind).unwrap();
         }
     }
 }
 
-fn emit_dispatch_leaf(s: &mut String, st: &StateTable, leaf: &DispatchLeaf, sync: u32, cont: Option<u32>, ind: &str) {
+fn emit_insertion(s: &mut String, st: &StateTable, ins: &Insertion, ind: &str) {
+    let pat = ins
+        .kinds_to_match
+        .iter()
+        .map(|k| format!("Some({})", token_variant(st, *k)))
+        .collect::<Vec<_>>()
+        .join(" | ");
+    writeln!(s, "{}if matches!(p.look(0).kind, {}) {{", ind, pat).unwrap();
+    let inner = format!("{}    ", ind);
+    match &ins.post_first {
+        PostFirst::Jump(n) => {
+            writeln!(s, "{}cur = {};", inner, n).unwrap();
+        }
+        PostFirst::PushAndJump { push, jump } => {
+            writeln!(s, "{}p.push_ret({});", inner, push).unwrap();
+            writeln!(s, "{}cur = {};", inner, jump).unwrap();
+        }
+        PostFirst::Cont(c) => {
+            writeln!(s, "{}cur = {};", inner, c).unwrap();
+        }
+        PostFirst::TailReturn => {
+            writeln!(s, "{}cur = p.ret();", inner).unwrap();
+        }
+    }
+    writeln!(
+        s,
+        "{}event = Some(p.error_here(\"expected {}\"));",
+        inner, ins.token_name
+    )
+    .unwrap();
+    writeln!(s, "{}}} else ", ind).unwrap();
+}
+
+fn emit_dispatch_leaf(
+    s: &mut String,
+    st: &StateTable,
+    leaf: &DispatchLeaf,
+    sync: u32,
+    cont: Option<u32>,
+    insertions: &[Insertion],
+    ind: &str,
+) {
     match (leaf, cont) {
         (DispatchLeaf::Arm(b), Some(n)) => {
             writeln!(s, "{}p.push_ret({});", ind, n).unwrap();
@@ -702,15 +755,41 @@ fn emit_dispatch_leaf(s: &mut String, st: &StateTable, leaf: &DispatchLeaf, sync
         (DispatchLeaf::Fallthrough, None) => {
             writeln!(s, "{}cur = p.ret();", ind).unwrap();
         }
-        (DispatchLeaf::Error, Some(n)) => {
-            writeln!(s, "{}cur = {};", ind, n).unwrap();
-            writeln!(s, "{}event = Some(p.error_here(\"unexpected token\"));", ind).unwrap();
-            writeln!(s, "{}p.recover_to(SYNC_{});", ind, sync).unwrap();
-        }
-        (DispatchLeaf::Error, None) => {
-            writeln!(s, "{}event = Some(p.error_here(\"unexpected token\"));", ind).unwrap();
-            writeln!(s, "{}p.recover_to(SYNC_{});", ind, sync).unwrap();
-            writeln!(s, "{}cur = p.ret();", ind).unwrap();
+        (DispatchLeaf::Error, _) => {
+            // Insertion-recovery: try each arm's "I'd accept this if
+            // my first token had been there" set. The dispatch's
+            // primary arms already matched first via the outer match,
+            // so any look[0] reaching this branch is by definition
+            // *not* a primary kind — the if-chain disambiguates
+            // between arms that could fold it in.
+            for ins in insertions {
+                emit_insertion(s, st, ins, ind);
+            }
+            writeln!(s, "{}{{", ind).unwrap();
+            let inner = format!("{}    ", ind);
+            match cont {
+                Some(n) => {
+                    writeln!(s, "{}cur = {};", inner, n).unwrap();
+                    writeln!(
+                        s,
+                        "{}event = Some(p.error_here(\"unexpected token\"));",
+                        inner
+                    )
+                    .unwrap();
+                    writeln!(s, "{}p.recover_to(SYNC_{});", inner, sync).unwrap();
+                }
+                None => {
+                    writeln!(
+                        s,
+                        "{}event = Some(p.error_here(\"unexpected token\"));",
+                        inner
+                    )
+                    .unwrap();
+                    writeln!(s, "{}p.recover_to(SYNC_{});", inner, sync).unwrap();
+                    writeln!(s, "{}cur = p.ret();", inner).unwrap();
+                }
+            }
+            writeln!(s, "{}}}", ind).unwrap();
         }
     }
 }

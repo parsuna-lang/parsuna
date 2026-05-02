@@ -21,6 +21,8 @@ pub mod dump;
 mod layout;
 pub mod lexer_dfa;
 pub mod optimize;
+pub mod recovery;
+pub mod state_first;
 pub mod validate;
 
 use std::collections::BTreeMap;
@@ -112,6 +114,13 @@ pub struct StateTable {
     /// Interned SYNC-set pool. Each entry is a `SyncSet` — a flat list of
     /// token ids (`Vec<u16>`). Index by [`SyncSetId`].
     pub sync_sets: SyncSetPool,
+    /// Per-rule SYNC-set id (= FOLLOW(rule) + EOF). Mirrors what every
+    /// `Expect` inside the rule would point at, but materialised as a
+    /// rule → set map so analyses that need a state's "what tokens
+    /// can follow my rule" without having to find an `Expect` first
+    /// (e.g. per-state FIRST computation for dispatch insertion
+    /// recovery) can look it up directly.
+    pub rule_sync: BTreeMap<String, SyncSetId>,
     /// Every parser state, keyed by id. A `BTreeMap` so backends walk the
     /// table in deterministic id order.
     pub states: BTreeMap<StateId, State>,
@@ -302,6 +311,13 @@ pub enum Tail {
         /// push-and-jump, `None` is a tail call (no push, return
         /// directly to caller).
         cont: Option<StateId>,
+        /// Insertion-recovery candidates (see [`recovery::Insertion`]).
+        /// Empty when the dispatch has no arms with a clean
+        /// single-token insertion target. Populated by
+        /// [`lower`] after `optimize`/`validate` finish, so backends
+        /// can render the missing-token branch from data instead of
+        /// re-traversing the arm bodies.
+        insertions: Vec<recovery::Insertion>,
     },
 }
 
@@ -472,6 +488,12 @@ pub struct State {
     /// Human-readable tag (e.g. `expr:alt0:call:atom`). Used for debug
     /// dumps and emitted as a comment next to the `case` in generated code.
     pub label: String,
+    /// Name of the grammar rule this state belongs to. Used by
+    /// per-state FIRST analysis to resolve `Tail::Ret` (or tail-call
+    /// `Star`/`Opt`/`Dispatch` with `cont: None`) to the rule's
+    /// FOLLOW. Empty string for synthetic states constructed by tests
+    /// where no rule context exists.
+    pub rule: String,
     /// The state's body: a sequence of [`Instr`]s plus a terminating
     /// [`Tail`]. Always non-empty (the tail is always present).
     pub body: Body,
@@ -552,6 +574,13 @@ pub fn lower_with_opts(
     optimize::optimize(&mut table, lopts);
     mark_first_set_references(&mut table);
     validate::assert_runtime_invariants(&table);
+    // Insertion-recovery analysis runs last: it reads the post-
+    // optimizer state graph, so it has to come after every pass that
+    // could rewrite a `Tail::Dispatch` arm body. The result is
+    // stamped onto each `Tail::Dispatch::insertions` field directly
+    // so backends can render from data instead of re-traversing.
+    let firsts = state_first::compute(&table);
+    recovery::stamp(&mut table, &firsts);
     table
 }
 

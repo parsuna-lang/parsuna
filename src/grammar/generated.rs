@@ -489,8 +489,13 @@ const ENTRY_NEG_CLASS: u32 = 60;
 
 static SYNC_0: &[TokenKind] = &[TokenKind::Eof];
 static SYNC_1: &[TokenKind] = &[TokenKind::Eof, TokenKind::At, TokenKind::Ident];
-static SYNC_2: &[TokenKind] = &[TokenKind::Eof, TokenKind::Comma, TokenKind::At, TokenKind::Ident];
-static SYNC_3: &[TokenKind] = &[TokenKind::Eof, TokenKind::Lparen, TokenKind::Rparen, TokenKind::Semi, TokenKind::Pipe, TokenKind::Question, TokenKind::Star, TokenKind::Plus, TokenKind::Dot, TokenKind::Bang, TokenKind::At, TokenKind::Arrow, TokenKind::String, TokenKind::Char, TokenKind::Label, TokenKind::Ident];
+static SYNC_2: &[TokenKind] = &[TokenKind::Eof, TokenKind::Ident];
+static SYNC_3: &[TokenKind] = &[TokenKind::Eof, TokenKind::Semi];
+static SYNC_4: &[TokenKind] = &[TokenKind::Eof, TokenKind::Comma, TokenKind::Semi];
+static SYNC_5: &[TokenKind] = &[TokenKind::Eof, TokenKind::Rparen, TokenKind::Semi, TokenKind::Arrow];
+static SYNC_6: &[TokenKind] = &[TokenKind::Eof, TokenKind::Rparen, TokenKind::Semi, TokenKind::Pipe, TokenKind::Arrow];
+static SYNC_7: &[TokenKind] = &[TokenKind::Eof, TokenKind::Lparen, TokenKind::Rparen, TokenKind::Semi, TokenKind::Pipe, TokenKind::Dot, TokenKind::Bang, TokenKind::Arrow, TokenKind::String, TokenKind::Char, TokenKind::Label, TokenKind::Ident];
+static SYNC_8: &[TokenKind] = &[TokenKind::Eof, TokenKind::Lparen, TokenKind::Rparen, TokenKind::Semi, TokenKind::Pipe, TokenKind::Question, TokenKind::Star, TokenKind::Plus, TokenKind::Dot, TokenKind::Bang, TokenKind::Arrow, TokenKind::String, TokenKind::Char, TokenKind::Label, TokenKind::Ident];
 
 
 /// Zero-sized marker type that carries the generated dispatch logic via
@@ -592,26 +597,26 @@ impl parsuna_rt::Grammar<K> for Grammar {
                 cur = 10;
             }
             10 => { // mode_pre:expect:AT
-                event = Some(p.expect_labeled(TokenKind::At, SYNC_1, "expected AT", None));
+                event = Some(p.expect_labeled(TokenKind::At, SYNC_2, "expected `@`", None));
                 cur = 11;
             }
             11 => { // mode_pre:expect:IDENT@kind
-                event = Some(p.expect_labeled(TokenKind::Ident, SYNC_1, "expected IDENT", Some(LabelKind::Kind)));
+                event = Some(p.expect_labeled(TokenKind::Ident, SYNC_2, "expected IDENT", Some(LabelKind::Kind)));
                 cur = 12;
             }
             12 => { // mode_pre:expect:LPAREN
-                event = Some(p.expect_labeled(TokenKind::Lparen, SYNC_1, "expected LPAREN", None));
+                event = Some(p.expect_labeled(TokenKind::Lparen, SYNC_2, "expected `(`", None));
                 cur = 13;
             }
             13 => { // mode_pre:expect:IDENT@m
-                event = Some(p.expect_labeled(TokenKind::Ident, SYNC_1, "expected IDENT", Some(LabelKind::M)));
+                event = Some(p.expect_labeled(TokenKind::Ident, SYNC_2, "expected IDENT", Some(LabelKind::M)));
                 cur = 14;
             }
             14 => { // mode_pre:star
                 match p.look(0).kind {
                     Some(TokenKind::Comma) => {
                         p.push_ret(14);
-                        event = Some(p.expect_labeled(TokenKind::Comma, SYNC_1, "expected COMMA", None));
+                        event = Some(p.expect_labeled(TokenKind::Comma, SYNC_2, "expected `,`", None));
                         cur = 17;
                     }
                     _ => {
@@ -620,7 +625,7 @@ impl parsuna_rt::Grammar<K> for Grammar {
                 }
             }
             15 => { // mode_pre:expect:RPAREN
-                event = Some(p.expect_labeled(TokenKind::Rparen, SYNC_1, "expected RPAREN", None));
+                event = Some(p.expect_labeled(TokenKind::Rparen, SYNC_2, "expected `)`", None));
                 cur = 16;
             }
             16 => { // mode_pre:exit
@@ -628,7 +633,7 @@ impl parsuna_rt::Grammar<K> for Grammar {
                 cur = p.ret();
             }
             17 => { // mode_pre:star-body:expect:IDENT@m
-                event = Some(p.expect_labeled(TokenKind::Ident, SYNC_1, "expected IDENT", Some(LabelKind::M)));
+                event = Some(p.expect_labeled(TokenKind::Ident, SYNC_2, "expected IDENT", Some(LabelKind::M)));
                 cur = p.ret();
             }
             18 => { // decl:enter
@@ -640,7 +645,7 @@ impl parsuna_rt::Grammar<K> for Grammar {
                 cur = 20;
             }
             20 => { // decl:expect:EQ
-                event = Some(p.expect_labeled(TokenKind::Eq, SYNC_1, "expected EQ", None));
+                event = Some(p.expect_labeled(TokenKind::Eq, SYNC_1, "expected `=`", None));
                 p.push_ret(21);
                 cur = 39;
             }
@@ -657,7 +662,7 @@ impl parsuna_rt::Grammar<K> for Grammar {
                 }
             }
             22 => { // decl:expect:SEMI
-                event = Some(p.expect_labeled(TokenKind::Semi, SYNC_1, "expected SEMI", None));
+                event = Some(p.expect_labeled(TokenKind::Semi, SYNC_1, "expected `;`", None));
                 cur = 23;
             }
             23 => { // decl:exit
@@ -669,7 +674,7 @@ impl parsuna_rt::Grammar<K> for Grammar {
                 cur = 25;
             }
             25 => { // actions:expect:ARROW
-                event = Some(p.expect_labeled(TokenKind::Arrow, SYNC_1, "expected ARROW", None));
+                event = Some(p.expect_labeled(TokenKind::Arrow, SYNC_3, "expected `->`", None));
                 p.push_ret(26);
                 cur = 28;
             }
@@ -677,7 +682,7 @@ impl parsuna_rt::Grammar<K> for Grammar {
                 match p.look(0).kind {
                     Some(TokenKind::Comma) => {
                         p.push_ret(26);
-                        event = Some(p.expect_labeled(TokenKind::Comma, SYNC_1, "expected COMMA", None));
+                        event = Some(p.expect_labeled(TokenKind::Comma, SYNC_3, "expected `,`", None));
                         cur = 28;
                     }
                     _ => {
@@ -694,7 +699,7 @@ impl parsuna_rt::Grammar<K> for Grammar {
                 cur = 29;
             }
             29 => { // action:expect:IDENT@name
-                event = Some(p.expect_labeled(TokenKind::Ident, SYNC_2, "expected IDENT", Some(LabelKind::Name)));
+                event = Some(p.expect_labeled(TokenKind::Ident, SYNC_4, "expected IDENT", Some(LabelKind::Name)));
                 cur = 30;
             }
             30 => { // action:opt
@@ -718,18 +723,18 @@ impl parsuna_rt::Grammar<K> for Grammar {
                 cur = 33;
             }
             33 => { // action_arg:expect:LPAREN
-                event = Some(p.expect_labeled(TokenKind::Lparen, SYNC_2, "expected LPAREN", None));
+                event = Some(p.expect_labeled(TokenKind::Lparen, SYNC_4, "expected `(`", None));
                 cur = 34;
             }
             34 => { // action_arg:expect:IDENT@arg
-                event = Some(p.expect_labeled(TokenKind::Ident, SYNC_2, "expected IDENT", Some(LabelKind::Arg)));
+                event = Some(p.expect_labeled(TokenKind::Ident, SYNC_4, "expected IDENT", Some(LabelKind::Arg)));
                 cur = 35;
             }
             35 => { // action_arg:star
                 match p.look(0).kind {
                     Some(TokenKind::Comma) => {
                         p.push_ret(35);
-                        event = Some(p.expect_labeled(TokenKind::Comma, SYNC_2, "expected COMMA", None));
+                        event = Some(p.expect_labeled(TokenKind::Comma, SYNC_4, "expected `,`", None));
                         cur = 38;
                     }
                     _ => {
@@ -738,7 +743,7 @@ impl parsuna_rt::Grammar<K> for Grammar {
                 }
             }
             36 => { // action_arg:expect:RPAREN
-                event = Some(p.expect_labeled(TokenKind::Rparen, SYNC_2, "expected RPAREN", None));
+                event = Some(p.expect_labeled(TokenKind::Rparen, SYNC_4, "expected `)`", None));
                 cur = 37;
             }
             37 => { // action_arg:exit
@@ -746,7 +751,7 @@ impl parsuna_rt::Grammar<K> for Grammar {
                 cur = p.ret();
             }
             38 => { // action_arg:star-body:expect:IDENT@arg
-                event = Some(p.expect_labeled(TokenKind::Ident, SYNC_2, "expected IDENT", Some(LabelKind::Arg)));
+                event = Some(p.expect_labeled(TokenKind::Ident, SYNC_4, "expected IDENT", Some(LabelKind::Arg)));
                 cur = p.ret();
             }
             39 => { // alt_expr:enter
@@ -758,7 +763,7 @@ impl parsuna_rt::Grammar<K> for Grammar {
                 match p.look(0).kind {
                     Some(TokenKind::Pipe) => {
                         p.push_ret(40);
-                        event = Some(p.expect_labeled(TokenKind::Pipe, SYNC_3, "expected PIPE", None));
+                        event = Some(p.expect_labeled(TokenKind::Pipe, SYNC_5, "expected `|`", None));
                         cur = 42;
                     }
                     _ => {
@@ -789,7 +794,7 @@ impl parsuna_rt::Grammar<K> for Grammar {
                         match p.look(0).kind {
                             Some(TokenKind::Label) => {
                                 p.push_ret(46);
-                                event = Some(p.expect_labeled(TokenKind::Label, SYNC_3, "expected LABEL", Some(LabelKind::Lbl)));
+                                event = Some(p.expect_labeled(TokenKind::Label, SYNC_7, "expected LABEL", Some(LabelKind::Lbl)));
                                 cur = p.ret();
                             }
                             _ => {
@@ -810,7 +815,7 @@ impl parsuna_rt::Grammar<K> for Grammar {
                 match p.look(0).kind {
                     Some(TokenKind::Label) => {
                         p.push_ret(46);
-                        event = Some(p.expect_labeled(TokenKind::Label, SYNC_3, "expected LABEL", Some(LabelKind::Lbl)));
+                        event = Some(p.expect_labeled(TokenKind::Label, SYNC_7, "expected LABEL", Some(LabelKind::Lbl)));
                         cur = p.ret();
                     }
                     _ => {
@@ -846,9 +851,11 @@ impl parsuna_rt::Grammar<K> for Grammar {
                         cur = 53;
                     }
                     _ => {
-                        event = Some(p.error_here("unexpected token"));
-                        p.recover_to(SYNC_3);
-                        cur = p.ret();
+                        {
+                            event = Some(p.error_here("unexpected token"));
+                            p.recover_to(SYNC_8);
+                            cur = p.ret();
+                        }
                     }
                 }
             }
@@ -858,21 +865,35 @@ impl parsuna_rt::Grammar<K> for Grammar {
                         p.push_ret(47);
                         match p.look(0).kind {
                             Some(TokenKind::Question) => {
-                                event = Some(p.expect_labeled(TokenKind::Question, SYNC_3, "expected QUESTION", Some(LabelKind::QOpt)));
+                                event = Some(p.expect_labeled(TokenKind::Question, SYNC_8, "expected `?`", Some(LabelKind::QOpt)));
                                 cur = p.ret();
                             }
                             Some(TokenKind::Star) => {
-                                event = Some(p.expect_labeled(TokenKind::Star, SYNC_3, "expected STAR", Some(LabelKind::QStar)));
+                                event = Some(p.expect_labeled(TokenKind::Star, SYNC_8, "expected `*`", Some(LabelKind::QStar)));
                                 cur = p.ret();
                             }
                             Some(TokenKind::Plus) => {
-                                event = Some(p.expect_labeled(TokenKind::Plus, SYNC_3, "expected PLUS", Some(LabelKind::QPlus)));
+                                event = Some(p.expect_labeled(TokenKind::Plus, SYNC_8, "expected `+`", Some(LabelKind::QPlus)));
                                 cur = p.ret();
                             }
                             _ => {
-                                event = Some(p.error_here("unexpected token"));
-                                p.recover_to(SYNC_3);
-                                cur = p.ret();
+                                if matches!(p.look(0).kind, Some(TokenKind::Lparen) | Some(TokenKind::Rparen) | Some(TokenKind::Semi) | Some(TokenKind::Pipe) | Some(TokenKind::Dot) | Some(TokenKind::Bang) | Some(TokenKind::Arrow) | Some(TokenKind::String) | Some(TokenKind::Char) | Some(TokenKind::Label) | Some(TokenKind::Ident)) {
+                                    cur = p.ret();
+                                    event = Some(p.error_here("expected `?`"));
+                                } else 
+                                if matches!(p.look(0).kind, Some(TokenKind::Lparen) | Some(TokenKind::Rparen) | Some(TokenKind::Semi) | Some(TokenKind::Pipe) | Some(TokenKind::Dot) | Some(TokenKind::Bang) | Some(TokenKind::Arrow) | Some(TokenKind::String) | Some(TokenKind::Char) | Some(TokenKind::Label) | Some(TokenKind::Ident)) {
+                                    cur = p.ret();
+                                    event = Some(p.error_here("expected `*`"));
+                                } else 
+                                if matches!(p.look(0).kind, Some(TokenKind::Lparen) | Some(TokenKind::Rparen) | Some(TokenKind::Semi) | Some(TokenKind::Pipe) | Some(TokenKind::Dot) | Some(TokenKind::Bang) | Some(TokenKind::Arrow) | Some(TokenKind::String) | Some(TokenKind::Char) | Some(TokenKind::Label) | Some(TokenKind::Ident)) {
+                                    cur = p.ret();
+                                    event = Some(p.error_here("expected `+`"));
+                                } else 
+                                {
+                                    event = Some(p.error_here("unexpected token"));
+                                    p.recover_to(SYNC_8);
+                                    cur = p.ret();
+                                }
                             }
                         }
                     }
@@ -886,12 +907,12 @@ impl parsuna_rt::Grammar<K> for Grammar {
                 cur = 49;
             }
             49 => { // group:expect:LPAREN
-                event = Some(p.expect_labeled(TokenKind::Lparen, SYNC_3, "expected LPAREN", None));
+                event = Some(p.expect_labeled(TokenKind::Lparen, SYNC_8, "expected `(`", None));
                 p.push_ret(50);
                 cur = 39;
             }
             50 => { // group:expect:RPAREN
-                event = Some(p.expect_labeled(TokenKind::Rparen, SYNC_3, "expected RPAREN", None));
+                event = Some(p.expect_labeled(TokenKind::Rparen, SYNC_8, "expected `)`", None));
                 cur = 51;
             }
             51 => { // group:exit
@@ -916,7 +937,7 @@ impl parsuna_rt::Grammar<K> for Grammar {
                     }
                     Some(TokenKind::String) => {
                         p.push_ret(54);
-                        event = Some(p.expect_labeled(TokenKind::String, SYNC_3, "expected STRING", Some(LabelKind::String)));
+                        event = Some(p.expect_labeled(TokenKind::String, SYNC_8, "expected STRING", Some(LabelKind::String)));
                         cur = p.ret();
                     }
                     Some(TokenKind::Char) => {
@@ -926,13 +947,23 @@ impl parsuna_rt::Grammar<K> for Grammar {
                     }
                     Some(TokenKind::Ident) => {
                         p.push_ret(54);
-                        event = Some(p.expect_labeled(TokenKind::Ident, SYNC_3, "expected IDENT", Some(LabelKind::Ref)));
+                        event = Some(p.expect_labeled(TokenKind::Ident, SYNC_8, "expected IDENT", Some(LabelKind::Ref)));
                         cur = p.ret();
                     }
                     _ => {
-                        cur = 54;
-                        event = Some(p.error_here("unexpected token"));
-                        p.recover_to(SYNC_3);
+                        if matches!(p.look(0).kind, Some(TokenKind::Lparen) | Some(TokenKind::Rparen) | Some(TokenKind::Semi) | Some(TokenKind::Pipe) | Some(TokenKind::Question) | Some(TokenKind::Star) | Some(TokenKind::Plus) | Some(TokenKind::Dot) | Some(TokenKind::Bang) | Some(TokenKind::Arrow) | Some(TokenKind::String) | Some(TokenKind::Char) | Some(TokenKind::Label) | Some(TokenKind::Ident)) {
+                            cur = 54;
+                            event = Some(p.error_here("expected STRING"));
+                        } else 
+                        if matches!(p.look(0).kind, Some(TokenKind::Lparen) | Some(TokenKind::Rparen) | Some(TokenKind::Semi) | Some(TokenKind::Pipe) | Some(TokenKind::Question) | Some(TokenKind::Star) | Some(TokenKind::Plus) | Some(TokenKind::Dot) | Some(TokenKind::Bang) | Some(TokenKind::Arrow) | Some(TokenKind::String) | Some(TokenKind::Char) | Some(TokenKind::Label) | Some(TokenKind::Ident)) {
+                            cur = 54;
+                            event = Some(p.error_here("expected IDENT"));
+                        } else 
+                        {
+                            cur = 54;
+                            event = Some(p.error_here("unexpected token"));
+                            p.recover_to(SYNC_8);
+                        }
                     }
                 }
             }
@@ -948,18 +979,29 @@ impl parsuna_rt::Grammar<K> for Grammar {
                 match p.look(0).kind {
                     Some(TokenKind::Dot) => {
                         p.push_ret(57);
-                        event = Some(p.expect_labeled(TokenKind::Dot, SYNC_3, "expected DOT", Some(LabelKind::Dot)));
+                        event = Some(p.expect_labeled(TokenKind::Dot, SYNC_8, "expected `.`", Some(LabelKind::Dot)));
                         cur = p.ret();
                     }
                     Some(TokenKind::Char) => {
                         p.push_ret(57);
-                        event = Some(p.expect_labeled(TokenKind::Char, SYNC_3, "expected CHAR", Some(LabelKind::Lo)));
+                        event = Some(p.expect_labeled(TokenKind::Char, SYNC_8, "expected CHAR", Some(LabelKind::Lo)));
                         cur = 58;
                     }
                     _ => {
-                        cur = 57;
-                        event = Some(p.error_here("unexpected token"));
-                        p.recover_to(SYNC_3);
+                        if matches!(p.look(0).kind, Some(TokenKind::Lparen) | Some(TokenKind::Rparen) | Some(TokenKind::Semi) | Some(TokenKind::Pipe) | Some(TokenKind::Question) | Some(TokenKind::Star) | Some(TokenKind::Plus) | Some(TokenKind::Dot) | Some(TokenKind::Bang) | Some(TokenKind::Arrow) | Some(TokenKind::String) | Some(TokenKind::Char) | Some(TokenKind::Label) | Some(TokenKind::Ident)) {
+                            cur = 57;
+                            event = Some(p.error_here("expected `.`"));
+                        } else 
+                        if matches!(p.look(0).kind, Some(TokenKind::Lparen) | Some(TokenKind::Rparen) | Some(TokenKind::Semi) | Some(TokenKind::Pipe) | Some(TokenKind::Question) | Some(TokenKind::Star) | Some(TokenKind::Plus) | Some(TokenKind::Dotdot) | Some(TokenKind::Dot) | Some(TokenKind::Bang) | Some(TokenKind::Arrow) | Some(TokenKind::String) | Some(TokenKind::Char) | Some(TokenKind::Label) | Some(TokenKind::Ident)) {
+                            p.push_ret(57);
+                            cur = 58;
+                            event = Some(p.error_here("expected CHAR"));
+                        } else 
+                        {
+                            cur = 57;
+                            event = Some(p.error_here("unexpected token"));
+                            p.recover_to(SYNC_8);
+                        }
                     }
                 }
             }
@@ -970,7 +1012,7 @@ impl parsuna_rt::Grammar<K> for Grammar {
             58 => { // char_primary:alt0:opt
                 match p.look(0).kind {
                     Some(TokenKind::Dotdot) => {
-                        event = Some(p.expect_labeled(TokenKind::Dotdot, SYNC_3, "expected DOTDOT", None));
+                        event = Some(p.expect_labeled(TokenKind::Dotdot, SYNC_8, "expected `..`", None));
                         cur = 59;
                     }
                     _ => {
@@ -979,7 +1021,7 @@ impl parsuna_rt::Grammar<K> for Grammar {
                 }
             }
             59 => { // char_primary:alt0:opt-body:expect:CHAR@hi
-                event = Some(p.expect_labeled(TokenKind::Char, SYNC_3, "expected CHAR", Some(LabelKind::Hi)));
+                event = Some(p.expect_labeled(TokenKind::Char, SYNC_8, "expected CHAR", Some(LabelKind::Hi)));
                 cur = p.ret();
             }
             60 => { // neg_class:enter
@@ -987,14 +1029,14 @@ impl parsuna_rt::Grammar<K> for Grammar {
                 cur = 61;
             }
             61 => { // neg_class:expect:BANG
-                event = Some(p.expect_labeled(TokenKind::Bang, SYNC_3, "expected BANG", None));
+                event = Some(p.expect_labeled(TokenKind::Bang, SYNC_8, "expected `!`", None));
                 cur = 62;
             }
             62 => { // neg_class:dispatch
                 match p.look(0).kind {
                     Some(TokenKind::Lparen) => {
                         p.push_ret(63);
-                        event = Some(p.expect_labeled(TokenKind::Lparen, SYNC_3, "expected LPAREN", None));
+                        event = Some(p.expect_labeled(TokenKind::Lparen, SYNC_8, "expected `(`", None));
                         p.push_ret(64);
                         cur = 66;
                     }
@@ -1006,7 +1048,7 @@ impl parsuna_rt::Grammar<K> for Grammar {
                                 cur = 56;
                             }
                             Some(TokenKind::String) => {
-                                event = Some(p.expect_labeled(TokenKind::String, SYNC_3, "expected STRING", Some(LabelKind::String)));
+                                event = Some(p.expect_labeled(TokenKind::String, SYNC_8, "expected STRING", Some(LabelKind::String)));
                                 cur = p.ret();
                             }
                             Some(TokenKind::Char) => {
@@ -1014,9 +1056,15 @@ impl parsuna_rt::Grammar<K> for Grammar {
                                 cur = 56;
                             }
                             _ => {
-                                event = Some(p.error_here("unexpected token"));
-                                p.recover_to(SYNC_3);
-                                cur = p.ret();
+                                if matches!(p.look(0).kind, Some(TokenKind::Lparen) | Some(TokenKind::Rparen) | Some(TokenKind::Semi) | Some(TokenKind::Pipe) | Some(TokenKind::Question) | Some(TokenKind::Star) | Some(TokenKind::Plus) | Some(TokenKind::Dot) | Some(TokenKind::Bang) | Some(TokenKind::Arrow) | Some(TokenKind::String) | Some(TokenKind::Char) | Some(TokenKind::Label) | Some(TokenKind::Ident)) {
+                                    cur = p.ret();
+                                    event = Some(p.error_here("expected STRING"));
+                                } else 
+                                {
+                                    event = Some(p.error_here("unexpected token"));
+                                    p.recover_to(SYNC_8);
+                                    cur = p.ret();
+                                }
                             }
                         }
                     }
@@ -1028,7 +1076,7 @@ impl parsuna_rt::Grammar<K> for Grammar {
                                 cur = 56;
                             }
                             Some(TokenKind::String) => {
-                                event = Some(p.expect_labeled(TokenKind::String, SYNC_3, "expected STRING", Some(LabelKind::String)));
+                                event = Some(p.expect_labeled(TokenKind::String, SYNC_8, "expected STRING", Some(LabelKind::String)));
                                 cur = p.ret();
                             }
                             Some(TokenKind::Char) => {
@@ -1036,9 +1084,15 @@ impl parsuna_rt::Grammar<K> for Grammar {
                                 cur = 56;
                             }
                             _ => {
-                                event = Some(p.error_here("unexpected token"));
-                                p.recover_to(SYNC_3);
-                                cur = p.ret();
+                                if matches!(p.look(0).kind, Some(TokenKind::Lparen) | Some(TokenKind::Rparen) | Some(TokenKind::Semi) | Some(TokenKind::Pipe) | Some(TokenKind::Question) | Some(TokenKind::Star) | Some(TokenKind::Plus) | Some(TokenKind::Dot) | Some(TokenKind::Bang) | Some(TokenKind::Arrow) | Some(TokenKind::String) | Some(TokenKind::Char) | Some(TokenKind::Label) | Some(TokenKind::Ident)) {
+                                    cur = p.ret();
+                                    event = Some(p.error_here("expected STRING"));
+                                } else 
+                                {
+                                    event = Some(p.error_here("unexpected token"));
+                                    p.recover_to(SYNC_8);
+                                    cur = p.ret();
+                                }
                             }
                         }
                     }
@@ -1050,7 +1104,7 @@ impl parsuna_rt::Grammar<K> for Grammar {
                                 cur = 56;
                             }
                             Some(TokenKind::String) => {
-                                event = Some(p.expect_labeled(TokenKind::String, SYNC_3, "expected STRING", Some(LabelKind::String)));
+                                event = Some(p.expect_labeled(TokenKind::String, SYNC_8, "expected STRING", Some(LabelKind::String)));
                                 cur = p.ret();
                             }
                             Some(TokenKind::Char) => {
@@ -1058,16 +1112,29 @@ impl parsuna_rt::Grammar<K> for Grammar {
                                 cur = 56;
                             }
                             _ => {
-                                event = Some(p.error_here("unexpected token"));
-                                p.recover_to(SYNC_3);
-                                cur = p.ret();
+                                if matches!(p.look(0).kind, Some(TokenKind::Lparen) | Some(TokenKind::Rparen) | Some(TokenKind::Semi) | Some(TokenKind::Pipe) | Some(TokenKind::Question) | Some(TokenKind::Star) | Some(TokenKind::Plus) | Some(TokenKind::Dot) | Some(TokenKind::Bang) | Some(TokenKind::Arrow) | Some(TokenKind::String) | Some(TokenKind::Char) | Some(TokenKind::Label) | Some(TokenKind::Ident)) {
+                                    cur = p.ret();
+                                    event = Some(p.error_here("expected STRING"));
+                                } else 
+                                {
+                                    event = Some(p.error_here("unexpected token"));
+                                    p.recover_to(SYNC_8);
+                                    cur = p.ret();
+                                }
                             }
                         }
                     }
                     _ => {
-                        cur = 63;
-                        event = Some(p.error_here("unexpected token"));
-                        p.recover_to(SYNC_3);
+                        if matches!(p.look(0).kind, Some(TokenKind::Dot) | Some(TokenKind::String) | Some(TokenKind::Char)) {
+                            p.push_ret(63);
+                            cur = 66;
+                            event = Some(p.error_here("expected `(`"));
+                        } else 
+                        {
+                            cur = 63;
+                            event = Some(p.error_here("unexpected token"));
+                            p.recover_to(SYNC_8);
+                        }
                     }
                 }
             }
@@ -1079,7 +1146,7 @@ impl parsuna_rt::Grammar<K> for Grammar {
                 match p.look(0).kind {
                     Some(TokenKind::Pipe) => {
                         p.push_ret(64);
-                        event = Some(p.expect_labeled(TokenKind::Pipe, SYNC_3, "expected PIPE", None));
+                        event = Some(p.expect_labeled(TokenKind::Pipe, SYNC_8, "expected `|`", None));
                         cur = 66;
                     }
                     _ => {
@@ -1088,7 +1155,7 @@ impl parsuna_rt::Grammar<K> for Grammar {
                 }
             }
             65 => { // neg_class:alt1:expect:RPAREN
-                event = Some(p.expect_labeled(TokenKind::Rparen, SYNC_3, "expected RPAREN", None));
+                event = Some(p.expect_labeled(TokenKind::Rparen, SYNC_8, "expected `)`", None));
                 cur = p.ret();
             }
             66 => { // _neg_atom:dispatch
@@ -1098,7 +1165,7 @@ impl parsuna_rt::Grammar<K> for Grammar {
                         cur = 56;
                     }
                     Some(TokenKind::String) => {
-                        event = Some(p.expect_labeled(TokenKind::String, SYNC_3, "expected STRING", Some(LabelKind::String)));
+                        event = Some(p.expect_labeled(TokenKind::String, SYNC_8, "expected STRING", Some(LabelKind::String)));
                         cur = p.ret();
                     }
                     Some(TokenKind::Char) => {
@@ -1106,9 +1173,15 @@ impl parsuna_rt::Grammar<K> for Grammar {
                         cur = 56;
                     }
                     _ => {
-                        event = Some(p.error_here("unexpected token"));
-                        p.recover_to(SYNC_3);
-                        cur = p.ret();
+                        if matches!(p.look(0).kind, Some(TokenKind::Lparen) | Some(TokenKind::Rparen) | Some(TokenKind::Semi) | Some(TokenKind::Pipe) | Some(TokenKind::Question) | Some(TokenKind::Star) | Some(TokenKind::Plus) | Some(TokenKind::Dot) | Some(TokenKind::Bang) | Some(TokenKind::Arrow) | Some(TokenKind::String) | Some(TokenKind::Char) | Some(TokenKind::Label) | Some(TokenKind::Ident)) {
+                            cur = p.ret();
+                            event = Some(p.error_here("expected STRING"));
+                        } else 
+                        {
+                            event = Some(p.error_here("unexpected token"));
+                            p.recover_to(SYNC_8);
+                            cur = p.ret();
+                        }
                     }
                 }
             }

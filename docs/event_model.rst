@@ -174,28 +174,51 @@ Error recovery, observably
 --------------------------
 
 When the parser commits to a rule that wants a particular kind and
-the lookahead doesn't match, three things happen, observable as
-events:
+the lookahead doesn't match, the parser picks one of two strategies
+based on what the lookahead would let the parse continue with.
 
-1. An ``Error`` event is emitted with a message like ``"expected X"``
-   and a span over the current lookahead.
-2. The parser switches into recovery mode — it consumes tokens until
-   the lookahead matches a token in the enclosing rule's
+**Insertion recovery** — at an alternative dispatch (an ``Alt`` arm
+choice), if the lookahead doesn't match any arm's first token but
+*would* match somewhere inside one of the arms past its first
+token, the parser treats the missing first token as inserted and
+takes that arm:
+
+1. An ``Error`` event is emitted with a message like
+   ``"expected X"`` (where ``X`` is the inserted token) and a
+   zero-width span at the current lookahead.
+2. Drive resumes inside the arm, just past the synthetic first
+   token, with the lookahead untouched. The arm's body and
+   continuation parse normally from there.
+
+This is the path taken for a missing structural delimiter (e.g.
+the ``>`` of an XML start-tag) where the next token is part of
+well-formed input that should not be consumed as garbage.
+
+**Deletion recovery** — when no arm could fold the lookahead in,
+the parser falls back on synchronization:
+
+1. An ``Error`` event is emitted with a message like
+   ``"expected X"`` or ``"unexpected token"`` and a span over the
+   current lookahead.
+2. The parser switches into recovery mode — it consumes tokens
+   until the lookahead matches a token in the enclosing rule's
    synchronization set (essentially that rule's ``FOLLOW`` plus
    ``EOF``). Each token consumed during recovery comes through as a
    ``Garbage`` event, one per call to the iterator, so consumers
    stay in lock-step with input even on long error runs.
-3. Once the lookahead lands on a sync token, recovery finalises. If
-   the synced token happens to be the kind the rule was expecting,
-   it comes through as a normal ``Token`` event (because it *is*
-   legitimate parse data). Otherwise recovery just clears the armed
-   state and the rule's surrounding flow resumes — the sync token
-   is not consumed; the next iteration sees it via the regular
-   structural events.
+3. Once the lookahead lands on a sync token, recovery finalises.
+   If the synced token happens to be the kind the rule was
+   expecting, it comes through as a normal ``Token`` event
+   (because it *is* legitimate parse data). Otherwise recovery
+   just clears the armed state and the rule's surrounding flow
+   resumes — the sync token is not consumed; the next iteration
+   sees it via the regular structural events.
 
-This means a parse of a broken file produces a stream where every
-input byte is accounted for: some as well-formed ``Token`` events,
-some as ``Garbage`` followed by ``Token`` once recovery synced, and
-each error position carries its own ``Error`` event. An editor or
-linter consuming the stream can highlight error spans without losing
-track of the surrounding structure.
+Either way, a parse of a broken file produces a stream where
+every input byte is accounted for: some as well-formed ``Token``
+events, some as ``Garbage`` followed by ``Token`` once recovery
+synced, each error position carrying its own ``Error`` event,
+and each missing-token site carrying an ``Error`` with no
+matching ``Token``/``Garbage`` (the recovery was an insertion).
+An editor or linter consuming the stream can highlight error
+spans without losing track of the surrounding structure.

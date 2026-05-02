@@ -459,7 +459,7 @@ fn emit_tail(b: &mut SpanBuilder, tail: &Tail, st: &StateTable, indent: &str) {
             let inner = format!("{}  ", indent);
             emit_body(b, body, st, &inner);
         }
-        Tail::Dispatch { tree, sync, cont } => {
+        Tail::Dispatch { tree, sync, cont, .. } => {
             b.plain(indent);
             b.kw("Dispatch");
             b.plain(" ");

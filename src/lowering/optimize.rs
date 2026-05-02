@@ -587,6 +587,7 @@ mod tests {
         State {
             id,
             label: format!("s{}", id),
+            rule: String::new(),
             body: Body { instrs, tail },
         }
     }
@@ -599,6 +600,7 @@ mod tests {
             labels: vec![],
             first_sets: vec![],
             sync_sets: vec![],
+            rule_sync: BTreeMap::new(),
             states,
             entry_states: vec![("main".into(), entry)],
             k: 1,
@@ -703,6 +705,7 @@ mod tests {
             State {
                 id: 5,
                 label: "s5".into(),
+                rule: String::new(),
                 body: target_body.clone(),
             },
         );
@@ -743,6 +746,7 @@ mod tests {
             State {
                 id: 5,
                 label: "s5".into(),
+                rule: String::new(),
                 body: target_body.clone(),
             },
         );
@@ -842,6 +846,7 @@ mod tests {
             tree: DispatchTree::Leaf(DispatchLeaf::Fallthrough),
             sync: 0,
             cont: Some(99),
+            insertions: Vec::new(),
         };
         let mut states = BTreeMap::new();
         states.insert(1, make_state(1, vec![], Tail::Jump(2)));
@@ -862,6 +867,7 @@ mod tests {
             tree: DispatchTree::Leaf(DispatchLeaf::Fallthrough),
             sync: 0,
             cont: Some(99),
+            insertions: Vec::new(),
         };
         let mut states = BTreeMap::new();
         states.insert(1, make_state(1, vec![], Tail::Jump(2)));

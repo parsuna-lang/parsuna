@@ -68,6 +68,7 @@ pub fn layout(prog: Program, ag: &AnalyzedGrammar, dopts: DfaOpts) -> StateTable
                 State {
                     id: next_id,
                     label: format!("{}:empty", block.label_prefix),
+                    rule: block.rule.clone(),
                     body: Body {
                         instrs: Vec::new(),
                         tail: Tail::Ret,
@@ -92,6 +93,7 @@ pub fn layout(prog: Program, ag: &AnalyzedGrammar, dopts: DfaOpts) -> StateTable
                 State {
                     id: here,
                     label: block.op_labels[i].clone(),
+                    rule: block.rule.clone(),
                     body: lower_op(
                         op,
                         here,
@@ -149,6 +151,7 @@ pub fn layout(prog: Program, ag: &AnalyzedGrammar, dopts: DfaOpts) -> StateTable
         labels: prog.labels,
         first_sets: prog.first_sets,
         sync_sets: prog.sync_sets,
+        rule_sync: prog.rule_sync,
         states,
         entry_states,
         k: ag.k,
@@ -314,6 +317,8 @@ fn lower_op(
                     tree,
                     sync: *sync,
                     cont,
+                    // Stamped after `optimize`/`validate` finish.
+                    insertions: Vec::new(),
                 },
             }
         }
