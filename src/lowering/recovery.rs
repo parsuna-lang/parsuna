@@ -35,9 +35,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::lowering::{
-    Body, DispatchLeaf, DispatchTree, Instr, StateId, StateTable, Tail,
-};
+use crate::lowering::{Body, DispatchLeaf, DispatchTree, Instr, StateId, StateTable, Tail};
 
 /// One arm's worth of insertion-recovery info.
 ///
@@ -84,11 +82,11 @@ pub struct Insertion {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PostFirst {
     /// `cur = state`. Direct transition with no stack effect.
-    Goto(StateId),
+    Jump(StateId),
     /// `pushRet(push); cur = jump`. Push a continuation, then jump.
-    PushAndGoto { push: StateId, jump: StateId },
+    PushRetAndJump { push: StateId, jump: StateId },
     /// `cur = popRet()`. Tail-return into the caller's stack top.
-    Return,
+    Ret,
 }
 
 /// Stamp insertion candidates onto every `Tail::Dispatch` in `st`.
@@ -177,12 +175,7 @@ fn collect_for_tree(
     // token we're proposing to insert is `look[0]` itself, so the
     // ambient `look[0]` was already pinned by the outer Switch's
     // primary match.
-    let DispatchTree::Switch {
-        depth: 0,
-        arms,
-        ..
-    } = tree
-    else {
+    let DispatchTree::Switch { depth: 0, arms, .. } = tree else {
         return Vec::new();
     };
     arms.iter()
@@ -212,13 +205,13 @@ fn extract(
     })?;
 
     let post_first = match (&body.tail, cont) {
-        (Tail::Jump(n), Some(c)) => PostFirst::PushAndGoto { push: c, jump: *n },
-        (Tail::Jump(n), None) => PostFirst::Goto(*n),
+        (Tail::Jump(n), Some(c)) => PostFirst::PushRetAndJump { push: c, jump: *n },
+        (Tail::Jump(n), None) => PostFirst::Jump(*n),
         // `pushRet(c); …; ret` cancels back to `cur = c`, so the
         // structural Ret-tail-with-cont collapses into the same
         // single-state goto as a Jump-tail.
-        (Tail::Ret, Some(c)) => PostFirst::Goto(c),
-        (Tail::Ret, None) => PostFirst::Return,
+        (Tail::Ret, Some(c)) => PostFirst::Jump(c),
+        (Tail::Ret, None) => PostFirst::Ret,
         // Star/Opt/Dispatch as arm tail: the runtime invariant
         // forbids these after an Expect, so an arm with this shape
         // has no Expect to insert.
@@ -226,11 +219,11 @@ fn extract(
     };
 
     let mut kinds: BTreeSet<u16> = match &post_first {
-        PostFirst::Goto(n) => state_firsts.get(n).cloned().unwrap_or_default(),
-        PostFirst::PushAndGoto { jump: n, .. } => {
+        PostFirst::Jump(n) => state_firsts.get(n).cloned().unwrap_or_default(),
+        PostFirst::PushRetAndJump { jump: n, .. } => {
             state_firsts.get(n).cloned().unwrap_or_default()
         }
-        PostFirst::Return => rule_follows.get(host_rule).cloned().unwrap_or_default(),
+        PostFirst::Ret => rule_follows.get(host_rule).cloned().unwrap_or_default(),
     };
     // Drop EOF — recovering to "end of input" by inserting a missing
     // token is just an extra error event the EOF gate would fire

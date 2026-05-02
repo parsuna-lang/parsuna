@@ -178,7 +178,11 @@ fn emit_constants(s: &mut String, st: &StateTable) {
         "/// <summary>One variant per distinct grammar label (<c>name:NAME</c> form)."
     )
     .unwrap();
-    writeln!(s, "/// <c>Token.Label</c> stores the matching variant's underlying").unwrap();
+    writeln!(
+        s,
+        "/// <c>Token.Label</c> stores the matching variant's underlying"
+    )
+    .unwrap();
     writeln!(
         s,
         "/// <c>ushort</c> id (or <c>0</c> for unlabeled positions); compare with"
@@ -220,10 +224,7 @@ fn token_ushort(st: &StateTable, kind: u16) -> String {
         return "(ushort)TokenKind.Eof".to_string();
     }
     match st.tokens.iter().find(|t| t.kind == kind) {
-        Some(t) => format!(
-            "(ushort)TokenKind.{}",
-            pascal_case(&t.name.to_lowercase())
-        ),
+        Some(t) => format!("(ushort)TokenKind.{}", pascal_case(&t.name.to_lowercase())),
         None => panic!("unknown token id {} while emitting C# backend", kind),
     }
 }
@@ -293,7 +294,9 @@ fn emit_dfa(s: &mut String, st: &StateTable) {
         writeln!(s, "        int state = {};", START).unwrap();
         writeln!(s, "        while (true) {{").unwrap();
         writeln!(s, "            switch (state) {{").unwrap();
-        for ds in &m.dfa { emit_dfa_state_arm(s, st, ds); }
+        for ds in &m.dfa {
+            emit_dfa_state_arm(s, st, ds);
+        }
         writeln!(s, "                default: goto done;").unwrap();
         writeln!(s, "            }}").unwrap();
         writeln!(s, "        }}").unwrap();
@@ -314,11 +317,7 @@ fn emit_dfa(s: &mut String, st: &StateTable) {
     writeln!(s).unwrap();
 }
 
-fn emit_dfa_state_arm(
-    s: &mut String,
-    st: &StateTable,
-        ds: &DfaState,
-) {
+fn emit_dfa_state_arm(s: &mut String, st: &StateTable, ds: &DfaState) {
     if ds.arms.is_empty() {
         writeln!(s, "                case {}: goto done;", ds.id).unwrap();
         return;
@@ -375,7 +374,6 @@ fn emit_dfa_state_arm(
     writeln!(s, "                    break;").unwrap();
     writeln!(s, "                }}").unwrap();
 }
-
 
 fn byte_cond(ranges: &[(u8, u8)]) -> String {
     ranges
@@ -574,12 +572,7 @@ fn emit_drive(s: &mut String, st: &StateTable) {
     writeln!(s, "        Event? @event = null;").unwrap();
     writeln!(s, "        switch (cur) {{").unwrap();
     for state in st.states.values() {
-        writeln!(
-            s,
-            "            case {}: {{ // {}",
-            state.id, state.label
-        )
-        .unwrap();
+        writeln!(s, "            case {}: {{ // {}", state.id, state.label).unwrap();
         emit_body(s, st, &state.body, "                ");
         writeln!(s, "                break;").unwrap();
         writeln!(s, "            }}").unwrap();
@@ -642,7 +635,12 @@ fn emit_tail(s: &mut String, st: &StateTable, tail: &Tail, ind: &str) {
         Tail::Ret => {
             writeln!(s, "{}cur = p.PopRet();", ind).unwrap();
         }
-        Tail::Star { first, body, cont, head } => {
+        Tail::Star {
+            first,
+            body,
+            cont,
+            head,
+        } => {
             let inner = format!("{}    ", ind);
             writeln!(s, "{}if (p.MatchesFirst(Tables.First{})) {{", ind, first).unwrap();
             writeln!(s, "{}p.PushRet({});", inner, head).unwrap();
@@ -742,14 +740,14 @@ fn emit_insertion(s: &mut String, ins: &Insertion, ind: &str) {
     writeln!(s, "{ind}if ({cond}) {{").unwrap();
     let inner = format!("{ind}  ");
     match &ins.post_first {
-        PostFirst::Goto(n) => {
+        PostFirst::Jump(n) => {
             writeln!(s, "{inner}cur = {n};").unwrap();
         }
-        PostFirst::PushAndGoto { push, jump } => {
+        PostFirst::PushRetAndJump { push, jump } => {
             writeln!(s, "{inner}p.PushRet({push});").unwrap();
             writeln!(s, "{inner}cur = {jump};").unwrap();
         }
-        PostFirst::Return => {
+        PostFirst::Ret => {
             writeln!(s, "{inner}cur = p.PopRet();").unwrap();
         }
     }
@@ -791,19 +789,11 @@ fn emit_dispatch_leaf_block(
             match cont {
                 Some(n) => {
                     writeln!(s, "{inner}cur = {n};").unwrap();
-                    writeln!(
-                        s,
-                        "{inner}@event = p.ErrorHere(\"unexpected token\");"
-                    )
-                    .unwrap();
+                    writeln!(s, "{inner}@event = p.ErrorHere(\"unexpected token\");").unwrap();
                     writeln!(s, "{inner}p.RecoverTo(Tables.Sync{sync});").unwrap();
                 }
                 None => {
-                    writeln!(
-                        s,
-                        "{inner}@event = p.ErrorHere(\"unexpected token\");"
-                    )
-                    .unwrap();
+                    writeln!(s, "{inner}@event = p.ErrorHere(\"unexpected token\");").unwrap();
                     writeln!(s, "{inner}p.RecoverTo(Tables.Sync{sync});").unwrap();
                     writeln!(s, "{inner}cur = p.PopRet();").unwrap();
                 }

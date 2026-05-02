@@ -200,7 +200,11 @@ fn emit_constants(s: &mut String, st: &StateTable) {
         "     * unlabeled positions); compare via `tok.label() == LabelKind.NAME.id`"
     )
     .unwrap();
-    writeln!(s, "     * to dispatch on the position name without strings.").unwrap();
+    writeln!(
+        s,
+        "     * to dispatch on the position name without strings."
+    )
+    .unwrap();
     writeln!(s, "     */").unwrap();
     writeln!(s, "    public static enum LabelKind {{").unwrap();
     if st.labels.is_empty() {
@@ -341,7 +345,8 @@ fn emit_dfa(s: &mut String, st: &StateTable) {
                 writeln!(
                     s,
                     "    private static final boolean[] CLASS_M{}_S{} = {};",
-                    m.id, ds.id,
+                    m.id,
+                    ds.id,
                     class_table_initializer(sl)
                 )
                 .unwrap();
@@ -410,11 +415,17 @@ fn emit_dfa(s: &mut String, st: &StateTable) {
 /// for text-content / quoted-string scans, and we can vectorise them
 /// with an 8-byte SWAR test.
 fn detect_ascii_except_x(ranges: &[(u8, u8)]) -> Option<u8> {
-    if ranges.len() != 2 { return None; }
+    if ranges.len() != 2 {
+        return None;
+    }
     let (lo1, hi1) = ranges[0];
     let (lo2, hi2) = ranges[1];
-    if lo1 != 0x00 || hi2 != 0x7f { return None; }
-    if (hi1 as u16) + 2 != lo2 as u16 { return None; }
+    if lo1 != 0x00 || hi2 != 0x7f {
+        return None;
+    }
+    if (hi1 as u16) + 2 != lo2 as u16 {
+        return None;
+    }
     Some(hi1 + 1)
 }
 
@@ -453,19 +464,16 @@ fn class_table_initializer(ranges: &[(u8, u8)]) -> String {
     }
     let mut s = String::from("new boolean[]{");
     for (i, &v) in bits.iter().enumerate() {
-        if i > 0 { s.push(','); }
+        if i > 0 {
+            s.push(',');
+        }
         s.push_str(if v { "true" } else { "false" });
     }
     s.push('}');
     s
 }
 
-fn emit_dfa_state_arm(
-    s: &mut String,
-    st: &StateTable,
-        ds: &DfaState,
-    mode_id: u32,
-) {
+fn emit_dfa_state_arm(s: &mut String, st: &StateTable, ds: &DfaState, mode_id: u32) {
     if ds.arms.is_empty() {
         writeln!(s, "                case {}: break outer;", ds.id).unwrap();
         return;
@@ -487,12 +495,7 @@ fn emit_dfa_state_arm(
             .unwrap();
             if let Some(kind) = ds.accept {
                 writeln!(s, "                    bestLen = pos - start;").unwrap();
-                writeln!(
-                    s,
-                    "                    bestKind = {};",
-                    token_id(st, kind)
-                )
-                .unwrap();
+                writeln!(s, "                    bestKind = {};", token_id(st, kind)).unwrap();
             }
             writeln!(s, "                    if (pos >= bufLen) break outer;").unwrap();
             writeln!(s, "                    int b = buf[pos] & 0xFF;").unwrap();
@@ -534,11 +537,7 @@ fn emit_dfa_state_arm(
             // terminator hits, jump pos to the first terminator byte and
             // fall through to the per-byte tail.
             let x_word = u64::from(x) * 0x0101010101010101u64;
-            writeln!(
-                s,
-                "                    while (pos + 8 <= bufLen) {{"
-            )
-            .unwrap();
+            writeln!(s, "                    while (pos + 8 <= bufLen) {{").unwrap();
             writeln!(
                 s,
                 "                        long w = (long) LONG_LE.get(buf, pos);"
@@ -560,11 +559,7 @@ fn emit_dfa_state_arm(
                 "                        long isX = (xor - 0x0101010101010101L) & ~xor & 0x8080808080808080L;"
             )
             .unwrap();
-            writeln!(
-                s,
-                "                        long stop = high | isX;"
-            )
-            .unwrap();
+            writeln!(s, "                        long stop = high | isX;").unwrap();
             writeln!(s, "                        if (stop != 0) {{").unwrap();
             writeln!(
                 s,
@@ -592,12 +587,7 @@ fn emit_dfa_state_arm(
         writeln!(s, "                    }}").unwrap();
         if let Some(kind) = ds.accept {
             writeln!(s, "                    bestLen = pos - start;").unwrap();
-            writeln!(
-                s,
-                "                    bestKind = {};",
-                token_id(st, kind)
-            )
-            .unwrap();
+            writeln!(s, "                    bestKind = {};", token_id(st, kind)).unwrap();
         }
     }
     writeln!(s, "                    if (pos >= bufLen) break outer;").unwrap();
@@ -627,7 +617,6 @@ fn emit_dfa_state_arm(
     writeln!(s, "                    break;").unwrap();
     writeln!(s, "                }}").unwrap();
 }
-
 
 fn byte_cond(ranges: &[(u8, u8)]) -> String {
     ranges
@@ -697,12 +686,7 @@ fn emit_drive(s: &mut String, st: &StateTable) {
     writeln!(s, "        Event event = null;").unwrap();
     writeln!(s, "        switch (cur) {{").unwrap();
     for state in st.states.values() {
-        writeln!(
-            s,
-            "            case {}: {{ // {}",
-            state.id, state.label
-        )
-        .unwrap();
+        writeln!(s, "            case {}: {{ // {}", state.id, state.label).unwrap();
         emit_body(s, st, &state.body, "                ");
         writeln!(s, "                break;").unwrap();
         writeln!(s, "            }}").unwrap();
@@ -765,7 +749,12 @@ fn emit_tail(s: &mut String, st: &StateTable, tail: &Tail, ind: &str) {
         Tail::Ret => {
             writeln!(s, "{}cur = p.popRet();", ind).unwrap();
         }
-        Tail::Star { first, body, cont, head } => {
+        Tail::Star {
+            first,
+            body,
+            cont,
+            head,
+        } => {
             let inner = format!("{}    ", ind);
             emit_first_check(s, st, *first, ind);
             writeln!(s, "{}p.pushRet({});", inner, head).unwrap();
@@ -902,14 +891,14 @@ fn emit_insertion(s: &mut String, ins: &Insertion, ind: &str) {
     writeln!(s, "{ind}if ({cond}) {{").unwrap();
     let inner = format!("{ind}  ");
     match &ins.post_first {
-        PostFirst::Goto(n) => {
+        PostFirst::Jump(n) => {
             writeln!(s, "{inner}cur = {n};").unwrap();
         }
-        PostFirst::PushAndGoto { push, jump } => {
+        PostFirst::PushRetAndJump { push, jump } => {
             writeln!(s, "{inner}p.pushRet({push});").unwrap();
             writeln!(s, "{inner}cur = {jump};").unwrap();
         }
-        PostFirst::Return => {
+        PostFirst::Ret => {
             writeln!(s, "{inner}cur = p.popRet();").unwrap();
         }
     }
@@ -1096,4 +1085,3 @@ fn emit_public_api(s: &mut String, st: &StateTable) {
         ).unwrap();
     }
 }
-

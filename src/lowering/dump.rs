@@ -14,9 +14,7 @@
 use std::fmt::Write;
 
 use crate::lowering::recovery::{Insertion, PostFirst};
-use crate::lowering::{
-    Body, DispatchLeaf, DispatchTree, Instr, ModeActionInfo, StateTable, Tail,
-};
+use crate::lowering::{Body, DispatchLeaf, DispatchTree, Instr, ModeActionInfo, StateTable, Tail};
 
 /// One colored fragment of a dump line.
 #[derive(Clone, Debug)]
@@ -122,7 +120,12 @@ pub fn lowering_spans(st: &StateTable) -> Vec<Vec<DumpSpan>> {
             emit_instr(&mut b, instr, st);
             b.newline();
         }
-        emit_tail(&mut b, &state.body.tail, st, &format!("{:>w$}      ", "", w = id_width));
+        emit_tail(
+            &mut b,
+            &state.body.tail,
+            st,
+            &format!("{:>w$}      ", "", w = id_width),
+        );
         b.newline();
     }
 
@@ -287,26 +290,30 @@ fn emit_insertion(b: &mut SpanBuilder, st: &StateTable, ins: &Insertion, indent:
     }
     b.punct("}");
     b.plain(" ");
-    b.punct("→");
-    b.plain(" ");
+    b.punct("->");
+    b.newline();
+    let child_indent = format!("{}  ", indent);
     match &ins.post_first {
-        PostFirst::Goto(n) => {
-            b.kw("goto");
+        PostFirst::Jump(n) => {
+            b.plain(&child_indent);
+            b.kw("Jump");
             b.plain(" ");
             emit_state_ref(b, st, *n);
         }
-        PostFirst::PushAndGoto { push, jump } => {
-            b.kw("push");
+        PostFirst::PushRetAndJump { push, jump } => {
+            b.plain(&child_indent);
+            b.kw("PushRet");
             b.plain(" ");
             emit_state_ref(b, st, *push);
-            b.punct(",");
-            b.plain(" ");
-            b.kw("goto");
+            b.newline();
+            b.plain(&child_indent);
+            b.kw("Jump");
             b.plain(" ");
             emit_state_ref(b, st, *jump);
         }
-        PostFirst::Return => {
-            b.kw("return");
+        PostFirst::Ret => {
+            b.plain(&child_indent);
+            b.kw("Ret");
         }
     }
     b.newline();
@@ -549,12 +556,7 @@ fn emit_body(b: &mut SpanBuilder, body: &Body, st: &StateTable, indent: &str) {
     emit_tail(b, &body.tail, st, indent);
 }
 
-fn emit_dispatch_tree(
-    b: &mut SpanBuilder,
-    tree: &DispatchTree,
-    st: &StateTable,
-    indent: &str,
-) {
+fn emit_dispatch_tree(b: &mut SpanBuilder, tree: &DispatchTree, st: &StateTable, indent: &str) {
     match tree {
         DispatchTree::Leaf(l) => emit_dispatch_leaf(b, l, st, None, indent),
         DispatchTree::Switch {

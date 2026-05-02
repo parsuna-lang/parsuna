@@ -82,7 +82,11 @@ fn emit_header(s: &mut String, st: &StateTable) {
 }
 
 fn emit_constants(s: &mut String, st: &StateTable) {
-    writeln!(s, "// TokenKind enumerates every token this grammar can emit.").unwrap();
+    writeln!(
+        s,
+        "// TokenKind enumerates every token this grammar can emit."
+    )
+    .unwrap();
     writeln!(
         s,
         "// TkEof marks end-of-input. Lex failures (no DFA pattern matched) come"
@@ -93,7 +97,11 @@ fn emit_constants(s: &mut String, st: &StateTable) {
         "// through as Tokens with Kind == rt.ErrorKind (0xFFFF) — distinct from"
     )
     .unwrap();
-    writeln!(s, "// every grammar token id, so dispatch falls through to recovery.").unwrap();
+    writeln!(
+        s,
+        "// every grammar token id, so dispatch falls through to recovery."
+    )
+    .unwrap();
     writeln!(s, "type TokenKind uint16").unwrap();
     writeln!(s, "const (").unwrap();
     writeln!(s, "\tTkEof TokenKind = 0").unwrap();
@@ -107,7 +115,11 @@ fn emit_constants(s: &mut String, st: &StateTable) {
         "// TokenKindName returns the grammar-declared name of a token kind,"
     )
     .unwrap();
-    writeln!(s, "// \"ERROR\" for the lex-failure sentinel, or \"?\" if unknown.").unwrap();
+    writeln!(
+        s,
+        "// \"ERROR\" for the lex-failure sentinel, or \"?\" if unknown."
+    )
+    .unwrap();
     writeln!(s, "func TokenKindName(k uint16) string {{").unwrap();
     writeln!(s, "\tif k == rt.ErrorKind {{ return \"ERROR\" }}").unwrap();
     writeln!(s, "\tswitch TokenKind(k) {{").unwrap();
@@ -236,11 +248,7 @@ fn emit_dfa(s: &mut String, st: &StateTable) {
         "// on it and falls into the per-mode helper. Single-mode grammars collapse"
     )
     .unwrap();
-    writeln!(
-        s,
-        "// to a direct call so the dispatch inlines away."
-    )
-    .unwrap();
+    writeln!(s, "// to a direct call so the dispatch inlines away.").unwrap();
     writeln!(
         s,
         "func longestMatch(buf []byte, start int, mode uint32) (int, uint16, int) {{"
@@ -284,7 +292,9 @@ fn emit_dfa(s: &mut String, st: &StateTable) {
         writeln!(s, "\tstate := uint32({})", START).unwrap();
         writeln!(s, "\tfor {{").unwrap();
         writeln!(s, "\t\tswitch state {{").unwrap();
-        for ds in &m.dfa { emit_dfa_state_arm(s, st, ds); }
+        for ds in &m.dfa {
+            emit_dfa_state_arm(s, st, ds);
+        }
         writeln!(
             s,
             "\t\tdefault:\n\t\t\treturn bestLen, bestKind, pos - start"
@@ -305,7 +315,11 @@ fn emit_dfa(s: &mut String, st: &StateTable) {
         .collect();
     s.push_str(&skips.join(", "));
     writeln!(s, "}}").unwrap();
-    writeln!(s, "func isSkip(k uint16) bool {{ _, ok := skipKinds[k]; return ok }}").unwrap();
+    writeln!(
+        s,
+        "func isSkip(k uint16) bool {{ _, ok := skipKinds[k]; return ok }}"
+    )
+    .unwrap();
     writeln!(s).unwrap();
 
     emit_apply_actions(s, st);
@@ -361,11 +375,7 @@ fn emit_apply_actions(s: &mut String, st: &StateTable) {
     writeln!(s).unwrap();
 }
 
-fn emit_dfa_state_arm(
-    s: &mut String,
-    st: &StateTable,
-        ds: &DfaState,
-) {
+fn emit_dfa_state_arm(s: &mut String, st: &StateTable, ds: &DfaState) {
     if ds.arms.is_empty() {
         writeln!(
             s,
@@ -388,12 +398,7 @@ fn emit_dfa_state_arm(
         writeln!(s, "\t\t\t}}").unwrap();
         if let Some(kind) = ds.accept {
             writeln!(s, "\t\t\tbestLen = pos - start").unwrap();
-            writeln!(
-                s,
-                "\t\t\tbestKind = uint16({})",
-                token_const(st, kind)
-            )
-            .unwrap();
+            writeln!(s, "\t\t\tbestKind = uint16({})", token_const(st, kind)).unwrap();
         }
     }
     writeln!(
@@ -429,7 +434,6 @@ fn emit_dfa_state_arm(
     writeln!(s, "\t\t\t}}").unwrap();
 }
 
-
 fn byte_cond(ranges: &[(u8, u8)]) -> String {
     ranges
         .iter()
@@ -437,11 +441,7 @@ fn byte_cond(ranges: &[(u8, u8)]) -> String {
             if lo == hi {
                 format!("b == {}", byte_literal(*lo))
             } else {
-                format!(
-                    "b >= {} && b <= {}",
-                    byte_literal(*lo),
-                    byte_literal(*hi)
-                )
+                format!("b >= {} && b <= {}", byte_literal(*lo), byte_literal(*hi))
             }
         })
         .map(|term| {
@@ -468,7 +468,11 @@ fn byte_literal(b: u8) -> String {
 }
 
 fn emit_tables(s: &mut String, st: &StateTable) {
-    writeln!(s, "// K is the lookahead required to disambiguate every alternative (LL(k)).").unwrap();
+    writeln!(
+        s,
+        "// K is the lookahead required to disambiguate every alternative (LL(k))."
+    )
+    .unwrap();
     writeln!(s, "const K = {}", st.k).unwrap();
     for (name, id) in &st.entry_states {
         writeln!(s, "const entry{} = {}", capitalize(name), id).unwrap();
@@ -557,10 +561,7 @@ fn emit_instr(s: &mut String, st: &StateTable, op: &Instr) {
             label,
         } => {
             let label_arg = match label {
-                Some(id) => format!(
-                    "uint16(Lk{})",
-                    pascal(&st.labels[(*id as usize) - 1])
-                ),
+                Some(id) => format!("uint16(Lk{})", pascal(&st.labels[(*id as usize) - 1])),
                 None => "0".to_string(),
             };
             writeln!(
@@ -587,7 +588,12 @@ fn emit_tail(s: &mut String, st: &StateTable, tail: &Tail) {
         Tail::Ret => {
             writeln!(s, "\t\tcur = p.PopRet()").unwrap();
         }
-        Tail::Star { first, body, cont, head } => {
+        Tail::Star {
+            first,
+            body,
+            cont,
+            head,
+        } => {
             let miss = match cont {
                 Some(n) => format!("cur = {n}"),
                 None => "cur = p.PopRet()".to_string(),
@@ -649,13 +655,7 @@ fn emit_dispatch_tree(
             let inner = format!("{}\t", ind);
             let body_ind = format!("{}\t", inner);
             for (kind, sub) in arms {
-                writeln!(
-                    s,
-                    "{}case uint16({}):",
-                    inner,
-                    token_const(st, *kind)
-                )
-                .unwrap();
+                writeln!(s, "{}case uint16({}):", inner, token_const(st, *kind)).unwrap();
                 emit_dispatch_tree(s, st, sub, sync, cont, &[], &body_ind);
             }
             writeln!(s, "{}default:", inner).unwrap();
@@ -675,14 +675,14 @@ fn emit_insertion(s: &mut String, st: &StateTable, ins: &Insertion, ind: &str) {
     writeln!(s, "{ind}if {cond} {{").unwrap();
     let inner = format!("{ind}\t");
     match &ins.post_first {
-        PostFirst::Goto(n) => {
+        PostFirst::Jump(n) => {
             writeln!(s, "{inner}cur = {n}").unwrap();
         }
-        PostFirst::PushAndGoto { push, jump } => {
+        PostFirst::PushRetAndJump { push, jump } => {
             writeln!(s, "{inner}p.PushRet({push})").unwrap();
             writeln!(s, "{inner}cur = {jump}").unwrap();
         }
-        PostFirst::Return => {
+        PostFirst::Ret => {
             writeln!(s, "{inner}cur = p.PopRet()").unwrap();
         }
     }

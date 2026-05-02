@@ -57,11 +57,7 @@ fn emit_header(h: &mut String, st: &StateTable, stem: &str, upper: &str) {
         " * on the internal parsuna runtime. Build against the emitted {stem}.c,"
     )
     .unwrap();
-    writeln!(
-        h,
-        " * which pulls in the header-only runtime internally."
-    )
-    .unwrap();
+    writeln!(h, " * which pulls in the header-only runtime internally.").unwrap();
     writeln!(h, " *").unwrap();
     writeln!(
         h,
@@ -73,11 +69,7 @@ fn emit_header(h: &mut String, st: &StateTable, stem: &str, upper: &str) {
         " *   or    p = {stem}_parser_new_<rule>_from_read_fn(fn, ctx);"
     )
     .unwrap();
-    writeln!(
-        h,
-        " *         while ({stem}_next(p, &ev)) {{ ... }}"
-    )
-    .unwrap();
+    writeln!(h, " *         while ({stem}_next(p, &ev)) {{ ... }}").unwrap();
     writeln!(h, " *         {stem}_parser_free(p);").unwrap();
     writeln!(h, " */").unwrap();
     writeln!(h, "#ifndef {upper}_H").unwrap();
@@ -92,7 +84,11 @@ fn emit_header(h: &mut String, st: &StateTable, stem: &str, upper: &str) {
     /* Public value types. Layouts mirror the runtime's internal types
      * (guarded by _Static_asserts in the .c); that lets the .c cast
      * pointers between them without copying. */
-    writeln!(h, "/* Source position: byte offset plus 1-based line/column. */").unwrap();
+    writeln!(
+        h,
+        "/* Source position: byte offset plus 1-based line/column. */"
+    )
+    .unwrap();
     writeln!(
         h,
         "typedef struct {{ uint32_t offset, line, column; }} {stem}_Pos;"
@@ -106,16 +102,8 @@ fn emit_header(h: &mut String, st: &StateTable, stem: &str, upper: &str) {
     )
     .unwrap();
     writeln!(h).unwrap();
-    writeln!(
-        h,
-        "/* A lexed token: kind, span, and matched text."
-    )
-    .unwrap();
-    writeln!(
-        h,
-        " *"
-    )
-    .unwrap();
+    writeln!(h, "/* A lexed token: kind, span, and matched text.").unwrap();
+    writeln!(h, " *").unwrap();
     writeln!(
         h,
         " * In *reader* mode ({stem}_parser_new_<rule>_from_read_fn) `text` is an"
@@ -174,11 +162,7 @@ fn emit_header(h: &mut String, st: &StateTable, stem: &str, upper: &str) {
         " * dropped during error recovery (between an ERROR event and its sync"
     )
     .unwrap();
-    writeln!(
-        h,
-        " * point), ERROR is a recoverable diagnostic. */"
-    )
-    .unwrap();
+    writeln!(h, " * point), ERROR is a recoverable diagnostic. */").unwrap();
     writeln!(h, "typedef enum {{").unwrap();
     writeln!(h, "  {upper}_EV_ENTER,").unwrap();
     writeln!(h, "  {upper}_EV_EXIT,").unwrap();
@@ -244,11 +228,7 @@ fn emit_header(h: &mut String, st: &StateTable, stem: &str, upper: &str) {
         " * failures (no DFA pattern matched) come through as Token instances with"
     )
     .unwrap();
-    writeln!(
-        h,
-        " * kind == {upper}_LEX_ERROR. */"
-    )
-    .unwrap();
+    writeln!(h, " * kind == {upper}_LEX_ERROR. */").unwrap();
     writeln!(h, "typedef enum {{").unwrap();
     writeln!(h, "  {upper}_TK_EOF = 0,").unwrap();
     for t in &st.tokens {
@@ -316,13 +296,7 @@ fn emit_header(h: &mut String, st: &StateTable, stem: &str, upper: &str) {
         writeln!(h, "  {upper}_LK__none = 0").unwrap();
     } else {
         for (i, n) in st.labels.iter().enumerate() {
-            writeln!(
-                h,
-                "  {upper}_LK_{} = {},",
-                screaming_snake(n),
-                i + 1
-            )
-            .unwrap();
+            writeln!(h, "  {upper}_LK_{} = {},", screaming_snake(n), i + 1).unwrap();
         }
     }
     writeln!(h, "}} {stem}_LabelKind;").unwrap();
@@ -374,11 +348,7 @@ fn emit_header(h: &mut String, st: &StateTable, stem: &str, upper: &str) {
         "     * that didn't match a `name:NAME` position) is silently consumed."
     )
     .unwrap();
-    writeln!(
-        h,
-        "     * Implies skip-token suppression. */"
-    )
-    .unwrap();
+    writeln!(h, "     * Implies skip-token suppression. */").unwrap();
     writeln!(h, "    int drop_unlabeled_tokens;").unwrap();
     writeln!(h, "}} {stem}_Options;").unwrap();
     writeln!(h).unwrap();
@@ -465,11 +435,7 @@ fn emit_header(h: &mut String, st: &StateTable, stem: &str, upper: &str) {
         " * the input is fully consumed. String fields inside `*out` are owned"
     )
     .unwrap();
-    writeln!(
-        h,
-        " * by `p` and stay valid only until the next call. */"
-    )
-    .unwrap();
+    writeln!(h, " * by `p` and stay valid only until the next call. */").unwrap();
     writeln!(h, "int {stem}_next({stem}_Parser *p, {stem}_Event *out);").unwrap();
     writeln!(h).unwrap();
     writeln!(
@@ -504,8 +470,16 @@ fn emit_impl(c: &mut String, st: &StateTable, stem: &str, upper: &str) {
     /* ABI compatibility between the public `<stem>_*` types exposed in
      * the header and the runtime's internal (unprefixed) types. If this
      * ever breaks, the pointer casts below become undefined. */
-    writeln!(c, "/* Compile-time check that the public types line up byte-for-byte").unwrap();
-    writeln!(c, " * with the runtime's internal ones, so pointer casts are sound. */").unwrap();
+    writeln!(
+        c,
+        "/* Compile-time check that the public types line up byte-for-byte"
+    )
+    .unwrap();
+    writeln!(
+        c,
+        " * with the runtime's internal ones, so pointer casts are sound. */"
+    )
+    .unwrap();
     writeln!(
         c,
         "_Static_assert(sizeof({stem}_Pos)   == sizeof(Pos),   \"Pos layout mismatch\");"
@@ -601,7 +575,9 @@ fn emit_dfa(c: &mut String, st: &StateTable, upper: &str) {
         writeln!(c, "  uint32_t state = {}u;", START).unwrap();
         writeln!(c, "  for (;;) {{").unwrap();
         writeln!(c, "    switch (state) {{").unwrap();
-        for ds in &m.dfa { emit_dfa_state_arm(c, st, ds, upper); }
+        for ds in &m.dfa {
+            emit_dfa_state_arm(c, st, ds, upper);
+        }
         writeln!(c, "      default: goto done;").unwrap();
         writeln!(c, "    }}").unwrap();
         writeln!(c, "  }}").unwrap();
@@ -654,12 +630,7 @@ fn emit_dfa(c: &mut String, st: &StateTable, upper: &str) {
     writeln!(c).unwrap();
 }
 
-fn emit_dfa_state_arm(
-    c: &mut String,
-    st: &StateTable,
-        ds: &DfaState,
-    upper: &str,
-) {
+fn emit_dfa_state_arm(c: &mut String, st: &StateTable, ds: &DfaState, upper: &str) {
     if ds.arms.is_empty() {
         writeln!(c, "      case {}: goto done;", ds.id).unwrap();
         return;
@@ -672,12 +643,7 @@ fn emit_dfa_state_arm(
         // the optimiser lift it into SIMD on platforms that support it.
         writeln!(c, "        while (pos < buf_len) {{").unwrap();
         writeln!(c, "          unsigned char b = (unsigned char)buf[pos];").unwrap();
-        writeln!(
-            c,
-            "          if (!({})) break;",
-            byte_cond(self_loop)
-        )
-        .unwrap();
+        writeln!(c, "          if (!({})) break;", byte_cond(self_loop)).unwrap();
         writeln!(c, "          pos++;").unwrap();
         writeln!(c, "        }}").unwrap();
         if let Some(kind) = ds.accept {
@@ -718,7 +684,6 @@ fn emit_dfa_state_arm(
     writeln!(c, "      }}").unwrap();
 }
 
-
 fn byte_cond(ranges: &[(u8, u8)]) -> String {
     ranges
         .iter()
@@ -726,11 +691,7 @@ fn byte_cond(ranges: &[(u8, u8)]) -> String {
             if lo == hi {
                 format!("b == {}", byte_literal(*lo))
             } else {
-                format!(
-                    "(b >= {} && b <= {})",
-                    byte_literal(*lo),
-                    byte_literal(*hi)
-                )
+                format!("(b >= {} && b <= {})", byte_literal(*lo), byte_literal(*hi))
             }
         })
         .collect::<Vec<_>>()
@@ -779,7 +740,11 @@ fn emit_tables(c: &mut String, st: &StateTable, upper: &str) {
     }
     for f in &st.sync_sets {
         let i = f.id;
-        let s: Vec<String> = f.kinds.iter().map(|t| c_token_name(st, upper, *t)).collect();
+        let s: Vec<String> = f
+            .kinds
+            .iter()
+            .map(|t| c_token_name(st, upper, *t))
+            .collect();
         let joined = s.join(", ");
         let sep = if s.is_empty() { "" } else { ", " };
         writeln!(
@@ -885,9 +850,10 @@ fn c_token_name(st: &StateTable, upper: &str, kind: u16) -> String {
 fn emit_instr(c: &mut String, st: &StateTable, upper: &str, op: &Instr, ind: &str) {
     match op {
         Instr::Enter(k) => {
-            let name = st.rule_kinds.get(*k as usize).unwrap_or_else(|| {
-                panic!("unknown rule kind id {} while emitting C backend", k)
-            });
+            let name = st
+                .rule_kinds
+                .get(*k as usize)
+                .unwrap_or_else(|| panic!("unknown rule kind id {} while emitting C backend", k));
             writeln!(
                 c,
                 "{ind}*out = ev_enter(p, {upper}_RK_{}); emitted = 1;",
@@ -896,9 +862,10 @@ fn emit_instr(c: &mut String, st: &StateTable, upper: &str, op: &Instr, ind: &st
             .unwrap()
         }
         Instr::Exit(k) => {
-            let name = st.rule_kinds.get(*k as usize).unwrap_or_else(|| {
-                panic!("unknown rule kind id {} while emitting C backend", k)
-            });
+            let name = st
+                .rule_kinds
+                .get(*k as usize)
+                .unwrap_or_else(|| panic!("unknown rule kind id {} while emitting C backend", k));
             writeln!(
                 c,
                 "{ind}*out = ev_exit(p, {upper}_RK_{}); emitted = 1;",
@@ -936,7 +903,12 @@ fn emit_tail(c: &mut String, st: &StateTable, upper: &str, tail: &Tail, ind: &st
         Tail::Ret => {
             writeln!(c, "{ind}cur = pop_ret(p);").unwrap();
         }
-        Tail::Star { first, body, cont, head } => {
+        Tail::Star {
+            first,
+            body,
+            cont,
+            head,
+        } => {
             let inner = format!("{ind}  ");
             let miss = match cont {
                 Some(n) => format!("cur = {n};"),
@@ -995,16 +967,7 @@ fn emit_dispatch_tree(
     match tree {
         DispatchTree::Leaf(leaf) => {
             writeln!(c, "{}{{", ind).unwrap();
-            emit_dispatch_leaf_block(
-                c,
-                st,
-                upper,
-                leaf,
-                sync,
-                cont,
-                &[],
-                &format!("{}  ", ind),
-            );
+            emit_dispatch_leaf_block(c, st, upper, leaf, sync, cont, &[], &format!("{}  ", ind));
             writeln!(c, "{}}}", ind).unwrap();
         }
         DispatchTree::Switch {
@@ -1051,14 +1014,14 @@ fn emit_insertion(c: &mut String, st: &StateTable, upper: &str, ins: &Insertion,
     writeln!(c, "{ind}if ({cond}) {{").unwrap();
     let inner = format!("{ind}  ");
     match &ins.post_first {
-        PostFirst::Goto(n) => {
+        PostFirst::Jump(n) => {
             writeln!(c, "{inner}cur = {n};").unwrap();
         }
-        PostFirst::PushAndGoto { push, jump } => {
+        PostFirst::PushRetAndJump { push, jump } => {
             writeln!(c, "{inner}push_ret(p, {push});").unwrap();
             writeln!(c, "{inner}cur = {jump};").unwrap();
         }
-        PostFirst::Return => {
+        PostFirst::Ret => {
             writeln!(c, "{inner}cur = pop_ret(p);").unwrap();
         }
     }
@@ -1140,7 +1103,11 @@ fn emit_public_api(c: &mut String, st: &StateTable, stem: &str, upper: &str) {
         writeln!(c, "  parser_init_from_read_fn(p, {id}, read_fn, ctx);").unwrap();
         writeln!(c, "  return ({stem}_Parser*)p;").unwrap();
         writeln!(c, "}}").unwrap();
-        writeln!(c, "{stem}_Parser *{stem}_parser_new_{name}_from_string(const char *src, size_t len) {{").unwrap();
+        writeln!(
+            c,
+            "{stem}_Parser *{stem}_parser_new_{name}_from_string(const char *src, size_t len) {{"
+        )
+        .unwrap();
         writeln!(c, "  Parser *p = (Parser*)malloc(sizeof *p);").unwrap();
         writeln!(c, "  parser_init_from_string(p, {id}, src, len);").unwrap();
         writeln!(c, "  return ({stem}_Parser*)p;").unwrap();
@@ -1151,29 +1118,29 @@ fn emit_public_api(c: &mut String, st: &StateTable, stem: &str, upper: &str) {
         writeln!(c, "  Parser *p = (Parser*)malloc(sizeof *p);").unwrap();
         writeln!(c, "  parser_init_from_read_fn(p, {id}, read_fn, ctx);").unwrap();
         writeln!(c, "  p->drop_skips = opts.drop_skips;").unwrap();
-        writeln!(c, "  p->drop_unlabeled_tokens = opts.drop_unlabeled_tokens;").unwrap();
+        writeln!(
+            c,
+            "  p->drop_unlabeled_tokens = opts.drop_unlabeled_tokens;"
+        )
+        .unwrap();
         writeln!(c, "  return ({stem}_Parser*)p;").unwrap();
         writeln!(c, "}}").unwrap();
         writeln!(c, "{stem}_Parser *{stem}_parser_new_{name}_from_string_with_options(const char *src, size_t len, {stem}_Options opts) {{").unwrap();
         writeln!(c, "  Parser *p = (Parser*)malloc(sizeof *p);").unwrap();
         writeln!(c, "  parser_init_from_string(p, {id}, src, len);").unwrap();
         writeln!(c, "  p->drop_skips = opts.drop_skips;").unwrap();
-        writeln!(c, "  p->drop_unlabeled_tokens = opts.drop_unlabeled_tokens;").unwrap();
+        writeln!(
+            c,
+            "  p->drop_unlabeled_tokens = opts.drop_unlabeled_tokens;"
+        )
+        .unwrap();
         writeln!(c, "  return ({stem}_Parser*)p;").unwrap();
         writeln!(c, "}}").unwrap();
     }
     writeln!(c).unwrap();
 
-    writeln!(
-        c,
-        "int {stem}_next({stem}_Parser *p, {stem}_Event *out) {{"
-    )
-    .unwrap();
-    writeln!(
-        c,
-        "  return parser_next((Parser*)p, (Event*)out);"
-    )
-    .unwrap();
+    writeln!(c, "int {stem}_next({stem}_Parser *p, {stem}_Event *out) {{").unwrap();
+    writeln!(c, "  return parser_next((Parser*)p, (Event*)out);").unwrap();
     writeln!(c, "}}").unwrap();
     writeln!(c).unwrap();
 

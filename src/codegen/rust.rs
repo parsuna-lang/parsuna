@@ -184,11 +184,7 @@ fn emit_label_kinds(s: &mut String, st: &StateTable) {
     writeln!(s, "}}").unwrap();
     writeln!(s).unwrap();
     writeln!(s, "impl LabelKind {{").unwrap();
-    writeln!(
-        s,
-        "    /// Numeric discriminant, equal to `self as u16`."
-    )
-    .unwrap();
+    writeln!(s, "    /// Numeric discriminant, equal to `self as u16`.").unwrap();
     writeln!(s, "    pub const fn id(self) -> u16 {{ self as u16 }}").unwrap();
     writeln!(s, "}}").unwrap();
     writeln!(s).unwrap();
@@ -196,13 +192,7 @@ fn emit_label_kinds(s: &mut String, st: &StateTable) {
     writeln!(s, "    fn name(self) -> &'static str {{").unwrap();
     writeln!(s, "        match self {{").unwrap();
     for n in &st.labels {
-        writeln!(
-            s,
-            "            LabelKind::{} => \"{}\",",
-            pascal(n),
-            n
-        )
-        .unwrap();
+        writeln!(s, "            LabelKind::{} => \"{}\",", pascal(n), n).unwrap();
     }
     if st.labels.is_empty() {
         writeln!(s, "            LabelKind::_Empty => \"\",").unwrap();
@@ -219,9 +209,7 @@ fn emit_reexports(s: &mut String) {
     s.push_str("/// Re-exports of the runtime types used by this parser.\n");
     s.push_str("pub use parsuna_rt::{Span, Pos, Error};\n");
     s.push_str("/// Parse event carrying this grammar's token, rule, and label kinds.\n");
-    s.push_str(
-        "pub type Event<'a> = parsuna_rt::Event<'a, TokenKind, RuleKind, LabelKind>;\n",
-    );
+    s.push_str("pub type Event<'a> = parsuna_rt::Event<'a, TokenKind, RuleKind, LabelKind>;\n");
     s.push_str("/// A lexed token with this grammar's [`TokenKind`] and [`LabelKind`].\n");
     s.push_str("pub type Token<'a> = parsuna_rt::Token<'a, TokenKind, LabelKind>;\n\n");
 }
@@ -273,7 +261,11 @@ fn emit_compiled_dfa(s: &mut String, st: &StateTable) {
             )
             .unwrap();
         }
-        writeln!(s, "            _ => DfaMatch {{ best_len: 0, best_kind: None, scanned: 0 }},").unwrap();
+        writeln!(
+            s,
+            "            _ => DfaMatch {{ best_len: 0, best_kind: None, scanned: 0 }},"
+        )
+        .unwrap();
         writeln!(s, "        }}").unwrap();
     }
     writeln!(s, "    }}").unwrap();
@@ -527,20 +519,12 @@ fn kind_pattern(st: &StateTable, first: &[Vec<u16>]) -> String {
 
 fn emit_instr(s: &mut String, st: &StateTable, op: &Instr, ind: &str) {
     match op {
-        Instr::Enter(k) => writeln!(
-            s,
-            "{}event = Some(p.enter({}));",
-            ind,
-            rule_variant(st, *k)
-        )
-        .unwrap(),
-        Instr::Exit(k) => writeln!(
-            s,
-            "{}event = Some(p.exit({}));",
-            ind,
-            rule_variant(st, *k)
-        )
-        .unwrap(),
+        Instr::Enter(k) => {
+            writeln!(s, "{}event = Some(p.enter({}));", ind, rule_variant(st, *k)).unwrap()
+        }
+        Instr::Exit(k) => {
+            writeln!(s, "{}event = Some(p.exit({}));", ind, rule_variant(st, *k)).unwrap()
+        }
         Instr::Expect {
             kind,
             token_name,
@@ -709,14 +693,14 @@ fn emit_insertion(s: &mut String, st: &StateTable, ins: &Insertion, ind: &str) {
     writeln!(s, "{}if matches!(p.look(0).kind, {}) {{", ind, pat).unwrap();
     let inner = format!("{}    ", ind);
     match &ins.post_first {
-        PostFirst::Goto(n) => {
+        PostFirst::Jump(n) => {
             writeln!(s, "{}cur = {};", inner, n).unwrap();
         }
-        PostFirst::PushAndGoto { push, jump } => {
+        PostFirst::PushRetAndJump { push, jump } => {
             writeln!(s, "{}p.push_ret({});", inner, push).unwrap();
             writeln!(s, "{}cur = {};", inner, jump).unwrap();
         }
-        PostFirst::Return => {
+        PostFirst::Ret => {
             writeln!(s, "{}cur = p.ret();", inner).unwrap();
         }
     }
@@ -906,7 +890,11 @@ fn emit_public_api(s: &mut String, st: &StateTable) {
             writeln!(s, "///").unwrap();
             writeln!(s, "/// Zero-copy: tokens borrow their text from `src`.").unwrap();
             writeln!(s, "/// Skip tokens (whitespace, comments) are surfaced as").unwrap();
-            writeln!(s, "/// `Event::Token`. Use [`parse_{name}_from_str_with`] to pick a").unwrap();
+            writeln!(
+                s,
+                "/// `Event::Token`. Use [`parse_{name}_from_str_with`] to pick a"
+            )
+            .unwrap();
             writeln!(s, "/// different [`parsuna_rt::ParserConfig`].").unwrap();
             writeln!(
                 s,
@@ -954,13 +942,21 @@ fn emit_public_api(s: &mut String, st: &StateTable) {
                 "/// Streaming: tokens own their text; memory use stays bounded regardless of"
             )
             .unwrap();
-            writeln!(s, "/// input size. See [`parse_{name}_from_reader_with`] to pick a config.").unwrap();
+            writeln!(
+                s,
+                "/// input size. See [`parse_{name}_from_reader_with`] to pick a config."
+            )
+            .unwrap();
             writeln!(
                 s,
                 "pub fn parse_{name}_from_reader<R: Read>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa, LabelKind>> {{",
             )
             .unwrap();
-            writeln!(s, "    Parser::new(StreamingLexer::new(reader), ENTRY_{upper})").unwrap();
+            writeln!(
+                s,
+                "    Parser::new(StreamingLexer::new(reader), ENTRY_{upper})"
+            )
+            .unwrap();
             writeln!(s, "}}").unwrap();
             writeln!(s).unwrap();
 
@@ -980,7 +976,11 @@ fn emit_public_api(s: &mut String, st: &StateTable) {
                 "pub fn parse_{name}_from_reader_with<R: Read, C: parsuna_rt::ParserConfig>(reader: R) -> Parser<'static, StreamingLexer<R, TokenKind, LexerDfa, LabelKind>, C> {{",
             )
             .unwrap();
-            writeln!(s, "    Parser::new(StreamingLexer::new(reader), ENTRY_{upper})").unwrap();
+            writeln!(
+                s,
+                "    Parser::new(StreamingLexer::new(reader), ENTRY_{upper})"
+            )
+            .unwrap();
             writeln!(s, "}}").unwrap();
             writeln!(s).unwrap();
         }

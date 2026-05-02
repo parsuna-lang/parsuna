@@ -154,7 +154,11 @@ fn emit_constants(s: &mut String, st: &StateTable) {
 
     // ---- LabelKind ------------------------------------------------------
     writeln!(s, "/**").unwrap();
-    writeln!(s, " * One variant per distinct grammar label (`name:NAME` form).").unwrap();
+    writeln!(
+        s,
+        " * One variant per distinct grammar label (`name:NAME` form)."
+    )
+    .unwrap();
     writeln!(s, " *").unwrap();
     writeln!(
         s,
@@ -320,7 +324,9 @@ fn emit_dfa(s: &mut String, st: &StateTable) {
         writeln!(s, "  let state = {};", START).unwrap();
         writeln!(s, "  for (;;) {{").unwrap();
         writeln!(s, "    switch (state) {{").unwrap();
-        for ds in &m.dfa { emit_dfa_state_arm(s, st, ds, m.id); }
+        for ds in &m.dfa {
+            emit_dfa_state_arm(s, st, ds, m.id);
+        }
         writeln!(
             s,
             "      default: return {{ bestLen, bestKind, scanned: pos - start }};"
@@ -397,12 +403,7 @@ fn regex_byte(b: u8) -> String {
     format!("\\x{:02x}", b)
 }
 
-fn emit_dfa_state_arm(
-    s: &mut String,
-    st: &StateTable,
-        ds: &DfaState,
-    mode_id: u32,
-) {
+fn emit_dfa_state_arm(s: &mut String, st: &StateTable, ds: &DfaState, mode_id: u32) {
     if ds.arms.is_empty() {
         writeln!(
             s,
@@ -424,12 +425,7 @@ fn emit_dfa_state_arm(
         .unwrap();
         if let Some(kind) = ds.accept {
             writeln!(s, "        bestLen = pos - start;").unwrap();
-            writeln!(
-                s,
-                "        bestKind = {};",
-                token_variant(st, kind)
-            )
-            .unwrap();
+            writeln!(s, "        bestKind = {};", token_variant(st, kind)).unwrap();
         }
     }
     writeln!(
@@ -467,7 +463,6 @@ fn emit_dfa_state_arm(
     writeln!(s, "        break;").unwrap();
     writeln!(s, "      }}").unwrap();
 }
-
 
 fn byte_cond(ranges: &[(u8, u8)]) -> String {
     let terms: Vec<String> = ranges
@@ -537,7 +532,11 @@ fn emit_drive(s: &mut String, st: &StateTable) {
     )
     .unwrap();
     writeln!(s, "  let cur = p.getState();").unwrap();
-    writeln!(s, "  let event: Event<TokenKind, RuleKind, LabelKind> | undefined = undefined;").unwrap();
+    writeln!(
+        s,
+        "  let event: Event<TokenKind, RuleKind, LabelKind> | undefined = undefined;"
+    )
+    .unwrap();
     writeln!(s, "  switch (cur) {{").unwrap();
     for state in st.states.values() {
         writeln!(s, "    case {}: {{ // {}", state.id, state.label).unwrap();
@@ -545,11 +544,7 @@ fn emit_drive(s: &mut String, st: &StateTable) {
         writeln!(s, "      break;").unwrap();
         writeln!(s, "    }}").unwrap();
     }
-    writeln!(
-        s,
-        "    default: throw new Error(`unknown state ${{cur}}`);"
-    )
-    .unwrap();
+    writeln!(s, "    default: throw new Error(`unknown state ${{cur}}`);").unwrap();
     writeln!(s, "  }}").unwrap();
     writeln!(s, "  p.setState(cur);").unwrap();
     writeln!(s, "  return event;").unwrap();
@@ -572,10 +567,7 @@ fn emit_instr(s: &mut String, st: &StateTable, op: &Instr) {
             label,
         } => {
             let label_arg = match label {
-                Some(id) => format!(
-                    "LabelKind.{}",
-                    pascal(&st.labels[(*id as usize) - 1])
-                ),
+                Some(id) => format!("LabelKind.{}", pascal(&st.labels[(*id as usize) - 1])),
                 None => "null".to_string(),
             };
             writeln!(
@@ -602,7 +594,12 @@ fn emit_tail(s: &mut String, st: &StateTable, tail: &Tail) {
         Tail::Ret => {
             writeln!(s, "      cur = p.popRet();").unwrap();
         }
-        Tail::Star { first, body, cont, head } => {
+        Tail::Star {
+            first,
+            body,
+            cont,
+            head,
+        } => {
             writeln!(s, "      if ({}) {{", first_set_test(st, *first)).unwrap();
             writeln!(s, "        p.pushRet({});", head).unwrap();
             emit_body(s, st, body, "        ");
@@ -698,14 +695,14 @@ fn emit_insertion(s: &mut String, st: &StateTable, ins: &Insertion, ind: &str) {
     writeln!(s, "{}if ({}) {{", ind, cond).unwrap();
     let inner = format!("{}  ", ind);
     match &ins.post_first {
-        PostFirst::Goto(n) => {
+        PostFirst::Jump(n) => {
             writeln!(s, "{}cur = {};", inner, n).unwrap();
         }
-        PostFirst::PushAndGoto { push, jump } => {
+        PostFirst::PushRetAndJump { push, jump } => {
             writeln!(s, "{}p.pushRet({});", inner, push).unwrap();
             writeln!(s, "{}cur = {};", inner, jump).unwrap();
         }
-        PostFirst::Return => {
+        PostFirst::Ret => {
             writeln!(s, "{}cur = p.popRet();", inner).unwrap();
         }
     }

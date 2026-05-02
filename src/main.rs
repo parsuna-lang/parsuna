@@ -391,51 +391,13 @@ fn print_analysis(ag: &parsuna::AnalyzedGrammar) {
 }
 
 fn print_lowering(_ag: &parsuna::AnalyzedGrammar, st: &StateTable) {
-    println!("FIRST-set intern pool ({} entries):", st.first_sets.len());
-    for i in 0..st.first_sets.len() {
-        println!("  FIRST_{:<3} {}", i, format_first_pool(st, i as u32));
-    }
-    println!();
-
-    println!("SYNC-set intern pool ({} entries):", st.sync_sets.len());
-    for i in 0..st.sync_sets.len() {
-        println!("  SYNC_{:<3}  {}", i, format_sync_set(st, i as u32));
-    }
-    println!();
-
-    println!("State table ({} states):", st.states.len());
-
-    let entry_by_id: std::collections::HashMap<u32, &str> = st
-        .entry_states
-        .iter()
-        .map(|(n, id)| (*id, n.as_str()))
-        .collect();
-
-    let id_width = st
-        .states
-        .keys()
-        .last()
-        .copied()
-        .unwrap_or(0)
-        .to_string()
-        .len()
-        .max(3);
-    for state in st.states.values() {
-        let marker = entry_by_id
-            .get(&state.id)
-            .map(|n| format!("    ; entry: {}", n))
-            .unwrap_or_default();
-        println!("{:>w$}  {}{}", state.id, state.label, marker, w = id_width);
-        for instr in &state.body.instrs {
-            for line in format_instr(instr, st) {
-                println!("{:>w$}      {}", "", line, w = id_width);
-            }
-        }
-        for line in format_tail(&state.body.tail, st) {
-            println!("{:>w$}      {}", "", line, w = id_width);
-        }
-        println!();
-    }
+    // Single source of truth for the dump shape lives in
+    // `lowering::dump`; the structured-spans path drives the
+    // playground's IR tab, and `lowering_text` flattens the same data
+    // for the CLI. Keeping the formatting in one module also means
+    // analyses added later (e.g. dispatch insertion candidates) show
+    // up here automatically.
+    print!("{}", parsuna::lowering::dump::lowering_text(st));
 }
 
 fn print_dfa(st: &StateTable) {
@@ -612,207 +574,6 @@ fn format_first_set(f: &parsuna::analysis::FirstSet) -> String {
     format!("{{{}}}", rows.join(", "))
 }
 
-fn format_instr(op: &parsuna::lowering::Instr, st: &StateTable) -> Vec<String> {
-    use parsuna::lowering::Instr;
-    match op {
-        Instr::Enter(k) => vec![format!("Enter {}", rule_kind_name(st, *k))],
-        Instr::Exit(k) => vec![format!("Exit {}", rule_kind_name(st, *k))],
-        Instr::Expect {
-            kind,
-            token_name,
-            sync,
-            label,
-        } => vec![format!(
-            "Expect {} sync={}{}",
-            token_name_for_kind_fallback(st, *kind, token_name),
-            format_sync_set(st, *sync),
-            label.map(|id| format!(" label={}", label_name(st, id))).unwrap_or_default()
-        )],
-        Instr::PushRet(r) => vec![format!("PushRet {}", state_ref(st, *r))],
-    }
-}
-
-fn format_tail(tail: &parsuna::lowering::Tail, st: &StateTable) -> Vec<String> {
-    use parsuna::lowering::Tail;
-    match tail {
-        Tail::Jump(n) => vec![format!("Jump {}", state_ref(st, *n))],
-        Tail::Ret => vec!["Ret".into()],
-        Tail::Star {
-            first,
-            body,
-            cont,
-            head,
-        } => {
-            let mut lines = vec![format!(
-                "Star {} head={} {}",
-                format_first_pool(st, *first),
-                state_ref(st, *head),
-                match cont {
-                    Some(n) => format!("cont={}", state_ref(st, *n)),
-                    None => "tail".into(),
-                },
-            )];
-            append_body_ops(st, body, "  ", &mut lines);
-            lines
-        }
-        Tail::Opt { first, body, cont } => {
-            let mut lines = vec![format!(
-                "Opt {} {}",
-                format_first_pool(st, *first),
-                match cont {
-                    Some(n) => format!("cont={}", state_ref(st, *n)),
-                    None => "tail".into(),
-                },
-            )];
-            append_body_ops(st, body, "  ", &mut lines);
-            lines
-        }
-        Tail::Dispatch { tree, sync, cont, .. } => {
-            let mut lines = vec![format!(
-                "Dispatch sync={} {}",
-                format_sync_set(st, *sync),
-                match cont {
-                    Some(n) => format!("cont={}", state_ref(st, *n)),
-                    None => "tail".into(),
-                },
-            )];
-            format_dispatch_tree(st, tree, "  ", &mut lines);
-            lines
-        }
-    }
-}
-
-/// Append every instr + the tail of `body` to `out`, each prefixed
-/// by `indent`. A body whose instrs list is empty and whose tail is
-/// `Jump(s)` shows up as a single `Jump …` line.
-fn append_body_ops(
-    st: &StateTable,
-    body: &parsuna::lowering::Body,
-    indent: &str,
-    out: &mut Vec<String>,
-) {
-    for instr in &body.instrs {
-        for line in format_instr(instr, st) {
-            out.push(format!("{}{}", indent, line));
-        }
-    }
-    for line in format_tail(&body.tail, st) {
-        out.push(format!("{}{}", indent, line));
-    }
-}
-
-fn format_dispatch_tree(
-    st: &StateTable,
-    tree: &parsuna::lowering::DispatchTree,
-    indent: &str,
-    out: &mut Vec<String>,
-) {
-    use parsuna::lowering::DispatchTree;
-    match tree {
-        DispatchTree::Leaf(l) => emit_dispatch_leaf(st, l, "", indent, out),
-        DispatchTree::Switch {
-            depth,
-            arms,
-            default,
-        } => {
-            out.push(format!("{}look({}):", indent, depth));
-            let child_indent = format!("{}  ", indent);
-            for (kind, sub) in arms {
-                let name = token_name_for_kind(st, *kind);
-                match sub {
-                    DispatchTree::Leaf(l) => {
-                        emit_dispatch_leaf(st, l, &format!("{} ", name), &child_indent, out);
-                    }
-                    _ => {
-                        out.push(format!("{}{}:", child_indent, name));
-                        format_dispatch_tree(st, sub, &format!("{}  ", child_indent), out);
-                    }
-                }
-            }
-            emit_dispatch_leaf(st, default, "else ", &child_indent, out);
-        }
-    }
-}
-
-/// Render a single dispatch leaf at `indent`, prefixed by `prefix`
-/// (the token name, "else ", or empty for top-level leaves).
-/// `Arm` leaves print their body's ops on indented lines below the
-/// `->` header, the same way `Op::Star` and `Op::Opt` print their
-/// bodies. `Fallthrough` and `Error` are summarized on the header
-/// line because they don't carry body ops.
-fn emit_dispatch_leaf(
-    st: &StateTable,
-    leaf: &parsuna::lowering::DispatchLeaf,
-    prefix: &str,
-    indent: &str,
-    out: &mut Vec<String>,
-) {
-    use parsuna::lowering::DispatchLeaf;
-    match leaf {
-        DispatchLeaf::Arm(body) => {
-            out.push(format!("{}{}->", indent, prefix));
-            append_body_ops(st, body, &format!("{}  ", indent), out);
-        }
-        DispatchLeaf::Fallthrough => {
-            out.push(format!("{}{}-> fall", indent, prefix));
-        }
-        DispatchLeaf::Error => {
-            out.push(format!("{}{}-> error", indent, prefix));
-        }
-    }
-}
-
-fn format_first_pool(st: &StateTable, id: u32) -> String {
-    let Some(set) = st.first_sets.get(id as usize) else {
-        return format!("FIRST_{}", id);
-    };
-    let mut parts: Vec<String> = set
-        .seqs
-        .iter()
-        .map(|seq| {
-            if seq.is_empty() {
-                "ε".to_string()
-            } else {
-                seq.iter()
-                    .map(|k| token_name_for_kind(st, *k).to_string())
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            }
-        })
-        .collect();
-    parts.sort();
-    parts.dedup();
-    format!("{{{}}}", parts.join(", "))
-}
-
-fn format_sync_set(st: &StateTable, id: u32) -> String {
-    let Some(set) = st.sync_sets.get(id as usize) else {
-        return format!("SYNC_{}", id);
-    };
-    let mut names: Vec<&str> = set
-        .kinds
-        .iter()
-        .map(|k| token_name_for_kind(st, *k))
-        .collect();
-    names.sort();
-    names.dedup();
-    format!("{{{}}}", names.join(", "))
-}
-
-fn rule_kind_name(st: &StateTable, kind: u16) -> String {
-    st.rule_kinds
-        .get(kind as usize)
-        .cloned()
-        .unwrap_or_else(|| format!("?{}", kind))
-}
-
-fn state_ref(st: &StateTable, id: u32) -> String {
-    match st.states.get(&id) {
-        Some(s) if !s.label.is_empty() => s.label.clone(),
-        _ => id.to_string(),
-    }
-}
-
 /// Render the mode-stack actions that fire after a token of `kind`
 /// matches — `" → push(tag)"`, `" → pop"`, `" → pop, push(b)"`, or
 /// `""` if the token has none.
@@ -842,16 +603,6 @@ fn mode_actions_suffix(st: &StateTable, kind: u16) -> String {
     format!(" → {}", parts.join(", "))
 }
 
-fn label_name(st: &StateTable, id: u16) -> String {
-    if id == 0 {
-        return "?".to_string();
-    }
-    st.labels
-        .get((id - 1) as usize)
-        .cloned()
-        .unwrap_or_else(|| format!("?{}", id))
-}
-
 fn token_name_for_kind(st: &StateTable, kind: u16) -> &str {
     if kind == parsuna_rt::TOKEN_EOF {
         return "EOF";
@@ -863,18 +614,6 @@ fn token_name_for_kind(st: &StateTable, kind: u16) -> &str {
         .get(kind as usize - 1)
         .map(|t| t.name.as_str())
         .unwrap_or("?")
-}
-
-fn token_name_for_kind_fallback<'a>(st: &'a StateTable, kind: u16, fallback: &'a str) -> &'a str {
-    if kind == 0 {
-        return fallback;
-    }
-    let i = kind as usize - 1;
-    if i < st.tokens.len() {
-        &st.tokens[i].name
-    } else {
-        fallback
-    }
 }
 
 fn byte_range_label(from: u8, to: u8) -> String {
