@@ -525,12 +525,7 @@ fn emit_instr(s: &mut String, st: &StateTable, op: &Instr, ind: &str) {
         Instr::Exit(k) => {
             writeln!(s, "{}event = Some(p.exit({}));", ind, rule_variant(st, *k)).unwrap()
         }
-        Instr::Expect {
-            kind,
-            token_name,
-            sync,
-            label,
-        } => {
+        Instr::Expect { kind, sync, label } => {
             let label_arg = match label {
                 Some(id) => format!(
                     "Some(LabelKind::{})",
@@ -544,7 +539,7 @@ fn emit_instr(s: &mut String, st: &StateTable, op: &Instr, ind: &str) {
                 ind,
                 token_variant(st, *kind),
                 sync,
-                token_name,
+                crate::codegen::common::token_display_name_for_kind(st, *kind),
                 label_arg,
             )
             .unwrap();
@@ -708,7 +703,7 @@ fn emit_insertion(s: &mut String, st: &StateTable, ins: &Insertion, ind: &str) {
         s,
         "{}event = Some(p.error_here(\"{}\"));",
         inner,
-        ins.expected_msg()
+        crate::codegen::common::expected_message(st, &ins.candidate_kinds)
     )
     .unwrap();
     writeln!(s, "{}}} else ", ind).unwrap();

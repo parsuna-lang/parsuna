@@ -62,8 +62,6 @@ pub enum Op {
     Expect {
         /// Required token-kind id.
         kind: u16,
-        /// Token name, retained only for the diagnostic message.
-        token_name: String,
         /// SYNC-set id to recover to on mismatch.
         sync: SyncSetId,
         /// Optional label-id from a `name:NAME` grammar form. `Some(i)`
@@ -227,7 +225,6 @@ pub fn build(ag: &AnalyzedGrammar) -> Program {
         .enumerate()
         .map(|(i, t)| TokenInfo {
             name: t.name.clone(),
-            display_name: token_display_name(ag, &t.name),
             pattern: resolve_pattern(&t.pattern, g),
             skip: t.skip,
             kind: (i + 1) as u16,
@@ -492,7 +489,6 @@ impl Builder<'_> {
                     cur,
                     Op::Expect {
                         kind,
-                        token_name: token_display_name(self.ag, name),
                         sync: self.current_sync,
                         label: None,
                     },
@@ -635,7 +631,6 @@ impl Builder<'_> {
                         cur,
                         Op::Expect {
                             kind,
-                            token_name: token_display_name(self.ag, tok_name),
                             sync: self.current_sync,
                             label: Some(label_id),
                         },
@@ -696,41 +691,6 @@ fn token_kind(ag: &AnalyzedGrammar, name: &str) -> u16 {
         .position(|t| t.name == name)
         .map(|i| (i + 1) as u16)
         .unwrap_or(0)
-}
-
-/// Human-readable display name for a token, used inside `"expected …"`
-/// error messages. For a simple-literal token the literal itself goes
-/// in (backtick-quoted so the rendering doesn't need per-language
-/// quote juggling — backticks aren't a string delimiter in C, Rust,
-/// TypeScript, Java, Go, or C#); anything more complex falls back to
-/// the grammar-declared identifier so the user at least sees the
-/// kind name. Tokens without a fragment-resolved pattern (e.g. a
-/// dangling `Ref` that survived analysis) also fall back to the
-/// identifier.
-///
-/// The literal is debug-escaped (`\\`, `\"`, control codes) so the
-/// resulting string is safe to embed verbatim inside a `"..."` string
-/// literal in any of the supported target languages — they all share
-/// the same backslash-escape vocabulary.
-fn token_display_name(ag: &AnalyzedGrammar, name: &str) -> String {
-    let Some(t) = ag.grammar.tokens.get(name) else {
-        return name.to_string();
-    };
-    let resolved = resolve_pattern(&t.pattern, &ag.grammar);
-    match &resolved {
-        TokenPattern::Literal(s) => {
-            // {:?} on &str gives `"..."` with `\\`, `\"`, `\n`, etc.
-            // already applied; strip the outer quotes and re-wrap in
-            // backticks for the user-visible form.
-            let escaped = format!("{:?}", s);
-            let inner = escaped
-                .strip_prefix('"')
-                .and_then(|s| s.strip_suffix('"'))
-                .unwrap_or(escaped.as_str());
-            format!("`{}`", inner)
-        }
-        _ => name.to_string(),
-    }
 }
 
 /// Inline every `TokenPattern::Ref` into the referenced token's body.

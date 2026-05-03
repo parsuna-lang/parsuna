@@ -244,15 +244,9 @@ fn lower_op(
             instrs: vec![Instr::Exit(*kind)],
             tail: after,
         },
-        Op::Expect {
-            kind,
-            token_name,
-            sync,
-            label,
-        } => Body {
+        Op::Expect { kind, sync, label } => Body {
             instrs: vec![Instr::Expect {
                 kind: *kind,
-                token_name: token_name.clone(),
                 sync: *sync,
                 label: label.clone(),
             }],

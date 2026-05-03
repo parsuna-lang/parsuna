@@ -873,13 +873,9 @@ fn emit_instr(c: &mut String, st: &StateTable, upper: &str, op: &Instr, ind: &st
             )
             .unwrap()
         }
-        Instr::Expect {
-            kind,
-            token_name,
-            sync,
-            label,
-        } => {
+        Instr::Expect { kind, sync, label } => {
             let name = c_token_name(st, upper, *kind);
+            let display = crate::codegen::common::token_display_name_for_kind(st, *kind);
             let label_arg = match label {
                 Some(id) => format!(
                     "{upper}_LK_{}",
@@ -889,7 +885,7 @@ fn emit_instr(c: &mut String, st: &StateTable, upper: &str, op: &Instr, ind: &st
             };
             writeln!(
                 c,
-                "{ind}*out = try_consume_labeled(p, {name}, SYNC_{sync}, \"{token_name}\", {label_arg}); emitted = 1;"
+                "{ind}*out = try_consume_labeled(p, {name}, SYNC_{sync}, \"{display}\", {label_arg}); emitted = 1;"
             )
             .unwrap()
         }
@@ -1028,7 +1024,7 @@ fn emit_insertion(c: &mut String, st: &StateTable, upper: &str, ins: &Insertion,
     writeln!(
         c,
         "{inner}*out = ev_error_here(p, \"{}\"); emitted = 1;",
-        ins.expected_msg()
+        crate::codegen::common::expected_message(st, &ins.candidate_kinds)
     )
     .unwrap();
     writeln!(c, "{ind}}} else").unwrap();

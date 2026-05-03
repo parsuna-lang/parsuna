@@ -15,6 +15,9 @@ use std::fmt::Write;
 
 use crate::lowering::recovery::{Insertion, PostFirst};
 use crate::lowering::{Body, DispatchLeaf, DispatchTree, Instr, ModeActionInfo, StateTable, Tail};
+// Dump uses raw grammar names for tokens (e.g. "GT", "SEMI"); the
+// pretty backtick-quoted form (e.g. `` `>` ``, `` `;` ``) is a codegen
+// concern and lives in `crate::codegen::common::token_display_name`.
 
 /// One colored fragment of a dump line.
 #[derive(Clone, Debug)]
@@ -280,7 +283,18 @@ fn emit_insertion(b: &mut SpanBuilder, st: &StateTable, ins: &Insertion, indent:
     b.plain(indent);
     b.kw("recover");
     b.plain(" ");
-    b.plain(&ins.expected_msg());
+    b.kw("expected");
+    b.plain(" ");
+    b.punct("{");
+    for (i, kind) in ins.candidate_kinds.iter().enumerate() {
+        if i > 0 {
+            b.plain(" ");
+            b.punct("|");
+            b.plain(" ");
+        }
+        emit_token_kind(b, st, *kind);
+    }
+    b.punct("}");
     b.plain(" ");
     b.kw("if");
     b.plain(" ");
@@ -357,17 +371,6 @@ fn emit_token_kind(b: &mut SpanBuilder, st: &StateTable, kind: u16) {
     }
 }
 
-fn emit_token_kind_fallback(b: &mut SpanBuilder, st: &StateTable, kind: u16, fallback: &str) {
-    if kind == 0 {
-        b.token(fallback);
-        return;
-    }
-    match st.tokens.get(kind as usize - 1) {
-        Some(t) => b.token(&t.name),
-        None => b.token(fallback),
-    }
-}
-
 fn emit_rule_kind(b: &mut SpanBuilder, st: &StateTable, kind: u16) {
     match st.rule_kinds.get(kind as usize) {
         Some(name) => b.rule(name),
@@ -433,15 +436,10 @@ fn emit_instr(b: &mut SpanBuilder, op: &Instr, st: &StateTable) {
             b.plain(" ");
             emit_rule_kind(b, st, *k);
         }
-        Instr::Expect {
-            kind,
-            token_name,
-            sync,
-            label,
-        } => {
+        Instr::Expect { kind, sync, label } => {
             b.kw("Expect");
             b.plain(" ");
-            emit_token_kind_fallback(b, st, *kind, token_name);
+            emit_token_kind(b, st, *kind);
             b.plain(" ");
             b.kw("sync");
             b.punct("=");

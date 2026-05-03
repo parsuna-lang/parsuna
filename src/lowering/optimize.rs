@@ -694,7 +694,6 @@ mod tests {
         let target_body = Body {
             instrs: vec![Instr::Expect {
                 kind: 1,
-                token_name: "X".into(),
                 sync: 0,
                 label: None,
             }],

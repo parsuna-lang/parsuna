@@ -1,6 +1,59 @@
 //! Case conversion and string escaping helpers shared by every backend.
 
 use crate::grammar::ir::*;
+use crate::lowering::{StateTable, TokenInfo};
+
+/// Human-readable form of a token for user-facing messages.
+///
+/// For tokens whose resolved pattern is a single string literal, the
+/// literal in backticks (e.g. `` `>` `` for the `GT` token whose
+/// pattern is `">"`); otherwise the grammar-declared `name`. Already
+/// debug-escaped (`\\`, `\"`, control codes are pre-applied), so the
+/// result drops safely into any backend's `"..."` string literal —
+/// every supported language uses the same backslash-escape vocabulary.
+///
+/// Lives here rather than on `TokenInfo` so the IR carries only the
+/// raw `name` + `pattern`; rendering is a codegen / dump concern.
+pub fn token_display_name(t: &TokenInfo) -> String {
+    match &t.pattern {
+        TokenPattern::Literal(s) => {
+            // {:?} on &str gives `"..."` with `\\`, `\"`, `\n`, etc.
+            // already applied; strip the outer quotes and re-wrap in
+            // backticks for the user-visible form.
+            let escaped = format!("{:?}", s);
+            let inner = escaped
+                .strip_prefix('"')
+                .and_then(|s| s.strip_suffix('"'))
+                .unwrap_or(escaped.as_str());
+            format!("`{}`", inner)
+        }
+        _ => t.name.clone(),
+    }
+}
+
+/// Look up a kind id's display name in `st.tokens`. Returns `"EOF"`
+/// for kind 0 and `"?"` for unknown kinds; otherwise routes through
+/// [`token_display_name`].
+pub fn token_display_name_for_kind(st: &StateTable, kind: u16) -> String {
+    if kind == 0 {
+        return "EOF".to_string();
+    }
+    match st.tokens.iter().find(|t| t.kind == kind) {
+        Some(t) => token_display_name(t),
+        None => "?".to_string(),
+    }
+}
+
+/// Compose the user-facing `errorHere` argument for a list of token
+/// kinds: ``expected `{` | `[` | STRING | NUMBER | `true` | `false` | `null` ``
+/// for a multi-kind list, ``expected `>` `` for a singleton.
+pub fn expected_message(st: &StateTable, kinds: &[u16]) -> String {
+    let names: Vec<String> = kinds
+        .iter()
+        .map(|k| token_display_name_for_kind(st, *k))
+        .collect();
+    format!("expected {}", names.join(" | "))
+}
 
 /// Visit every sub-expression of `e` (pre-order). Used by backends that
 /// need to inspect every referenced token/rule in a rule body.

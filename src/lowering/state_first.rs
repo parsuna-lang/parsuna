@@ -257,7 +257,6 @@ mod tests {
                         Instr::Enter(0),
                         Instr::Expect {
                             kind: 7,
-                            token_name: "X".into(),
                             sync: 0,
                             label: None,
                         },
@@ -347,7 +346,6 @@ mod tests {
                 body: Body {
                     instrs: vec![Instr::Expect {
                         kind: 4,
-                        token_name: "Y".into(),
                         sync: 0,
                         label: None,
                     }],
@@ -364,7 +362,6 @@ mod tests {
                 body: Body {
                     instrs: vec![Instr::Expect {
                         kind: 9,
-                        token_name: "Z".into(),
                         sync: 0,
                         label: None,
                     }],

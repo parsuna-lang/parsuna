@@ -597,12 +597,7 @@ fn emit_instr(s: &mut String, st: &StateTable, op: &Instr, ind: &str) {
         Instr::Exit(k) => {
             writeln!(s, "{}@event = p.Exit({});", ind, rule_id(st, *k)).unwrap();
         }
-        Instr::Expect {
-            kind,
-            token_name,
-            sync,
-            label,
-        } => {
+        Instr::Expect { kind, sync, label } => {
             let label_arg = match label {
                 Some(id) => format!(
                     "(ushort)LabelKind.{}",
@@ -616,7 +611,7 @@ fn emit_instr(s: &mut String, st: &StateTable, op: &Instr, ind: &str) {
                 ind,
                 token_ushort(st, *kind),
                 sync,
-                token_name,
+                crate::codegen::common::token_display_name_for_kind(st, *kind),
                 label_arg,
             )
             .unwrap();
@@ -730,7 +725,7 @@ fn emit_dispatch_tree(
     }
 }
 
-fn emit_insertion(s: &mut String, ins: &Insertion, ind: &str) {
+fn emit_insertion(s: &mut String, st: &StateTable, ins: &Insertion, ind: &str) {
     let cond = ins
         .kinds_to_match
         .iter()
@@ -754,7 +749,7 @@ fn emit_insertion(s: &mut String, ins: &Insertion, ind: &str) {
     writeln!(
         s,
         "{inner}@event = p.ErrorHere(\"{}\");",
-        ins.expected_msg()
+        crate::codegen::common::expected_message(st, &ins.candidate_kinds)
     )
     .unwrap();
     writeln!(s, "{ind}}} else").unwrap();
@@ -781,7 +776,7 @@ fn emit_dispatch_leaf_block(
             if !insertions.is_empty() {
                 writeln!(s, "{ind}ushort look0 = p.Look(0).Kind;").unwrap();
                 for ins in insertions {
-                    emit_insertion(s, ins, ind);
+                    emit_insertion(s, st, ins, ind);
                 }
             }
             writeln!(s, "{ind}{{").unwrap();
