@@ -269,46 +269,21 @@ fn emit_first_pool(b: &mut SpanBuilder, st: &StateTable, id: u32) {
     b.punct("}");
 }
 
-/// Render one `Tail::Dispatch` insertion candidate as
-/// `recover <expected_msg> if {kinds…} -> <post_first>`. Emitted on its
-/// own indented line right after the `Dispatch sync=… cont=…` header,
-/// so a reader can see at a glance "if look[0] looks like one of
-/// these, the dispatch will treat the missing token as inserted
-/// instead of falling through to recover_to." The `expected_msg`
-/// already lists every arm whose insertion FIRST overlaps the kinds
-/// in this entry (a single dispatch arm if the lookahead is
-/// disambiguating, or multiple arms when the lookahead could route
-/// to any of them).
+/// Render one `Tail::Dispatch` insertion candidate as a `Recover`
+/// block: a header line `Recover expected={…} if={…}` followed by the
+/// indented post-first transition. Emitted right after the
+/// `Dispatch sync=… cont=…` header so a reader can see at a glance
+/// "if look[0] is in `if`, the dispatch will treat the missing token
+/// as inserted instead of falling through to recover_to." The
+/// `expected` set lists every dispatch arm's primary kind — the menu
+/// of alternatives the user could have typed at this position.
 fn emit_insertion(b: &mut SpanBuilder, st: &StateTable, ins: &Insertion, indent: &str) {
     b.plain(indent);
-    b.kw("recover");
+    b.kw("Recover");
     b.plain(" ");
-    b.kw("expected");
+    emit_attr_kind_set(b, st, "expected", &ins.candidate_kinds);
     b.plain(" ");
-    b.punct("{");
-    for (i, kind) in ins.candidate_kinds.iter().enumerate() {
-        if i > 0 {
-            b.plain(" ");
-            b.punct("|");
-            b.plain(" ");
-        }
-        emit_token_kind(b, st, *kind);
-    }
-    b.punct("}");
-    b.plain(" ");
-    b.kw("if");
-    b.plain(" ");
-    b.punct("{");
-    for (i, kind) in ins.kinds_to_match.iter().enumerate() {
-        if i > 0 {
-            b.punct(",");
-            b.plain(" ");
-        }
-        emit_token_kind(b, st, *kind);
-    }
-    b.punct("}");
-    b.plain(" ");
-    b.punct("->");
+    emit_attr_kind_set(b, st, "if", &ins.kinds_to_match);
     b.newline();
     let child_indent = format!("{}  ", indent);
     match &ins.post_first {
@@ -317,6 +292,7 @@ fn emit_insertion(b: &mut SpanBuilder, st: &StateTable, ins: &Insertion, indent:
             b.kw("Jump");
             b.plain(" ");
             emit_state_ref(b, st, *n);
+            b.newline();
         }
         PostFirst::PushRetAndJump { push, jump } => {
             b.plain(&child_indent);
@@ -328,13 +304,43 @@ fn emit_insertion(b: &mut SpanBuilder, st: &StateTable, ins: &Insertion, indent:
             b.kw("Jump");
             b.plain(" ");
             emit_state_ref(b, st, *jump);
+            b.newline();
         }
         PostFirst::Ret => {
             b.plain(&child_indent);
             b.kw("Ret");
+            b.newline();
         }
     }
-    b.newline();
+}
+
+/// Emit a `<name>={k1, k2, …}` attribute. Used for `expected=` / `if=`
+/// on `Recover` and `sync=` on `Expect` / `Dispatch`.
+fn emit_attr_kind_set(b: &mut SpanBuilder, st: &StateTable, name: &str, kinds: &[u16]) {
+    b.kw(name);
+    b.punct("=");
+    b.punct("{");
+    for (i, kind) in kinds.iter().enumerate() {
+        if i > 0 {
+            b.punct(",");
+            b.plain(" ");
+        }
+        emit_token_kind(b, st, *kind);
+    }
+    b.punct("}");
+}
+
+/// Emit the dispatch / star / opt continuation attribute. `Some(n)`
+/// renders as `cont=<state>`; `None` renders as `cont=tail`. Unifies
+/// the spelling across all three Tails so a reader doesn't have to
+/// switch between `cont=…` and a bare `tail` keyword.
+fn emit_cont_attr(b: &mut SpanBuilder, st: &StateTable, cont: Option<crate::lowering::StateId>) {
+    b.kw("cont");
+    b.punct("=");
+    match cont {
+        Some(n) => emit_state_ref(b, st, n),
+        None => b.kw("tail"),
+    }
 }
 
 fn emit_sync_set(b: &mut SpanBuilder, st: &StateTable, id: u32) {
@@ -439,6 +445,8 @@ fn emit_instr(b: &mut SpanBuilder, op: &Instr, st: &StateTable) {
         Instr::Expect { kind, sync, label } => {
             b.kw("Expect");
             b.plain(" ");
+            b.kw("kind");
+            b.punct("=");
             emit_token_kind(b, st, *kind);
             b.plain(" ");
             b.kw("sync");
@@ -482,20 +490,15 @@ fn emit_tail(b: &mut SpanBuilder, tail: &Tail, st: &StateTable, indent: &str) {
             b.plain(indent);
             b.kw("Star");
             b.plain(" ");
+            b.kw("first");
+            b.punct("=");
             emit_first_pool(b, st, *first);
             b.plain(" ");
             b.kw("head");
             b.punct("=");
             emit_state_ref(b, st, *head);
             b.plain(" ");
-            match cont {
-                Some(n) => {
-                    b.kw("cont");
-                    b.punct("=");
-                    emit_state_ref(b, st, *n);
-                }
-                None => b.kw("tail"),
-            }
+            emit_cont_attr(b, st, *cont);
             b.newline();
             let inner = format!("{}  ", indent);
             emit_body(b, body, st, &inner);
@@ -504,16 +507,11 @@ fn emit_tail(b: &mut SpanBuilder, tail: &Tail, st: &StateTable, indent: &str) {
             b.plain(indent);
             b.kw("Opt");
             b.plain(" ");
+            b.kw("first");
+            b.punct("=");
             emit_first_pool(b, st, *first);
             b.plain(" ");
-            match cont {
-                Some(n) => {
-                    b.kw("cont");
-                    b.punct("=");
-                    emit_state_ref(b, st, *n);
-                }
-                None => b.kw("tail"),
-            }
+            emit_cont_attr(b, st, *cont);
             b.newline();
             let inner = format!("{}  ", indent);
             emit_body(b, body, st, &inner);
@@ -531,14 +529,7 @@ fn emit_tail(b: &mut SpanBuilder, tail: &Tail, st: &StateTable, indent: &str) {
             b.punct("=");
             emit_sync_set(b, st, *sync);
             b.plain(" ");
-            match cont {
-                Some(n) => {
-                    b.kw("cont");
-                    b.punct("=");
-                    emit_state_ref(b, st, *n);
-                }
-                None => b.kw("tail"),
-            }
+            emit_cont_attr(b, st, *cont);
             b.newline();
             let inner = format!("{}  ", indent);
             for ins in insertions {
@@ -566,12 +557,17 @@ fn emit_dispatch_tree(b: &mut SpanBuilder, tree: &DispatchTree, st: &StateTable,
             arms,
             default,
         } => {
+            // `Switch look(N)` — block intro, body indented. Same
+            // shape as `Star`/`Opt`/`Dispatch`/`Recover`: header line
+            // with no trailing punctuation, indentation introduces
+            // the body.
             b.plain(indent);
+            b.kw("Switch");
+            b.plain(" ");
             b.kw("look");
             b.punct("(");
             b.num(depth.to_string());
             b.punct(")");
-            b.punct(":");
             b.newline();
             let child_indent = format!("{}  ", indent);
             for (kind, sub) in arms {
@@ -580,23 +576,27 @@ fn emit_dispatch_tree(b: &mut SpanBuilder, tree: &DispatchTree, st: &StateTable,
                         emit_dispatch_leaf(b, l, st, Some(*kind), &child_indent);
                     }
                     _ => {
+                        // Nested Switch (LL(>1) disambiguation):
+                        // emit `<KIND> ->` as a block intro, body is
+                        // the deeper sub-tree.
                         b.plain(&child_indent);
                         emit_token_kind(b, st, *kind);
-                        b.punct(":");
+                        b.plain(" ");
+                        b.punct("->");
                         b.newline();
                         emit_dispatch_tree(b, sub, st, &format!("{}  ", child_indent));
                     }
                 }
             }
-            // `else` arm.
-            b.plain(&child_indent);
-            b.kw("else");
-            b.plain(" ");
-            emit_dispatch_leaf_body(b, default, st, &child_indent);
+            // Default arm (`else`).
+            emit_dispatch_leaf(b, default, st, None, &child_indent);
         }
     }
 }
 
+/// Emit a single dispatch leaf indented at `indent`. `arm_kind = Some(k)`
+/// prefixes with `<KIND> ->`; `None` prefixes with `else ->` (the
+/// dispatch's default branch).
 fn emit_dispatch_leaf(
     b: &mut SpanBuilder,
     leaf: &DispatchLeaf,
@@ -605,35 +605,25 @@ fn emit_dispatch_leaf(
     indent: &str,
 ) {
     b.plain(indent);
-    if let Some(kind) = arm_kind {
-        emit_token_kind(b, st, kind);
-        b.plain(" ");
+    match arm_kind {
+        Some(kind) => emit_token_kind(b, st, kind),
+        None => b.kw("else"),
     }
-    emit_dispatch_leaf_body(b, leaf, st, indent);
-}
-
-fn emit_dispatch_leaf_body(
-    b: &mut SpanBuilder,
-    leaf: &DispatchLeaf,
-    st: &StateTable,
-    indent: &str,
-) {
+    b.plain(" ");
+    b.punct("->");
     match leaf {
         DispatchLeaf::Arm(body) => {
-            b.punct("->");
             b.newline();
             emit_body(b, body, st, &format!("{}  ", indent));
         }
         DispatchLeaf::Fallthrough => {
-            b.punct("->");
             b.plain(" ");
-            b.kw("fall");
+            b.kw("Fallthrough");
             b.newline();
         }
         DispatchLeaf::Error => {
-            b.punct("->");
             b.plain(" ");
-            b.kw("error");
+            b.kw("Error");
             b.newline();
         }
     }
