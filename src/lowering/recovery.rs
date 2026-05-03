@@ -229,6 +229,13 @@ fn collect_for_tree(
 /// current lookahead.
 fn partition(arms: &[ArmCandidate]) -> Vec<Insertion> {
     let candidate_kinds: Vec<u16> = arms.iter().map(|a| a.primary_kind).collect();
+    // Insertion only runs in the dispatch's `_ =>` default branch —
+    // any `look[0]` that *is* a primary kind has already been routed
+    // by the outer `match`. Dropping primary kinds from
+    // `kinds_to_match` keeps the codegen-emitted `if`-chain free of
+    // dead branches like `if look0 == LBRACE { … }` for a dispatch
+    // whose `LBRACE` arm already fires through the primary path.
+    let primary: BTreeSet<u16> = candidate_kinds.iter().copied().collect();
 
     // For each kind, list the indices of arms that cover it (in
     // declaration order — `arms` iterates in the dispatch's source
@@ -236,6 +243,9 @@ fn partition(arms: &[ArmCandidate]) -> Vec<Insertion> {
     let mut covers: BTreeMap<u16, Vec<usize>> = BTreeMap::new();
     for (idx, arm) in arms.iter().enumerate() {
         for k in &arm.kinds {
+            if primary.contains(k) {
+                continue;
+            }
             covers.entry(*k).or_default().push(idx);
         }
     }
